@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
 from core.utils.util import audio_to_data
-from core.handle.abortHandle import handleAbortMessage
+from core.handle.abortHandle import handleAbortMessage, cancelActiveLLMResponse
 from core.handle.intentHandler import handle_user_intent
 from core.utils.output_counter import check_device_output_limit
 from core.handle.sendAudioHandle import send_stt_message, SentenceType
@@ -119,6 +119,16 @@ async def startToChat(conn: "ConnectionHandler", text):
         )
         return
 
+    previous_sentence_id = conn.sentence_id
+    if conn.client_is_speaking and conn.client_listen_mode != "manual":
+        await handleAbortMessage(conn)
+    else:
+        conn.client_abort = True
+        await cancelActiveLLMResponse(conn, previous_sentence_id)
+    current_sentence_id = uuid.uuid4().hex
+    conn.sentence_id = current_sentence_id
+    conn.client_abort = False
+
     # 仅在该说话人首次出现时保留 {"speaker":...} JSON，让模型自然称呼一次；
     # 后续轮降为纯文本，避免每轮重复出现名字诱导模型反复称呼。
     if speaker_name:
@@ -138,10 +148,6 @@ async def startToChat(conn: "ConnectionHandler", text):
             await max_out_size(conn)
             return
 
-    # manual 模式下不打断正在播放的内容
-    if conn.client_is_speaking and conn.client_listen_mode != "manual":
-        await handleAbortMessage(conn)
-
     # 首先进行意图分析，使用实际文本内容
     intent_handled = await handle_user_intent(conn, actual_text)
 
@@ -154,10 +160,6 @@ async def startToChat(conn: "ConnectionHandler", text):
 
     # 在提交线程任务前分配轮次ID。这样即使旧任务稍后恢复执行，也能通过
     # sentence_id 不匹配识别自己已经失效，不能串入新轮次。
-    current_sentence_id = uuid.uuid4().hex
-    conn.sentence_id = current_sentence_id
-    conn.client_abort = False
-
     conn.executor.submit(conn.chat, actual_text, 0, current_sentence_id)
 
 

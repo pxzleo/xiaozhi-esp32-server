@@ -1,5 +1,7 @@
 import httpx
 import openai
+import threading
+import uuid
 from openai.types import CompletionUsage
 from config.logger import setup_logging
 from core.utils.util import check_model_key
@@ -70,6 +72,71 @@ class LLMProvider(LLMProviderBase):
         if model_key_msg:
             logger.bind(tag=TAG).error(model_key_msg)
         self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=custom_timeout)
+        self._active_streams = {}
+        self._active_streams_lock = threading.Lock()
+
+    def _register_stream(self, session_id, request_id, stream):
+        stream_key = (session_id, request_id)
+        with self._active_streams_lock:
+            if stream_key in self._active_streams:
+                raise RuntimeError(
+                    f"会话 {session_id} 的轮次 {request_id} 已有活动LLM流"
+                )
+            self._active_streams[stream_key] = stream
+
+    def _unregister_stream(self, session_id, request_id, stream):
+        stream_key = (session_id, request_id)
+        with self._active_streams_lock:
+            if self._active_streams.get(stream_key) is stream:
+                self._active_streams.pop(stream_key, None)
+
+    def _is_registered_stream(self, session_id, request_id, stream):
+        with self._active_streams_lock:
+            return self._active_streams.get((session_id, request_id)) is stream
+
+    def cancel_response(self, session_id, request_id=None):
+        """关闭指定会话、指定轮次或全部轮次的流式响应。"""
+        with self._active_streams_lock:
+            if request_id is None:
+                stream_items = [
+                    (stream_key, stream)
+                    for stream_key, stream in self._active_streams.items()
+                    if stream_key[0] == session_id
+                ]
+            else:
+                stream_key = (session_id, request_id)
+                stream = self._active_streams.get(stream_key)
+                stream_items = [(stream_key, stream)] if stream is not None else []
+        if not stream_items:
+            return False
+        close_succeeded = True
+        for stream_key, stream in stream_items:
+            _, active_request_id = stream_key
+            try:
+                stream.close()
+            except Exception as error:
+                close_succeeded = False
+                logger.bind(tag=TAG).error(
+                    f"关闭会话 {session_id} 轮次 {active_request_id} 的LLM流失败: {error}"
+                )
+                continue
+            with self._active_streams_lock:
+                if self._active_streams.get(stream_key) is stream:
+                    self._active_streams.pop(stream_key, None)
+        if close_succeeded:
+            logger.bind(tag=TAG).info(
+                f"已取消会话 {session_id} 的 {len(stream_items)} 个旧LLM流"
+            )
+        return close_succeeded
+
+    @staticmethod
+    def _close_stream(stream, session_id, request_id):
+        try:
+            stream.close()
+        except Exception as error:
+            logger.bind(tag=TAG).error(
+                f"清理会话 {session_id} 轮次 {request_id} 的LLM流失败: {error}"
+            )
 
     @staticmethod
     def normalize_dialogue(dialogue):
@@ -91,6 +158,11 @@ class LLMProvider(LLMProviderBase):
 
     def response(self, session_id, dialogue, **kwargs):
         dialogue = self.normalize_dialogue(dialogue)
+        should_cancel = kwargs.get("should_cancel")
+        request_id = kwargs.get("request_id") or uuid.uuid4().hex
+
+        if should_cancel and should_cancel():
+            return
 
         request_params = {
             "model": self.model_name,
@@ -115,10 +187,19 @@ class LLMProvider(LLMProviderBase):
         self._apply_thinking_disabled(request_params)
 
         responses = self.client.chat.completions.create(**request_params)
+        try:
+            self._register_stream(session_id, request_id, responses)
+        except Exception:
+            self._close_stream(responses, session_id, request_id)
+            raise
 
         is_active = True
-        try:            
+        try:
+            if should_cancel and should_cancel():
+                return
             for chunk in responses:
+                if should_cancel and should_cancel():
+                    break
                 try:
                     delta = chunk.choices[0].delta if getattr(chunk, "choices", None) else None
                     content = getattr(delta, "content", "") if delta else ""
@@ -133,11 +214,23 @@ class LLMProvider(LLMProviderBase):
                         content = content.split("</think>")[-1]
                     if is_active:
                         yield content
+        except Exception:
+            externally_cancelled = not self._is_registered_stream(
+                session_id, request_id, responses
+            )
+            if not externally_cancelled and not (should_cancel and should_cancel()):
+                raise
         finally:
-            responses.close()
+            self._unregister_stream(session_id, request_id, responses)
+            self._close_stream(responses, session_id, request_id)
 
     def response_with_functions(self, session_id, dialogue, functions=None, **kwargs):
         dialogue = self.normalize_dialogue(dialogue)
+        should_cancel = kwargs.get("should_cancel")
+        request_id = kwargs.get("request_id") or uuid.uuid4().hex
+
+        if should_cancel and should_cancel():
+            return
 
         request_params = {
             "model": self.model_name,
@@ -162,9 +255,18 @@ class LLMProvider(LLMProviderBase):
         self._apply_thinking_disabled(request_params)
 
         stream = self.client.chat.completions.create(**request_params)
+        try:
+            self._register_stream(session_id, request_id, stream)
+        except Exception:
+            self._close_stream(stream, session_id, request_id)
+            raise
 
         try:
+            if should_cancel and should_cancel():
+                return
             for chunk in stream:
+                if should_cancel and should_cancel():
+                    break
                 if getattr(chunk, "choices", None):
                     delta = chunk.choices[0].delta
                     content = getattr(delta, "content", "")
@@ -177,5 +279,12 @@ class LLMProvider(LLMProviderBase):
                         f"输出 {getattr(usage_info, 'completion_tokens', '未知')}，"
                         f"共计 {getattr(usage_info, 'total_tokens', '未知')}"
                     )
+        except Exception:
+            externally_cancelled = not self._is_registered_stream(
+                session_id, request_id, stream
+            )
+            if not externally_cancelled and not (should_cancel and should_cancel()):
+                raise
         finally:
-            stream.close()
+            self._unregister_stream(session_id, request_id, stream)
+            self._close_stream(stream, session_id, request_id)

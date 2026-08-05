@@ -1149,19 +1149,33 @@ class ConnectionHandler:
 
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
+                llm_kwargs = {}
+                if callable(getattr(self.llm, "cancel_response", None)):
+                    llm_kwargs["request_id"] = current_sentence_id
+                    llm_kwargs["should_cancel"] = (
+                        lambda: self._is_chat_turn_cancelled(current_sentence_id)
+                    )
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
                     self.dialogue.get_llm_dialogue_with_memory(
                         memory_str, self.config.get("voiceprint", {}), speaker_for_system
                     ),
                     functions=functions,
+                    **llm_kwargs,
                 )
             else:
+                llm_kwargs = {}
+                if callable(getattr(self.llm, "cancel_response", None)):
+                    llm_kwargs["request_id"] = current_sentence_id
+                    llm_kwargs["should_cancel"] = (
+                        lambda: self._is_chat_turn_cancelled(current_sentence_id)
+                    )
                 llm_responses = self.llm.response(
                     self.session_id,
                     self.dialogue.get_llm_dialogue_with_memory(
                         memory_str, self.config.get("voiceprint", {}), speaker_for_system
                     ),
+                    **llm_kwargs,
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
@@ -1608,6 +1622,11 @@ class ConnectionHandler:
 
     async def _close_resources(self, ws=None):
         try:
+            if self.stop_event:
+                self.stop_event.set()
+            from core.handle.abortHandle import cancelActiveLLMResponse
+
+            await cancelActiveLLMResponse(self, None)
             # 清理 VAD 连接资源
             if (
                     hasattr(self, "vad")

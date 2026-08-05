@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from core.connection import ConnectionHandler
 from core.handle import receiveAudioHandle
+from core.handle.abortHandle import handleAbortMessage
 from plugins_func.register import Action, ActionResponse
 
 
@@ -26,6 +27,34 @@ class _Dialogue:
 
 
 class ChatTurnIsolationTest(unittest.TestCase):
+    def test_abort_cancels_active_llm_response(self):
+        logger = Mock()
+        logger.bind.return_value = logger
+        llm = Mock()
+        websocket = type("WebSocket", (), {"send": AsyncMock()})()
+        conn = type(
+            "Conn",
+            (),
+            {
+                "logger": logger,
+                "llm": llm,
+                "websocket": websocket,
+                "session_id": "session-1",
+                "sentence_id": "turn-1",
+                "close_after_chat": True,
+                "client_abort": False,
+                "clear_queues": Mock(),
+                "clearSpeakStatus": Mock(),
+            },
+        )()
+
+        asyncio.run(handleAbortMessage(conn))
+
+        llm.cancel_response.assert_called_once_with("session-1", "turn-1")
+        self.assertTrue(conn.client_abort)
+        conn.clear_queues.assert_called_once_with()
+        conn.clearSpeakStatus.assert_called_once_with()
+
     def test_matching_tts_text_is_treated_as_echo_while_speaking(self):
         conn = type(
             "Conn",
@@ -162,6 +191,8 @@ class ChatTurnIsolationTest(unittest.TestCase):
                 "sentence_id": "old-turn",
                 "executor": executor,
                 "chat": Mock(),
+                "llm": Mock(),
+                "session_id": "session-1",
             },
         )()
 
@@ -179,6 +210,7 @@ class ChatTurnIsolationTest(unittest.TestCase):
         self.assertIs(submission[0], conn.chat)
         self.assertEqual(submission[1:3], ("你好", 0))
         self.assertEqual(submission[3], conn.sentence_id)
+        conn.llm.cancel_response.assert_called_once_with("session-1", "old-turn")
 
     def test_cancelled_tool_result_cannot_reenter_new_turn(self):
         conn = ConnectionHandler.__new__(ConnectionHandler)
