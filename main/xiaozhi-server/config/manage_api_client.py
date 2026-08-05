@@ -202,6 +202,7 @@ async def generate_and_save_chat_summary(session_id: str) -> Optional[Dict]:
         return await ManageApiClient._instance._execute_async_request(
             "POST",
             f"/agent/chat-summary/{session_id}/save",
+            timeout=120,
         )
     except Exception as e:
         print(f"生成并保存聊天记录总结失败: {e}")

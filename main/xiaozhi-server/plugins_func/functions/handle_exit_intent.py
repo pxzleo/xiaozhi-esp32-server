@@ -33,8 +33,8 @@ handle_exit_intent_function_desc = {
 def handle_exit_intent(conn: "ConnectionHandler", say_goodbye: str | None = None):
     # 处理退出意图
     try:
-        if say_goodbye is None:
-            say_goodbye = "再见，祝您生活愉快！"
+        # 语音设备退出时保持确定性，不接受模型生成的冗长告别语。
+        say_goodbye = "再见"
         if not conn.close_after_chat:
             conn.close_after_chat = True
         logger.bind(tag=TAG).info(f"退出意图已处理:{say_goodbye}")

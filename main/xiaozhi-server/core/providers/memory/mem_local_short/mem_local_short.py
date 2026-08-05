@@ -136,13 +136,17 @@ class MemoryProvider(MemoryProviderBase):
         # 打印使用的模型信息
         model_info = getattr(self.llm, "model_name", str(self.llm.__class__.__name__))
         logger.bind(tag=TAG).debug(f"使用记忆保存模型: {model_info}")
-        api_key = getattr(self.llm, "api_key", None)
-        memory_key_msg = check_model_key("记忆总结专用LLM", api_key)
-        if memory_key_msg:
-            logger.bind(tag=TAG).error(memory_key_msg)
         if self.llm is None:
             logger.bind(tag=TAG).error("LLM is not set for memory provider")
             return None
+
+        # API配置模式由 manager-api 使用智能体 SLM 总结，不会调用
+        # Python 端的占位 LLM，因此不应把占位 key 记为运行错误。
+        if self.save_to_file:
+            api_key = getattr(self.llm, "api_key", None)
+            memory_key_msg = check_model_key("记忆总结专用LLM", api_key)
+            if memory_key_msg:
+                logger.bind(tag=TAG).error(memory_key_msg)
 
         if len(msgs) < 2:
             return None

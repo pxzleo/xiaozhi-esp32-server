@@ -28,6 +28,10 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
         conn.tts.tts_audio_first_sentence = False
 
     if sentenceType == SentenceType.FIRST:
+        if text:
+            conn.last_tts_text = text
+            conn.last_tts_text_at = time.monotonic()
+            conn.recent_tts_texts.append((conn.last_tts_text_at, text))
         # 同一句子的后续消息加入流控队列，其他情况立即发送
         if (
             hasattr(conn, "audio_rate_controller")

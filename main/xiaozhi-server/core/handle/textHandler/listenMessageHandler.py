@@ -35,6 +35,13 @@ class ListenTextMessageHandler(TextMessageHandler):
         if msg_json["state"] == "start":
             # 设备从播放模式切回录音模式,清除所有音频状态和缓冲区
             conn.reset_audio_states()
+            # listen/start 表示设备已经可以接收用户语音。若继续保留唤醒忽略
+            # 状态，忽略计时会从第一包录音才开始，导致用户开头约2秒被丢弃。
+            if getattr(conn, "just_woken_up", False):
+                conn.just_woken_up = False
+                conn.logger.bind(tag=TAG).info(
+                    "客户端开始拾音，已结束唤醒音频忽略期"
+                )
         elif msg_json["state"] == "stop":
             # 收到stop但asr未初始化，跳过处理
             if conn.asr is None:

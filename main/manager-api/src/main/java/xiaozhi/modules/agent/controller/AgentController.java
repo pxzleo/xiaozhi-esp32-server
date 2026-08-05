@@ -147,25 +147,13 @@ public class AgentController {
     }
 
     @PostMapping("/chat-summary/{sessionId}/save")
-    @Operation(summary = "根据会话ID生成聊天记录总结并保存（异步执行）")
+    @Operation(summary = "根据会话ID生成聊天记录总结并保存")
     public Result<Void> generateAndSaveChatSummary(@PathVariable String sessionId) {
         requireSessionAgent(sessionId);
-        try {
-            // 异步执行总结生成任务，立即返回成功响应
-            new Thread(() -> {
-                try {
-                    agentChatSummaryService.generateAndSaveChatSummary(sessionId);
-                    System.out.println("异步执行会话 " + sessionId + " 的聊天记录总结完成");
-                } catch (Exception e) {
-                    System.err.println("异步执行会话 " + sessionId + " 的聊天记录总结失败: " + e.getMessage());
-                }
-            }).start();
-
-            // 立即返回成功响应，不等待总结生成完成
-            return new Result<Void>().ok(null);
-        } catch (Exception e) {
-            return new Result<Void>().error("启动异步总结生成任务失败: " + e.getMessage());
+        if (!agentChatSummaryService.generateAndSaveChatSummary(sessionId)) {
+            return new Result<Void>().error("生成或保存聊天记录总结失败");
         }
+        return new Result<Void>().ok(null);
     }
 
     @PostMapping("/chat-title/{sessionId}/generate")

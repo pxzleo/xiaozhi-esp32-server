@@ -92,6 +92,9 @@ class ConnectionHandler:
         self.session_id = str(uuid.uuid4())
         self.logger = setup_logging()
         self.server = server  # 保存server实例的引用
+        self._postprocessing_started = False
+        self._close_lock = asyncio.Lock()
+        self._closed = False
 
         self.need_bind = False  # 是否需要绑定设备
         self.bind_completed_event = asyncio.Event()
@@ -147,6 +150,7 @@ class ConnectionHandler:
         self.client_audio_buffer = bytearray()
         self.client_have_voice = False
         self.client_voice_window = deque(maxlen=5)
+        self.recent_tts_texts = deque(maxlen=8)
         self.first_activity_time = 0.0  # 记录首次活动的时间（毫秒）
         self.last_activity_time = 0.0  # 统一的活动时间戳（毫秒）
         self.vad_last_voice_time = 0.0  # 记录用户最后一次说话的时间（毫秒）
@@ -276,50 +280,60 @@ class ConnectionHandler:
                     )
 
     async def _save_and_close(self, ws):
-        """保存记忆并关闭连接"""
+        """关闭连接，并在设备空闲后串行生成标题和记忆。"""
         try:
-            # 守护线程1：独立生成标题（不依赖记忆模型）
-            if self.session_id:
-                def generate_title_task():
-                    try:
+            if self.session_id and not self._postprocessing_started:
+                self._postprocessing_started = True
+                session_id = self.session_id
+                dialogue_snapshot = list(self.dialogue.dialogue)
+                memory = self.memory
+                server = self.server
+
+                def postprocess_session():
+                    def run_tasks():
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
-                        loop.run_until_complete(
-                            generate_and_save_chat_title(self.session_id)
-                        )
-                    except Exception as e:
-                        self.logger.bind(tag=TAG).error(f"生成标题失败: {e}")
-                    finally:
                         try:
+                            try:
+                                loop.run_until_complete(
+                                    generate_and_save_chat_title(session_id)
+                                )
+                            except Exception as error:
+                                self.logger.bind(tag=TAG).error(
+                                    f"生成会话标题失败: {error}"
+                                )
+
+                            if memory:
+                                try:
+                                    loop.run_until_complete(
+                                        memory.save_memory(
+                                            dialogue_snapshot, session_id
+                                        )
+                                    )
+                                except Exception as error:
+                                    self.logger.bind(tag=TAG).error(
+                                        f"保存会话记忆失败: {error}"
+                                    )
+                        finally:
                             loop.close()
-                        except Exception:
-                            pass
 
-                threading.Thread(target=generate_title_task, daemon=True).start()
-
-            # 守护线程2：走老流程记忆保存（仅记忆，不含标题）
-            if self.memory:
-                # 使用线程池异步保存记忆
-                def save_memory_task():
                     try:
-                        # 创建新事件循环（避免与主循环冲突）
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(
-                            self.memory.save_memory(
-                                self.dialogue.dialogue, self.session_id
-                            )
+                        if server and hasattr(
+                            server, "run_postprocessing_when_idle"
+                        ):
+                            server.run_postprocessing_when_idle(run_tasks)
+                        else:
+                            run_tasks()
+                    except Exception as error:
+                        self.logger.bind(tag=TAG).error(
+                            f"会话后处理调度失败: {error}"
                         )
-                    except Exception as e:
-                        self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
-                    finally:
-                        try:
-                            loop.close()
-                        except Exception:
-                            pass
 
-                # 启动线程保存记忆，不等待完成
-                threading.Thread(target=save_memory_task, daemon=True).start()
+                threading.Thread(
+                    target=postprocess_session,
+                    daemon=True,
+                    name=f"session-postprocess-{session_id[:8]}",
+                ).start()
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
         finally:
@@ -712,7 +726,7 @@ class ConnectionHandler:
                 role="assistant",
                 tool_calls=[{
                     "id": tc_id,
-                    "function": {"arguments": '{"say_goodbye": "再见，下次再聊~"}', "name": "handle_exit_intent"},
+                    "function": {"arguments": '{"say_goodbye": "再见"}', "name": "handle_exit_intent"},
                     "type": "function", "index": 0,
                 }],
                 is_temporary=True,
@@ -722,7 +736,7 @@ class ConnectionHandler:
                 content="退出意图已处理", is_temporary=True,
             ))
             self.dialogue.put(Message(
-                role="assistant", content="再见，下次再聊~", is_temporary=True,
+                role="assistant", content="再见", is_temporary=True,
             ))
 
         self.logger.bind(tag=TAG).debug("已注入工具调用 few-shot 示例")
@@ -1031,17 +1045,39 @@ class ConnectionHandler:
         # 更新系统prompt至上下文
         self.dialogue.update_system_message(self.prompt)
 
-    def chat(self, query, depth=0):
-        # 保存当前任务的sentence_id到局部变量，避免被新任务覆盖
-        current_sentence_id = None
+    def _is_chat_turn_cancelled(self, current_sentence_id):
+        """轮次被打断或已被更新轮次替代时返回True。"""
+        return (
+            self.stop_event.is_set()
+            or self.client_abort
+            or not current_sentence_id
+            or self.sentence_id != current_sentence_id
+        )
+
+    def chat(self, query, depth=0, current_sentence_id=None):
+        if self.server and hasattr(self.server, "mark_model_request_started"):
+            self.server.mark_model_request_started()
+        try:
+            return self._chat_impl(query, depth, current_sentence_id)
+        finally:
+            if self.server and hasattr(self.server, "mark_model_request_finished"):
+                self.server.mark_model_request_finished()
+
+    def _chat_impl(self, query, depth=0, current_sentence_id=None):
+        # current_sentence_id 必须贯穿模型、工具和递归回复，不能在递归时读取
+        # 可能已经被新一轮覆盖的共享 self.sentence_id。
 
         if query is not None:
             self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
-            current_sentence_id = str(uuid.uuid4().hex)
-            self.sentence_id = current_sentence_id  # 更新共享属性
+            if current_sentence_id is None:
+                current_sentence_id = uuid.uuid4().hex
+                self.sentence_id = current_sentence_id
+                self.client_abort = False
+            elif self.sentence_id != current_sentence_id:
+                return None
             self.dialogue.put(Message(role="user", content=query))
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
@@ -1051,8 +1087,12 @@ class ConnectionHandler:
                 )
             )
         else:
-            # 递归调用时，使用当前的sentence_id
-            current_sentence_id = self.sentence_id
+            if current_sentence_id is None:
+                self.logger.bind(tag=TAG).error("工具递归调用缺少原始轮次ID")
+                return None
+
+        if self._is_chat_turn_cancelled(current_sentence_id):
+            return None
 
         # 设置最大递归深度，避免无限循环，可根据实际需求调整
         MAX_DEPTH = 5
@@ -1096,6 +1136,8 @@ class ConnectionHandler:
                     self.memory.query_memory(query), self.loop
                 )
                 memory_str = future.result()
+                if self._is_chat_turn_cancelled(current_sentence_id):
+                    return None
 
             # 仅在该说话人首次出现时把身份注入 system，之后靠对话历史首轮保留，
             # 避免每轮在 system 重复出现名字诱导模型反复称呼
@@ -1133,7 +1175,7 @@ class ConnectionHandler:
         emotion_flag = True
         try:
             for response in llm_responses:
-                if self.client_abort:
+                if self._is_chat_turn_cancelled(current_sentence_id):
                     break
                 if self.intent_type == "function_call" and functions is not None:
                     content, tools_call = response
@@ -1216,6 +1258,10 @@ class ConnectionHandler:
                     )
                 )
             return
+
+        if self._is_chat_turn_cancelled(current_sentence_id):
+            return None
+
         # 处理function call
         if tool_call_flag:
             bHasError = False
@@ -1291,6 +1337,8 @@ class ConnectionHandler:
                     tool_calls_list = real_tool_calls
 
             if not bHasError and len(tool_calls_list) > 0:
+                if self._is_chat_turn_cancelled(current_sentence_id):
+                    return None
                 self.logger.bind(tag=TAG).debug(
                     f"检测到 {len(tool_calls_list)} 个工具调用"
                 )
@@ -1347,10 +1395,19 @@ class ConnectionHandler:
                         enqueue_tool_report(self, tool_call_data['name'], tool_input, str(e), report_tool_call=False)
 
                 # 统一处理工具调用结果
-                if tool_results:
-                    self._handle_function_result(tool_results, depth=depth, streamed_text=streamed_text)
+                if tool_results and not self._is_chat_turn_cancelled(
+                    current_sentence_id
+                ):
+                    self._handle_function_result(
+                        tool_results,
+                        depth=depth,
+                        streamed_text=streamed_text,
+                        current_sentence_id=current_sentence_id,
+                    )
 
         # 存储对话内容
+        if self._is_chat_turn_cancelled(current_sentence_id):
+            return None
         if len(response_message) > 0:
             text_buff = "".join(response_message)
             self.tts.store_tts_text(current_sentence_id, text_buff)
@@ -1373,7 +1430,16 @@ class ConnectionHandler:
 
         return True
 
-    def _handle_function_result(self, tool_results, depth, streamed_text=""):
+    def _handle_function_result(
+        self,
+        tool_results,
+        depth,
+        streamed_text="",
+        current_sentence_id=None,
+    ):
+        if self._is_chat_turn_cancelled(current_sentence_id):
+            return
+
         need_llm_tools = []
         record_tools = []
 
@@ -1389,8 +1455,13 @@ class ConnectionHandler:
                         f"Skipping duplicate TTS for tool {tool_call_data['name']}, already streamed"
                     )
                 else:
-                    self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=text)
-                    self.tts.store_tts_text(self.sentence_id, text)
+                    self.tts.tts_one_sentence(
+                        self,
+                        ContentType.TEXT,
+                        content_detail=text,
+                        sentence_id=current_sentence_id,
+                    )
+                    self.tts.store_tts_text(current_sentence_id, text)
                 self.dialogue.put(Message(role="assistant", content=text))
             elif result.action == Action.REQLLM:
                 need_llm_tools.append((result, tool_call_data))
@@ -1446,6 +1517,8 @@ class ConnectionHandler:
                 self.dialogue.put(Message(role="assistant", content="，".join(response_parts)))
 
         if need_llm_tools:
+            if self._is_chat_turn_cancelled(current_sentence_id):
+                return
             all_tool_calls = [
                 {
                     "id": tool_call_data["id"],
@@ -1479,7 +1552,11 @@ class ConnectionHandler:
                         )
                     )
 
-            self.chat(None, depth=depth + 1)
+            self.chat(
+                None,
+                depth=depth + 1,
+                current_sentence_id=current_sentence_id,
+            )
 
     def _report_worker(self):
         """聊天记录上报工作线程"""
@@ -1521,6 +1598,15 @@ class ConnectionHandler:
 
     async def close(self, ws=None):
         """资源清理方法"""
+        if not hasattr(self, "_close_lock"):
+            self._close_lock = asyncio.Lock()
+        async with self._close_lock:
+            if getattr(self, "_closed", False):
+                return
+            if await self._close_resources(ws):
+                self._closed = True
+
+    async def _close_resources(self, ws=None):
         try:
             # 清理 VAD 连接资源
             if (
@@ -1631,8 +1717,10 @@ class ConnectionHandler:
                     )
                 self.executor = None
             self.logger.bind(tag=TAG).info("连接资源已释放")
+            return True
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"关闭连接时出错: {e}")
+            return False
         finally:
             # 确保停止事件被设置
             if self.stop_event:

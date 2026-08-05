@@ -48,6 +48,7 @@ class LLMProvider(LLMProviderBase):
             "temperature": lambda x: round(float(x), 1),
             "top_p": lambda x: round(float(x), 1),
             "frequency_penalty": lambda x: round(float(x), 1),
+            "reasoning_effort": str,
         }
 
         for param, converter in param_defaults.items():
@@ -103,6 +104,7 @@ class LLMProvider(LLMProviderBase):
             "temperature": kwargs.get("temperature", self.temperature),
             "top_p": kwargs.get("top_p", self.top_p),
             "frequency_penalty": kwargs.get("frequency_penalty", self.frequency_penalty),
+            "reasoning_effort": kwargs.get("reasoning_effort", self.reasoning_effort),
         }
 
         for key, value in optional_params.items():
@@ -149,6 +151,7 @@ class LLMProvider(LLMProviderBase):
             "temperature": kwargs.get("temperature", self.temperature),
             "top_p": kwargs.get("top_p", self.top_p),
             "frequency_penalty": kwargs.get("frequency_penalty", self.frequency_penalty),
+            "reasoning_effort": kwargs.get("reasoning_effort", self.reasoning_effort),
         }
 
         for key, value in optional_params.items():

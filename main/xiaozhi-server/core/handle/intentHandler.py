@@ -58,7 +58,29 @@ async def check_direct_exit(conn: "ConnectionHandler", text):
         if text == cmd:
             conn.logger.bind(tag=TAG).info(f"识别到明确的退出命令: {text}")
             await send_stt_message(conn, text)
-            await conn.close()
+            sentence_id = uuid.uuid4().hex
+            conn.sentence_id = sentence_id
+            conn.close_after_chat = True
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(
+                    sentence_id=sentence_id,
+                    sentence_type=SentenceType.FIRST,
+                    content_type=ContentType.ACTION,
+                )
+            )
+            conn.tts.tts_one_sentence(
+                conn,
+                ContentType.TEXT,
+                content_detail="再见",
+                sentence_id=sentence_id,
+            )
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(
+                    sentence_id=sentence_id,
+                    sentence_type=SentenceType.LAST,
+                    content_type=ContentType.ACTION,
+                )
+            )
             return True
     return False
 

@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import threading
+import time
 
 import websockets
 from config.logger import setup_logging
@@ -67,6 +69,46 @@ class WebSocketServer:
         secret_key = self.config["server"]["auth_key"]
         expire_seconds = auth_config.get("expire_seconds", None)
         self.auth = AuthManager(secret_key=secret_key, expire_seconds=expire_seconds)
+        self._initialize_model_activity_tracking()
+
+    def _initialize_model_activity_tracking(self):
+        self._model_activity_lock = threading.Lock()
+        self._model_gate = threading.RLock()
+        self._postprocess_lock = threading.Lock()
+        self._active_model_requests = 0
+        self._model_idle = threading.Event()
+        self._model_idle.set()
+
+    def mark_model_request_started(self):
+        self._model_gate.acquire()
+        with self._model_activity_lock:
+            self._active_model_requests += 1
+            self._model_idle.clear()
+
+    def mark_model_request_finished(self):
+        try:
+            with self._model_activity_lock:
+                self._active_model_requests = max(0, self._active_model_requests - 1)
+                if self._active_model_requests == 0:
+                    self._model_idle.set()
+        finally:
+            self._model_gate.release()
+
+    def wait_for_idle_window(self, quiet_seconds=15):
+        """等待设备连续空闲一段时间，避免总结任务与实时对话抢占模型。"""
+        while True:
+            self._model_idle.wait()
+            time.sleep(quiet_seconds)
+            if self._model_idle.is_set():
+                return
+
+    def run_postprocessing_when_idle(self, callback, quiet_seconds=15):
+        """串行所有会话后处理，并在模型连续空闲后才开始。"""
+        with self._postprocess_lock:
+            self.wait_for_idle_window(quiet_seconds=quiet_seconds)
+            # 与实时对话共用同一把门锁，消除空闲检查后的竞态窗口。
+            with self._model_gate:
+                return callback()
 
     async def start(self):
         server_config = self.config["server"]

@@ -1,6 +1,9 @@
 import time
 import json
+import uuid
 import asyncio
+import re
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -12,6 +15,51 @@ from core.utils.output_counter import check_device_output_limit
 from core.handle.sendAudioHandle import send_stt_message, SentenceType
 
 TAG = __name__
+TTS_ECHO_HISTORY_TTL_SECONDS = 15.0
+TTS_ECHO_SIMILARITY_THRESHOLD = 0.72
+
+
+def _normalize_echo_text(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_\u4e00-\u9fff]", "", value).lower()
+
+
+def is_likely_tts_echo(conn: "ConnectionHandler", text: str) -> bool:
+    """仅过滤正在播报内容的高相似回声，保留用户主动插话。"""
+    if not conn.client_is_speaking:
+        return False
+
+    normalized_input = _normalize_echo_text(text)
+    if len(normalized_input) < 4:
+        return False
+
+    now = time.monotonic()
+    history = getattr(conn, "recent_tts_texts", None)
+    if history is None:
+        last_tts_text = getattr(conn, "last_tts_text", "")
+        last_tts_text_at = getattr(conn, "last_tts_text_at", None)
+        recent_tts_texts = [
+            last_tts_text
+        ] if last_tts_text and (
+            last_tts_text_at is None
+            or now - last_tts_text_at <= TTS_ECHO_HISTORY_TTL_SECONDS
+        ) else []
+    else:
+        recent_tts_texts = [
+            tts_text
+            for recorded_at, tts_text in history
+            if now - recorded_at <= TTS_ECHO_HISTORY_TTL_SECONDS
+        ]
+
+    for tts_text in recent_tts_texts:
+        normalized_tts = _normalize_echo_text(tts_text)
+        if len(normalized_tts) < 4:
+            continue
+        if (
+            SequenceMatcher(None, normalized_input, normalized_tts).ratio()
+            >= TTS_ECHO_SIMILARITY_THRESHOLD
+        ):
+            return True
+    return False
 
 
 async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
@@ -44,36 +92,43 @@ async def startToChat(conn: "ConnectionHandler", text):
     # 检查输入是否是JSON格式（包含说话人信息）
     speaker_name = None
     actual_text = text
+    actual_content = None
+    echo_text = text
 
     try:
         # 尝试解析JSON格式的输入
         if text.strip().startswith("{") and text.strip().endswith("}"):
             data = json.loads(text)
+            if "content" in data:
+                echo_text = data["content"]
             if "speaker" in data and "content" in data:
                 speaker_name = data["speaker"]
                 actual_content = data["content"]
                 conn.logger.bind(tag=TAG).info(f"解析到说话人信息: {speaker_name}")
-
-                # 仅在该说话人首次出现时保留 {"speaker":...} JSON，让模型自然称呼一次；
-                # 后续轮降为纯文本，避免每轮重复出现名字诱导模型反复称呼
-                if speaker_name not in conn.introduced_speakers:
-                    conn.introduced_speakers.add(speaker_name)
-                    actual_text = text
-                else:
-                    actual_text = actual_content
     except (json.JSONDecodeError, KeyError):
         # 如果解析失败，继续使用原始文本
         pass
 
-    # 保存说话人信息到连接对象
-    if speaker_name:
-        conn.current_speaker = speaker_name
-    else:
-        conn.current_speaker = None
-
     if conn.need_bind:
         await check_bind_device(conn)
         return
+
+    if is_likely_tts_echo(conn, echo_text):
+        conn.logger.bind(tag=TAG).info(
+            f"忽略与当前播报高度相似的ASR回声: {echo_text}"
+        )
+        return
+
+    # 仅在该说话人首次出现时保留 {"speaker":...} JSON，让模型自然称呼一次；
+    # 后续轮降为纯文本，避免每轮重复出现名字诱导模型反复称呼。
+    if speaker_name:
+        if speaker_name not in conn.introduced_speakers:
+            conn.introduced_speakers.add(speaker_name)
+        else:
+            actual_text = actual_content
+        conn.current_speaker = speaker_name
+    else:
+        conn.current_speaker = None
 
     # 如果当日的输出字数大于限定的字数
     if conn.max_output_size > 0:
@@ -97,10 +152,13 @@ async def startToChat(conn: "ConnectionHandler", text):
     # 意图未被处理，继续常规聊天流程，使用实际文本内容
     await send_stt_message(conn, actual_text)
 
-    # 准备开始新会话
+    # 在提交线程任务前分配轮次ID。这样即使旧任务稍后恢复执行，也能通过
+    # sentence_id 不匹配识别自己已经失效，不能串入新轮次。
+    current_sentence_id = uuid.uuid4().hex
+    conn.sentence_id = current_sentence_id
     conn.client_abort = False
 
-    conn.executor.submit(conn.chat, actual_text)
+    conn.executor.submit(conn.chat, actual_text, 0, current_sentence_id)
 
 
 async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):

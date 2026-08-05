@@ -605,10 +605,10 @@ ASR:
 VAD:
   SileroVAD:
     type: silero
-    threshold: 0.5
-    threshold_low: 0.3
+    threshold: 0.38
+    threshold_low: 0.25
     model_dir: models/snakers4_silero-vad
-    min_silence_duration_ms: 200  # 如果说话停顿比较长，可以把这个值设置大一些
+    min_silence_duration_ms: 700  # 避免普通语句内停顿被切成多轮并误触发打断
 
 LLM:
   # 所有openai类型均可以修改超参，以AliLLM为例
