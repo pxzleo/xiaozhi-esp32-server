@@ -8,6 +8,14 @@ if TYPE_CHECKING:
 from ..base import ToolType, ToolDefinition, ToolExecutor
 from plugins_func.register import all_function_registry, Action, ActionResponse
 
+MUSIC_FUNCTIONS = {"play_music", "play_netease_music", "hass_play_music"}
+
+
+def validate_mutually_exclusive_music_functions(functions):
+    selected = MUSIC_FUNCTIONS.intersection(functions)
+    if len(selected) > 1:
+        raise ValueError("服务器音乐、网易云音乐和HomeAssistant音乐只能启用一个")
+
 
 class ServerPluginExecutor(ToolExecutor):
     """服务端插件工具执行器"""
@@ -72,6 +80,8 @@ class ServerPluginExecutor(ToolExecutor):
                 config_functions = list(config_functions)
             except TypeError:
                 config_functions = []
+
+        validate_mutually_exclusive_music_functions(config_functions)
 
         # 合并所有需要的函数
         all_required_functions = list(set(necessary_functions + config_functions))

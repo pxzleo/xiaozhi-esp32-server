@@ -65,6 +65,11 @@ import xiaozhi.modules.timbre.service.TimbreService;
 @Service
 @AllArgsConstructor
 public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> implements AgentService {
+    private static final List<String> MUTUALLY_EXCLUSIVE_MUSIC_PLUGINS = List.of(
+            "SYSTEM_PLUGIN_MUSIC",
+            "SYSTEM_PLUGIN_NETEASE_MUSIC",
+            "SYSTEM_PLUGIN_HA_PLAY_MUSIC");
+
     private final AgentDao agentDao;
     private final AgentTagDao agentTagDao;
     private final TimbreService timbreModelService;
@@ -448,6 +453,7 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
         // 更新函数插件信息
         List<AgentUpdateDTO.FunctionInfo> functions = dto.getFunctions();
         if (functions != null) {
+            validateMutuallyExclusiveMusicPlugins(functions);
             // 1. 收集本次提交的 pluginId
             List<String> newPluginIds = functions.stream()
                     .map(AgentUpdateDTO.FunctionInfo::getPluginId)
@@ -691,6 +697,17 @@ public class AgentServiceImpl extends BaseServiceImpl<AgentDao, AgentEntity> imp
         agentPluginMappingService.saveBatch(toInsert, IRepository.DEFAULT_BATCH_SIZE);
         agentSnapshotService.createSnapshot(entity.getId(), "initial");
         return entity.getId();
+    }
+
+    static void validateMutuallyExclusiveMusicPlugins(List<AgentUpdateDTO.FunctionInfo> functions) {
+        long selectedMusicPluginCount = functions.stream()
+                .map(AgentUpdateDTO.FunctionInfo::getPluginId)
+                .filter(MUTUALLY_EXCLUSIVE_MUSIC_PLUGINS::contains)
+                .distinct()
+                .count();
+        if (selectedMusicPluginCount > 1) {
+            throw new RenException("服务器音乐、网易云音乐和HomeAssistant音乐只能选择一个");
+        }
     }
 
     private String defaultIfBlank(String value, String defaultValue) {

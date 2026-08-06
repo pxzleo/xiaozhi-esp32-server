@@ -553,20 +553,25 @@ class TTSProviderBase(ABC):
             tts_file: 音频文件路径
             callback: 文件处理函数
         """
-        if tts_file.endswith(".p3"):
-            p3.decode_opus_from_file_stream(tts_file, callback=callback)
-        elif self.conn.audio_format == "pcm":
-            self.audio_to_pcm_data_stream(tts_file, callback=callback)
-        else:
-            self.audio_to_opus_data_stream(tts_file, callback=callback)
+        try:
+            if tts_file.endswith(".p3"):
+                p3.decode_opus_from_file_stream(tts_file, callback=callback)
+            elif self.conn.audio_format == "pcm":
+                self.audio_to_pcm_data_stream(tts_file, callback=callback)
+            else:
+                self.audio_to_opus_data_stream(tts_file, callback=callback)
 
-        if (
-            self.delete_audio_file
-            and tts_file is not None
-            and os.path.exists(tts_file)
-            and tts_file.startswith(self.output_file)
-        ):
-            os.remove(tts_file)
+            if (
+                self.delete_audio_file
+                and tts_file is not None
+                and os.path.exists(tts_file)
+                and tts_file.startswith(self.output_file)
+            ):
+                os.remove(tts_file)
+        finally:
+            from plugins_func.functions.play_netease_music import release_cache_file
+
+            release_cache_file(tts_file)
 
     def _process_before_stop_play_files(self):
         for audio_datas, text in self.before_stop_play_files:

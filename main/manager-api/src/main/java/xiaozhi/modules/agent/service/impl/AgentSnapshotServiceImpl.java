@@ -167,6 +167,8 @@ public class AgentSnapshotServiceImpl extends BaseServiceImpl<AgentSnapshotDao, 
         }
         AgentSnapshotDataDTO restoreData = preserveCurrentSensitiveValues(data, currentData);
         validateSensitiveRestoreIsReversible(currentData, restoreData);
+        AgentServiceImpl.validateMutuallyExclusiveMusicPlugins(
+                nullToEmpty(restoreData.getFunctions()));
         List<String> requestedChangedFields = getChangedFields(currentData, restoreData);
         if (requestedChangedFields.isEmpty()) {
             return;

@@ -162,6 +162,17 @@ plugins:
       - ".wav"
       - ".p3"
     refresh_time: 300 # 刷新音乐列表的时间间隔，单位为秒
+  # 网易云音乐播放，需要自行部署 NeteaseCloudMusicApiEnhanced。
+  # 未配置 cookie 时仅播放公开且无需会员的歌曲；cookie 由管理端扫码登录自动填写。
+  play_netease_music:
+    api_base_url: "http://127.0.0.1:3000"
+    cookie: ""
+    quality: "standard"
+    max_tracks: 20
+    prepare_timeout_seconds: 20
+    cache_dir: "data/netease_music_cache"
+    cache_size_mb: 512
+    cache_ttl_hours: 24
   search_from_ragflow:
     # 知识库的描述信息，方便大语言模型知道什么时候调用
     description: "当用户问xxx时，调用本方法，使用知识库中的信息回答问题"
@@ -283,9 +294,9 @@ Intent:
       # - search_from_ragflow
       # - get_news_from_chinanews
       - get_news_from_newsnow
-      # play_music是服务器自带的音乐播放，hass_play_music是通过home assistant控制的独立外部程序音乐播放
-      # 如果用了hass_play_music，就不要开启play_music，两者只留一个
+      # play_music、play_netease_music、hass_play_music 是三种音乐来源，只能开启一个
       - play_music
+      #- play_netease_music
       #- hass_get_state
       #- hass_set_state
       #- hass_play_music

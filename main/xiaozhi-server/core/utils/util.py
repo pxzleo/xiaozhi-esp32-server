@@ -488,6 +488,7 @@ def filter_sensitive_info(config: dict) -> dict:
         "access_token",
         "token",
         "secret",
+        "cookie",
         "access_key_secret",
         "secret_key",
     ]

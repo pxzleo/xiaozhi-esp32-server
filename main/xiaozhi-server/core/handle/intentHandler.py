@@ -15,6 +15,11 @@ from core.utils.util import remove_punctuation_and_length
 from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType
 
 TAG = __name__
+SERVER_AUDIO_PLAYBACK_FUNCTIONS = {"play_music", "play_netease_music"}
+
+
+def handles_own_audio_response(function_name):
+    return function_name in SERVER_AUDIO_PLAYBACK_FUNCTIONS
 
 
 async def handle_user_intent(conn: "ConnectionHandler", text):
@@ -234,7 +239,7 @@ async def process_intent_result(
                         text = result.response if result.response else result.result
                         if text is not None:
                             speak_txt(conn, text)
-                    elif function_name != "play_music":
+                    elif not handles_own_audio_response(function_name):
                         # For backward compatibility with original code
                         # 获取当前最新的文本索引
                         text = result.response
