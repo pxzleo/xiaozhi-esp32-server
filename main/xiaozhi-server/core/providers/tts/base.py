@@ -17,7 +17,7 @@ from core.utils import opus_encoder_utils
 from core.utils.tts import MarkdownCleaner, convert_percentage_to_range
 from core.utils.output_counter import add_device_output
 from core.handle.reportHandle import enqueue_tts_report
-from core.handle.sendAudioHandle import sendAudioMessage
+from core.handle.sendAudioHandle import sendAudioMessage, _wait_for_audio_completion
 from core.utils.util import audio_bytes_to_data_stream, audio_to_data_stream
 from core.providers.tts.dto.dto import (
     TTSMessageDTO,
@@ -280,6 +280,7 @@ class TTSProviderBase(ABC):
         content_detail=None,
         content_file=None,
         sentence_id=None,
+        completion_event=None,
     ):
         """发送一句话"""
         if not sentence_id:
@@ -290,7 +291,7 @@ class TTSProviderBase(ABC):
                 conn.sentence_id = sentence_id
         # 对于单句的文本，进行分段处理
         segments = re.split(r"([。！？!?；;\n])", content_detail)
-        for seg in segments:
+        for index, seg in enumerate(segments):
             self.tts_text_queue.put(
                 TTSMessageDTO(
                     sentence_id=sentence_id,
@@ -298,6 +299,9 @@ class TTSProviderBase(ABC):
                     content_type=content_type,
                     content_detail=seg,
                     content_file=content_file,
+                    completion_event=(
+                        completion_event if index == len(segments) - 1 else None
+                    ),
                 )
             )
 
@@ -399,6 +403,16 @@ class TTSProviderBase(ABC):
                     self.tts_audio_queue.put(
                         (message.sentence_type, [], message.content_detail, message.sentence_id)
                     )
+                if message.completion_event:
+                    self.tts_audio_queue.put(
+                        (
+                            SentenceType.MIDDLE,
+                            [],
+                            None,
+                            message.sentence_id,
+                            message.completion_event,
+                        )
+                    )
 
             except queue.Empty:
                 continue
@@ -417,7 +431,10 @@ class TTSProviderBase(ABC):
             try:
                 try:
                     item = self.tts_audio_queue.get(timeout=0.1)
-                    if len(item) == 4:
+                    completion_event = None
+                    if len(item) == 5:
+                        sentence_type, audio_datas, text, sentence_id, completion_event = item
+                    elif len(item) == 4:
                         sentence_type, audio_datas, text, sentence_id = item
                     else:
                         sentence_type, audio_datas, text = item
@@ -460,6 +477,14 @@ class TTSProviderBase(ABC):
                     self.conn.loop,
                 )
                 future.result()
+
+                if completion_event:
+                    completion_future = asyncio.run_coroutine_threadsafe(
+                        _wait_for_audio_completion(self.conn),
+                        self.conn.loop,
+                    )
+                    completion_future.result()
+                    completion_event.set()
 
                 # 记录输出和报告
                 if self.conn.max_output_size > 0 and text:

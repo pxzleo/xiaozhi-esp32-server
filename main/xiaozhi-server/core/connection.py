@@ -75,6 +75,25 @@ DIRECT_ANSWER_TOOL = {
     },
 }
 
+TOOL_CALL_NOTICES = {
+    "web_search": "我去搜索一下。",
+    "search_from_ragflow": "我去查一下资料。",
+}
+
+
+def get_tool_call_notice(tool_calls):
+    """返回工具执行前播报的简短提示。"""
+    tool_names = [
+        tool_call.get("name")
+        for tool_call in tool_calls
+        if tool_call.get("name") and tool_call.get("name") != "direct_answer"
+    ]
+    if not tool_names:
+        return None
+    if len(tool_names) == 1:
+        return TOOL_CALL_NOTICES.get(tool_names[0], "我来处理一下。")
+    return "我来处理一下。"
+
 
 class ConnectionHandler:
     def __init__(
@@ -1356,6 +1375,24 @@ class ConnectionHandler:
                 self.logger.bind(tag=TAG).debug(
                     f"检测到 {len(tool_calls_list)} 个工具调用"
                 )
+
+                tool_call_notice = get_tool_call_notice(tool_calls_list)
+                if tool_call_notice:
+                    notice_played = threading.Event()
+                    self.tts.tts_one_sentence(
+                        self,
+                        ContentType.TEXT,
+                        content_detail=tool_call_notice,
+                        sentence_id=current_sentence_id,
+                        completion_event=notice_played,
+                    )
+                    notice_timeout = self.tts.tts_timeout + 5
+                    if not notice_played.wait(timeout=notice_timeout):
+                        raise TTSException(
+                            f"工具调用前提示播放超时，等待了 {notice_timeout} 秒"
+                        )
+                    if self._is_chat_turn_cancelled(current_sentence_id):
+                        return None
 
                 # LLM 流式阶段已播报过的文本
                 streamed_text = ""

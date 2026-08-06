@@ -4,7 +4,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from core.connection import ConnectionHandler
+from core.connection import ConnectionHandler, get_tool_call_notice
 from core.handle import receiveAudioHandle
 from core.handle.abortHandle import handleAbortMessage
 from plugins_func.register import Action, ActionResponse
@@ -27,6 +27,21 @@ class _Dialogue:
 
 
 class ChatTurnIsolationTest(unittest.TestCase):
+    def test_tool_call_notice_describes_search(self):
+        self.assertEqual(
+            get_tool_call_notice([{"name": "web_search"}]),
+            "我去搜索一下。",
+        )
+
+    def test_tool_call_notice_uses_generic_text_for_other_tools(self):
+        self.assertEqual(
+            get_tool_call_notice([{"name": "get_weather"}]),
+            "我来处理一下。",
+        )
+
+    def test_direct_answer_does_not_have_tool_notice(self):
+        self.assertIsNone(get_tool_call_notice([{"name": "direct_answer"}]))
+
     def test_abort_cancels_active_llm_response(self):
         logger = Mock()
         logger.bind.return_value = logger

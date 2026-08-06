@@ -64,6 +64,16 @@ class TTSProvider(TTSProviderBase):
                 if message.sentence_type == SentenceType.LAST:
                     # 处理剩余的文本
                     self._process_remaining_text_stream(True)
+                if message.completion_event:
+                    self.tts_audio_queue.put(
+                        (
+                            SentenceType.MIDDLE,
+                            [],
+                            None,
+                            message.sentence_id,
+                            message.completion_event,
+                        )
+                    )
 
             except queue.Empty:
                 continue
