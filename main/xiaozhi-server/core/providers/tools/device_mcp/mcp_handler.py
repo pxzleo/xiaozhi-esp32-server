@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 TAG = __name__
 logger = setup_logging()
 SCHEDULE_TRIGGERED_METHOD = "notifications/schedule/triggered"
+PROACTIVE_TTS_READY_TIMEOUT_SECONDS = 2
+DEVICE_REMINDER_TTS_WAIT_SECONDS = 15
 _LOCAL_DATETIME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
 
 
@@ -352,41 +354,131 @@ async def _handle_schedule_triggered_notification(
 async def _speak_proactive_notification(
     conn, text, notification_name, notification_state=None
 ):
-    if notification_state is not None:
-        received_sentence_id, received_abort_generation = notification_state
-        if (
-            conn.sentence_id != received_sentence_id
-            or getattr(conn, "abort_generation", 0) != received_abort_generation
-        ):
-            logger.bind(tag=TAG).info(
-                f"{notification_name}通知在处理前被新的对话轮次替代"
-            )
-            return
+    if not _connection_is_active(conn):
+        logger.bind(tag=TAG).info(f"{notification_name}通知因连接关闭而取消")
+        return
+    if notification_state is None:
+        notification_state = (
+            conn.sentence_id,
+            getattr(conn, "abort_generation", 0),
+        )
+    if not _notification_state_is_current(conn, notification_state):
+        logger.bind(tag=TAG).info(
+            f"{notification_name}通知在处理前被新的对话轮次替代"
+        )
+        return
+
+    tts = await _wait_for_proactive_tts(conn, notification_name)
+    if tts is None:
+        return
+    if not _connection_is_active(conn):
+        logger.bind(tag=TAG).info(f"{notification_name}通知在等待TTS时因连接关闭而取消")
+        return
+    if not _notification_state_is_current(conn, notification_state):
+        logger.bind(tag=TAG).info(
+            f"{notification_name}通知在等待TTS时被新的对话轮次替代"
+        )
+        return
+
     previous_sentence_id = conn.sentence_id
     sentence_id = uuid.uuid4().hex
     # 设备触发提醒前会先发 abort；该状态只属于旧轮次。
     conn.client_abort = False
     conn.sentence_id = sentence_id
     await cancelActiveLLMResponse(conn, previous_sentence_id)
+    if not _connection_is_active(conn):
+        logger.bind(tag=TAG).info(f"{notification_name}通知在取消旧轮次时因连接关闭而取消")
+        return
     if conn.sentence_id != sentence_id or conn.client_abort:
         logger.bind(tag=TAG).info(f"{notification_name}通知被新的对话轮次替代")
         return
-    conn.tts.store_tts_text(sentence_id, text)
-    conn.tts.tts_text_queue.put(TTSMessageDTO(
+    tts.store_tts_text(sentence_id, text)
+    tts.tts_text_queue.put(TTSMessageDTO(
         sentence_id=sentence_id,
         sentence_type=SentenceType.FIRST,
         content_type=ContentType.ACTION,
     ))
-    conn.tts.tts_one_sentence(
+    tts.tts_one_sentence(
         conn, ContentType.TEXT, content_detail=text, sentence_id=sentence_id
     )
-    conn.tts.tts_text_queue.put(TTSMessageDTO(
+    tts.tts_text_queue.put(TTSMessageDTO(
         sentence_id=sentence_id,
         sentence_type=SentenceType.LAST,
         content_type=ContentType.ACTION,
     ))
     conn.dialogue.put(Message(role="assistant", content=text))
     logger.bind(tag=TAG).info(f"已处理{notification_name}语音通知")
+
+
+def _notification_state_is_current(conn, notification_state):
+    received_sentence_id, received_abort_generation = notification_state
+    return (
+        conn.sentence_id == received_sentence_id
+        and getattr(conn, "abort_generation", 0) == received_abort_generation
+    )
+
+
+def _connection_is_active(conn):
+    connection_state = vars(conn)
+    if connection_state.get("_closed", False):
+        return False
+    stop_event = connection_state.get("stop_event")
+    return stop_event is None or not stop_event.is_set()
+
+
+async def _wait_for_proactive_tts(conn, notification_name):
+    connection_state = vars(conn)
+    tts_ready_event = connection_state.get("tts_ready_event")
+    if tts_ready_event is None:
+        tts = getattr(conn, "tts", None)
+        if tts is None:
+            logger.bind(tag=TAG).error(f"{notification_name}通知无法播报：TTS未初始化")
+        return tts
+
+    connection_closed_event = connection_state.get("connection_closed_event")
+    if connection_closed_event is None:
+        try:
+            await asyncio.wait_for(
+                tts_ready_event.wait(),
+                timeout=PROACTIVE_TTS_READY_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.bind(tag=TAG).error(
+                f"{notification_name}通知等待TTS就绪超时"
+            )
+            return None
+    else:
+        ready_task = asyncio.create_task(tts_ready_event.wait())
+        closed_task = asyncio.create_task(connection_closed_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {ready_task, closed_task},
+                timeout=PROACTIVE_TTS_READY_TIMEOUT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if closed_task in done:
+                logger.bind(tag=TAG).info(
+                    f"{notification_name}通知因连接关闭而取消"
+                )
+                return None
+            if ready_task not in done:
+                logger.bind(tag=TAG).error(
+                    f"{notification_name}通知等待TTS就绪超时"
+                )
+                return None
+        finally:
+            for task in (ready_task, closed_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                ready_task, closed_task, return_exceptions=True
+            )
+
+    tts = getattr(conn, "tts", None)
+    if tts is None:
+        logger.bind(tag=TAG).error(f"{notification_name}通知无法播报：TTS就绪状态无效")
+        return None
+    return tts
 
 
 async def send_mcp_initialize_message(conn: "ConnectionHandler"):

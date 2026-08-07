@@ -13,6 +13,7 @@ from core.providers.tts.dto.dto import SentenceType, ContentType, InterfaceType
 
 TAG = __name__
 logger = setup_logging()
+INDEX_STREAM_REQUEST_TIMEOUT_SECONDS = 10
 
 
 class TTSProvider(TTSProviderBase):
@@ -182,7 +183,11 @@ class TTSProvider(TTSProviderBase):
         )  # 16-bit = 2 bytes
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(self.api_url, json=payload, timeout=10) as resp:
+                async with session.post(
+                    self.api_url,
+                    json=payload,
+                    timeout=INDEX_STREAM_REQUEST_TIMEOUT_SECONDS,
+                ) as resp:
 
                     if resp.status != 200:
                         logger.bind(tag=TAG).error(

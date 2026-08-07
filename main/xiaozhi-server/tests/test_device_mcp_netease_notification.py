@@ -1,9 +1,11 @@
 import asyncio
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from core.handle import receiveAudioHandle
+from core.connection import ConnectionHandler
 from core.handle.textHandler.mcpMessageHandler import McpTextMessageHandler
 from core.providers.tools.device_mcp.mcp_executor import DeviceMCPExecutor
 from core.providers.tools.device_mcp.mcp_handler import MCPClient, handle_mcp_message
@@ -155,6 +157,169 @@ class ScheduleMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
         cancel.assert_awaited_once_with(conn, "old-turn")
         conn.dialogue.put.assert_called_once()
         conn.llm.assert_not_called()
+
+    async def test_reconnected_reminder_waits_for_delayed_tts_initialization(self):
+        tts_ready = asyncio.Event()
+        conn = SimpleNamespace(
+            sentence_id="old-turn",
+            abort_generation=1,
+            client_abort=False,
+            tts=None,
+            tts_ready_event=tts_ready,
+            dialogue=Mock(),
+        )
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ):
+            notification = asyncio.create_task(
+                handle_mcp_message(conn, Mock(), self._valid_payload())
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(notification.done())
+            conn.tts = Mock()
+            tts_ready.set()
+            await notification
+
+        conn.tts.tts_one_sentence.assert_called_once()
+        conn.dialogue.put.assert_called_once()
+
+    async def test_new_turn_wins_while_reminder_waits_for_tts(self):
+        tts_ready = asyncio.Event()
+        conn = SimpleNamespace(
+            sentence_id="old-turn",
+            abort_generation=1,
+            client_abort=False,
+            tts=None,
+            tts_ready_event=tts_ready,
+            dialogue=Mock(),
+        )
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ) as cancel:
+            notification = asyncio.create_task(
+                handle_mcp_message(conn, Mock(), self._valid_payload())
+            )
+            await asyncio.sleep(0)
+            conn.sentence_id = "new-user-turn"
+            conn.tts = Mock()
+            tts_ready.set()
+            await notification
+
+        cancel.assert_not_awaited()
+        conn.tts.tts_one_sentence.assert_not_called()
+        conn.dialogue.put.assert_not_called()
+
+    async def test_reminder_tts_ready_timeout_is_logged_without_speaking(self):
+        conn = SimpleNamespace(
+            sentence_id="old-turn",
+            abort_generation=1,
+            client_abort=False,
+            tts=None,
+            tts_ready_event=asyncio.Event(),
+            dialogue=Mock(),
+        )
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.PROACTIVE_TTS_READY_TIMEOUT_SECONDS",
+            0.01,
+            create=True,
+        ), patch(
+            "core.providers.tools.device_mcp.mcp_handler.logger"
+        ) as test_logger:
+            await handle_mcp_message(conn, Mock(), self._valid_payload())
+
+        self.assertEqual("old-turn", conn.sentence_id)
+        conn.dialogue.put.assert_not_called()
+        logged_values = " ".join(str(call) for call in test_logger.mock_calls)
+        self.assertIn("TTS", logged_values)
+        self.assertIn("超时", logged_values)
+
+    async def test_reminder_ready_wait_fits_device_delivery_window(self):
+        from core.handle.abortHandle import LLM_CANCEL_TIMEOUT_SECONDS
+        from core.providers.tts.index_stream import INDEX_STREAM_REQUEST_TIMEOUT_SECONDS
+        from core.providers.tools.device_mcp import mcp_handler
+
+        self.assertEqual(2, mcp_handler.PROACTIVE_TTS_READY_TIMEOUT_SECONDS)
+        self.assertLess(
+            mcp_handler.PROACTIVE_TTS_READY_TIMEOUT_SECONDS
+            + LLM_CANCEL_TIMEOUT_SECONDS
+            + INDEX_STREAM_REQUEST_TIMEOUT_SECONDS,
+            mcp_handler.DEVICE_REMINDER_TTS_WAIT_SECONDS,
+        )
+
+    async def test_connection_close_while_waiting_for_tts_discards_reminder(self):
+        tts_ready = asyncio.Event()
+        stop_event = threading.Event()
+        conn = SimpleNamespace(
+            sentence_id="old-turn",
+            abort_generation=1,
+            client_abort=False,
+            tts=None,
+            tts_ready_event=tts_ready,
+            dialogue=Mock(),
+            stop_event=stop_event,
+            _closed=False,
+            connection_closed_event=asyncio.Event(),
+        )
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.logger"
+        ) as test_logger:
+            notification = asyncio.create_task(
+                handle_mcp_message(conn, Mock(), self._valid_payload())
+            )
+            await asyncio.sleep(0)
+            stop_event.set()
+            conn._closed = True
+            conn.connection_closed_event.set()
+            await asyncio.wait_for(notification, timeout=0.1)
+
+        conn.dialogue.put.assert_not_called()
+        logged_values = " ".join(str(call) for call in test_logger.mock_calls)
+        self.assertIn("连接关闭", logged_values)
+        self.assertNotIn("超时", logged_values)
+
+    async def test_connection_close_during_old_turn_cancel_discards_reminder(self):
+        stop_event = threading.Event()
+        conn = SimpleNamespace(
+            sentence_id="old-turn",
+            abort_generation=1,
+            client_abort=False,
+            tts=Mock(),
+            dialogue=Mock(),
+            stop_event=stop_event,
+            _closed=False,
+        )
+
+        async def close_during_cancel(_conn, _old_id):
+            stop_event.set()
+            conn._closed = True
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(side_effect=close_during_cancel),
+        ):
+            await handle_mcp_message(conn, Mock(), self._valid_payload())
+
+        conn.tts.tts_one_sentence.assert_not_called()
+        conn.dialogue.put.assert_not_called()
+
+    async def test_tts_ready_event_is_set_after_audio_channels_open(self):
+        conn = ConnectionHandler.__new__(ConnectionHandler)
+        conn.tts = Mock()
+        conn.tts.open_audio_channels = AsyncMock()
+        conn.tts_ready_event = asyncio.Event()
+        conn.connection_closed_event = asyncio.Event()
+        conn.stop_event = threading.Event()
+
+        await conn._open_tts_channels()
+
+        conn.tts.open_audio_channels.assert_awaited_once_with(conn)
+        self.assertTrue(conn.tts_ready_event.is_set())
 
     async def test_rejects_every_invalid_contract_field(self):
         invalid_payloads = [
@@ -372,6 +537,25 @@ class ScheduleMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
         conn.tts.tts_one_sentence.assert_not_called()
         logged_values = " ".join(str(call) for call in test_logger.mock_calls)
         self.assertNotIn(secret, logged_values)
+
+    async def test_background_notification_exception_is_logged(self):
+        conn = SimpleNamespace(
+            sentence_id="old-turn",
+            abort_generation=1,
+            mcp_client=Mock(),
+            logger=Mock(),
+        )
+
+        with patch(
+            "core.handle.textHandler.mcpMessageHandler.handle_mcp_message",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            await McpTextMessageHandler().handle(
+                conn, {"payload": self._valid_payload()}
+            )
+            await asyncio.sleep(0)
+
+        conn.logger.bind.return_value.error.assert_called_once()
 
     async def test_schedule_description_reaches_main_llm_unchanged(self):
         description = (

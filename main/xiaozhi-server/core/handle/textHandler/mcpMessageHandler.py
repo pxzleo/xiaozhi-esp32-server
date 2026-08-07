@@ -7,6 +7,26 @@ from core.handle.textMessageHandler import TextMessageHandler
 from core.handle.textMessageType import TextMessageType
 from core.providers.tools.device_mcp import handle_mcp_message
 
+TAG = __name__
+
+
+async def _handle_mcp_message_background(
+    conn, payload, notification_state
+) -> None:
+    try:
+        await handle_mcp_message(
+            conn,
+            conn.mcp_client,
+            payload,
+            notification_state=notification_state,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        conn.logger.bind(tag=TAG).error(
+            f"MCP后台消息处理失败: {type(error).__name__}"
+        )
+
 
 class McpTextMessageHandler(TextMessageHandler):
     """MCP消息处理器"""
@@ -26,10 +46,9 @@ class McpTextMessageHandler(TextMessageHandler):
                     getattr(conn, "abort_generation", 0),
                 )
             asyncio.create_task(
-                handle_mcp_message(
+                _handle_mcp_message_background(
                     conn,
-                    conn.mcp_client,
                     payload,
-                    notification_state=notification_state,
+                    notification_state,
                 )
             )

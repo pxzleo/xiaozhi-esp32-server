@@ -109,9 +109,12 @@ class ConnectionHandler:
         self._postprocessing_started = False
         self._close_lock = asyncio.Lock()
         self._closed = False
+        self.connection_closed_event = asyncio.Event()
+        self._tts_channels_future = None
 
         self.need_bind = False  # 是否需要绑定设备
         self.bind_completed_event = asyncio.Event()
+        self.tts_ready_event = asyncio.Event()
         self.bind_code = None  # 绑定设备的验证码
         self.last_bind_prompt_time = 0  # 上次播放绑定提示的时间戳(秒)
         self.bind_prompt_interval = 60  # 绑定提示播放间隔(秒)
@@ -633,8 +636,11 @@ class ConnectionHandler:
             if self.tts is None:
                 self.tts = self._initialize_tts()
             # 打开语音合成通道
-            asyncio.run_coroutine_threadsafe(
-                self.tts.open_audio_channels(self), self.loop
+            self._tts_channels_future = asyncio.run_coroutine_threadsafe(
+                self._open_tts_channels(), self.loop
+            )
+            self._tts_channels_future.add_done_callback(
+                self._handle_tts_channels_done
             )
             if self.need_bind:
                 self.bind_completed_event.set()
@@ -680,6 +686,33 @@ class ConnectionHandler:
 
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
+
+    async def _open_tts_channels(self):
+        """打开当前连接的 TTS 通道，并在真正可消费队列后标记就绪。"""
+        if self.connection_closed_event.is_set() or self.stop_event.is_set():
+            return False
+        try:
+            await self.tts.open_audio_channels(self)
+        except Exception as error:
+            self.logger.bind(tag=TAG).error(
+                f"TTS通道初始化失败: {type(error).__name__}"
+            )
+            return False
+        if self.connection_closed_event.is_set() or self.stop_event.is_set():
+            return False
+        self.tts_ready_event.set()
+        return True
+
+    def _handle_tts_channels_done(self, future):
+        """消费跨线程 TTS 初始化结果，避免后台异常静默丢失。"""
+        if future.cancelled():
+            return
+        try:
+            future.result()
+        except Exception as error:
+            self.logger.bind(tag=TAG).error(
+                f"TTS通道后台初始化任务失败: {type(error).__name__}"
+            )
 
     def _init_prompt_enhancement(self):
 
@@ -1668,6 +1701,8 @@ class ConnectionHandler:
 
     async def close(self, ws=None):
         """资源清理方法"""
+        if hasattr(self, "connection_closed_event"):
+            self.connection_closed_event.set()
         if not hasattr(self, "_close_lock"):
             self._close_lock = asyncio.Lock()
         async with self._close_lock:
@@ -1678,6 +1713,10 @@ class ConnectionHandler:
 
     async def _close_resources(self, ws=None):
         try:
+            tts_channels_future = getattr(self, "_tts_channels_future", None)
+            if tts_channels_future is not None and not tts_channels_future.done():
+                tts_channels_future.cancel()
+            self._tts_channels_future = None
             if self.stop_event:
                 self.stop_event.set()
             from plugins_func.functions.play_netease_music import (
