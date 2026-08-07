@@ -329,10 +329,16 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
     flow_control["sequence"] = sequence + 1
 
 
-async def send_tts_message(conn: "ConnectionHandler", state, text=None):
+async def send_tts_message(
+    conn: "ConnectionHandler", state, text=None, expected_generation=None
+):
     """发送 TTS 状态消息"""
     if text is None and state == "sentence_start":
         return
+    control_generation = None
+    if state == "start":
+        control_generation = getattr(conn, "tts_control_generation", 0) + 1
+        conn.tts_control_generation = control_generation
     message = {"type": "tts", "state": state, "session_id": conn.session_id}
     if text is not None:
         message["text"] = textUtils.check_emoji(text)
@@ -354,7 +360,12 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
 
         # 检查是否是当前轮次
         if current_sentence_id != conn.sentence_id:
-            return
+            return False
+        if (
+            expected_generation is not None
+            and getattr(conn, "tts_control_generation", 0) != expected_generation
+        ):
+            return False
 
         # 停止音频发送循环（仅在流控器已初始化时调用）
         if hasattr(conn, "audio_rate_controller") and conn.audio_rate_controller:
@@ -363,6 +374,7 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
 
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))
+    return control_generation if state == "start" else True
 
 
 async def send_stt_message(conn: "ConnectionHandler", text):

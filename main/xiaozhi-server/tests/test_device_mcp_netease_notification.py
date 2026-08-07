@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 import unittest
 from types import SimpleNamespace
@@ -6,7 +7,9 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from core.handle import receiveAudioHandle
 from core.connection import ConnectionHandler
+from core.handle.sendAudioHandle import sendAudioMessage, send_tts_message
 from core.handle.textHandler.mcpMessageHandler import McpTextMessageHandler
+from core.providers.tts.dto.dto import SentenceType
 from core.providers.tools.device_mcp.mcp_executor import DeviceMCPExecutor
 from core.providers.tools.device_mcp.mcp_handler import MCPClient, handle_mcp_message
 from plugins_func.register import Action
@@ -30,6 +33,9 @@ class NeteaseMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
         conn = Mock()
         conn.sentence_id = "old-turn"
         conn.client_abort = False
+        conn.tts_control_generation = 0
+        conn.session_id = "netease-session"
+        conn.websocket.send = AsyncMock()
         payload = {
             "jsonrpc": "2.0",
             "method": "notifications/netease_music/status",
@@ -91,6 +97,9 @@ class NeteaseMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
         conn = Mock()
         conn.sentence_id = "old-turn"
         conn.client_abort = False
+        conn.tts_control_generation = 0
+        conn.session_id = "reminder-session"
+        conn.websocket.send = AsyncMock()
         payload = {
             "method": "notifications/netease_music/status",
             "params": {"message": "网易云音乐登录成功。", "speak": True},
@@ -132,6 +141,9 @@ class ScheduleMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
         conn = Mock()
         conn.sentence_id = "old-turn"
         conn.client_abort = False
+        conn.tts_control_generation = 0
+        conn.session_id = "reminder-session"
+        conn.websocket.send = AsyncMock()
 
         with patch(
             "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
@@ -162,6 +174,9 @@ class ScheduleMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
         conn = Mock()
         conn.sentence_id = "old-turn"
         conn.client_abort = False
+        conn.tts_control_generation = 0
+        conn.session_id = "alarm-session"
+        conn.websocket.send = AsyncMock()
 
         with patch(
             "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
@@ -178,6 +193,254 @@ class ScheduleMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
         conn.tts.tts_one_sentence.assert_called_once()
         conn.dialogue.put.assert_called_once()
 
+    async def test_alarm_websocket_order_starts_before_text_audio_and_stop(self):
+        tts = SimpleNamespace(
+            store_tts_text=Mock(),
+            tts_text_queue=Mock(),
+            tts_one_sentence=Mock(),
+            tts_audio_first_sentence=False,
+        )
+        conn = SimpleNamespace(
+            sentence_id="old-turn",
+            abort_generation=1,
+            client_abort=False,
+            client_is_speaking=False,
+            tts=tts,
+            websocket=SimpleNamespace(send=AsyncMock()),
+            session_id="alarm-session",
+            dialogue=Mock(),
+            config={"tts_audio_send_delay": -1},
+            recent_tts_texts=[],
+            calling=False,
+            close_after_chat=False,
+            conn_from_mqtt_gateway=False,
+            clearSpeakStatus=Mock(),
+            logger=Mock(),
+        )
+        conn.clearSpeakStatus = Mock(
+            side_effect=lambda: setattr(conn, "client_is_speaking", False)
+        )
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ), patch(
+            "core.handle.sendAudioHandle._wait_for_audio_completion",
+            new=AsyncMock(),
+        ):
+            await handle_mcp_message(
+                conn,
+                Mock(),
+                self._valid_payload(kind="alarm", label="起床"),
+            )
+            self.assertTrue(conn.client_is_speaking)
+            await sendAudioMessage(
+                conn,
+                SentenceType.FIRST,
+                [b"opus-frame"],
+                "闹铃时间到了：起床",
+                sentence_id=conn.sentence_id,
+            )
+            await sendAudioMessage(
+                conn,
+                SentenceType.LAST,
+                [],
+                None,
+                sentence_id=conn.sentence_id,
+            )
+
+        sent = [call.args[0] for call in conn.websocket.send.await_args_list]
+        self.assertEqual("start", json.loads(sent[0])["state"])
+        self.assertEqual("sentence_start", json.loads(sent[1])["state"])
+        self.assertEqual(b"opus-frame", sent[2])
+        self.assertEqual("stop", json.loads(sent[3])["state"])
+        self.assertFalse(conn.client_is_speaking)
+
+    async def test_abort_during_start_send_prevents_proactive_tts_enqueue(self):
+        tts = SimpleNamespace(
+            store_tts_text=Mock(),
+            tts_text_queue=Mock(),
+            tts_one_sentence=Mock(),
+        )
+        conn = SimpleNamespace(
+            sentence_id="old-turn",
+            abort_generation=1,
+            client_abort=False,
+            client_is_speaking=False,
+            tts=tts,
+            session_id="abort-during-start",
+            dialogue=Mock(),
+            clearSpeakStatus=Mock(),
+            config={},
+        )
+
+        async def abort_while_sending_start(_message):
+            conn.abort_generation += 1
+            conn.client_abort = True
+
+        conn.websocket = SimpleNamespace(
+            send=AsyncMock(side_effect=abort_while_sending_start)
+        )
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ):
+            await handle_mcp_message(
+                conn,
+                Mock(),
+                self._valid_payload(kind="alarm", label="起床"),
+            )
+
+        self.assertFalse(conn.client_is_speaking)
+        tts.store_tts_text.assert_not_called()
+        tts.tts_one_sentence.assert_not_called()
+        states = [
+            json.loads(call.args[0])["state"]
+            for call in conn.websocket.send.await_args_list
+        ]
+        self.assertEqual(["start", "stop"], states)
+
+    async def test_enqueue_failure_after_start_sends_stop_and_clears_state(self):
+        tts = SimpleNamespace(
+            store_tts_text=Mock(side_effect=RuntimeError("queue failed")),
+            tts_text_queue=Mock(),
+            tts_one_sentence=Mock(),
+        )
+        conn = SimpleNamespace(
+            sentence_id="old-turn",
+            abort_generation=1,
+            client_abort=False,
+            client_is_speaking=False,
+            tts=tts,
+            websocket=SimpleNamespace(send=AsyncMock()),
+            session_id="enqueue-failure",
+            dialogue=Mock(),
+            config={},
+        )
+        conn.clearSpeakStatus = Mock(
+            side_effect=lambda: setattr(conn, "client_is_speaking", False)
+        )
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "queue failed"):
+                await handle_mcp_message(
+                    conn,
+                    Mock(),
+                    self._valid_payload(kind="alarm", label="起床"),
+                )
+
+        states = [
+            json.loads(call.args[0])["state"]
+            for call in conn.websocket.send.await_args_list
+        ]
+        self.assertEqual(["start", "stop"], states)
+        self.assertFalse(conn.client_is_speaking)
+
+    async def test_superseded_cleanup_does_not_stop_new_tts_owner(self):
+        tts = SimpleNamespace(
+            store_tts_text=Mock(),
+            tts_text_queue=Mock(),
+            tts_one_sentence=Mock(),
+        )
+        conn = SimpleNamespace(
+            sentence_id="old-turn",
+            abort_generation=1,
+            client_abort=False,
+            client_is_speaking=False,
+            tts=tts,
+            session_id="generation-race",
+            dialogue=Mock(),
+            config={},
+            clearSpeakStatus=Mock(),
+        )
+        send_count = 0
+
+        async def replace_during_old_start(_message):
+            nonlocal send_count
+            send_count += 1
+            if send_count == 1:
+                conn.sentence_id = "new-user-turn"
+                conn.abort_generation += 1
+                conn.client_abort = True
+
+        conn.websocket = SimpleNamespace(
+            send=AsyncMock(side_effect=replace_during_old_start)
+        )
+
+        async def new_owner_starts_while_old_stop_waits(_conn):
+            conn.client_abort = False
+            await send_tts_message(conn, "start")
+            conn.client_is_speaking = True
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ), patch(
+            "core.handle.sendAudioHandle._wait_for_audio_completion",
+            new=AsyncMock(side_effect=new_owner_starts_while_old_stop_waits),
+        ):
+            await handle_mcp_message(
+                conn,
+                Mock(),
+                self._valid_payload(kind="alarm", label="起床"),
+            )
+
+        states = [
+            json.loads(call.args[0])["state"]
+            for call in conn.websocket.send.await_args_list
+        ]
+        self.assertEqual(["start", "start"], states)
+        self.assertTrue(conn.client_is_speaking)
+        tts.tts_one_sentence.assert_not_called()
+
+    async def test_failure_cleanup_does_not_clear_same_sentence_new_owner(self):
+        tts = SimpleNamespace(
+            store_tts_text=Mock(side_effect=RuntimeError("queue failed")),
+            tts_text_queue=Mock(),
+            tts_one_sentence=Mock(),
+        )
+        conn = SimpleNamespace(
+            sentence_id="old-turn",
+            abort_generation=1,
+            client_abort=False,
+            client_is_speaking=False,
+            tts=tts,
+            websocket=SimpleNamespace(send=AsyncMock()),
+            session_id="same-sentence-generation-race",
+            dialogue=Mock(),
+            config={},
+            clearSpeakStatus=Mock(),
+        )
+
+        async def same_sentence_new_owner_starts(_conn):
+            await send_tts_message(conn, "start")
+            conn.client_is_speaking = True
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ), patch(
+            "core.handle.sendAudioHandle._wait_for_audio_completion",
+            new=AsyncMock(side_effect=same_sentence_new_owner_starts),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "queue failed"):
+                await handle_mcp_message(
+                    conn,
+                    Mock(),
+                    self._valid_payload(kind="alarm", label="起床"),
+                )
+
+        states = [
+            json.loads(call.args[0])["state"]
+            for call in conn.websocket.send.await_args_list
+        ]
+        self.assertEqual(["start", "start"], states)
+        self.assertTrue(conn.client_is_speaking)
+
     async def test_reconnected_reminder_waits_for_delayed_tts_initialization(self):
         tts_ready = asyncio.Event()
         conn = SimpleNamespace(
@@ -187,6 +450,8 @@ class ScheduleMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
             tts=None,
             tts_ready_event=tts_ready,
             dialogue=Mock(),
+            session_id="reconnect-session",
+            websocket=SimpleNamespace(send=AsyncMock()),
         )
 
         with patch(
@@ -394,6 +659,9 @@ class ScheduleMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
         conn = Mock()
         conn.sentence_id = "old-turn"
         conn.client_abort = True
+        conn.tts_control_generation = 0
+        conn.session_id = "old-abort-session"
+        conn.websocket.send = AsyncMock()
 
         with patch(
             "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",

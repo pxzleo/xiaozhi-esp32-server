@@ -135,6 +135,7 @@ class ConnectionHandler:
         # 客户端状态相关
         self.client_abort = False
         self.client_is_speaking = False
+        self.tts_control_generation = 0
         self.client_listen_mode = "auto"
         self.client_aec = False  # 是否启用了服务端AEC
 

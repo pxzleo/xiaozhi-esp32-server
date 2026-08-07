@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from config.logger import setup_logging
 from core.handle.abortHandle import cancelActiveLLMResponse
+from core.handle.sendAudioHandle import send_tts_message
 from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
 from core.utils.dialogue import Message
 from core.utils.auth import AuthToken
@@ -393,23 +394,42 @@ async def _speak_proactive_notification(
     if not _connection_is_active(conn):
         logger.bind(tag=TAG).info(f"{notification_name}通知在取消旧轮次时因连接关闭而取消")
         return
-    if conn.sentence_id != sentence_id or conn.client_abort:
+    if not _proactive_sentence_is_current(conn, sentence_id, notification_state):
         logger.bind(tag=TAG).info(f"{notification_name}通知被新的对话轮次替代")
         return
-    tts.store_tts_text(sentence_id, text)
-    tts.tts_text_queue.put(TTSMessageDTO(
-        sentence_id=sentence_id,
-        sentence_type=SentenceType.FIRST,
-        content_type=ContentType.ACTION,
-    ))
-    tts.tts_one_sentence(
-        conn, ContentType.TEXT, content_detail=text, sentence_id=sentence_id
-    )
-    tts.tts_text_queue.put(TTSMessageDTO(
-        sentence_id=sentence_id,
-        sentence_type=SentenceType.LAST,
-        content_type=ContentType.ACTION,
-    ))
+    tts_control_generation = await send_tts_message(conn, "start")
+    if (
+        not _connection_is_active(conn)
+        or not _proactive_sentence_is_current(conn, sentence_id, notification_state)
+    ):
+        await _stop_superseded_proactive_start(
+            conn, notification_name, tts_control_generation
+        )
+        logger.bind(tag=TAG).info(
+            f"{notification_name}通知在发送TTS开始状态时被新的对话轮次替代"
+        )
+        return
+    conn.client_is_speaking = True
+    try:
+        tts.store_tts_text(sentence_id, text)
+        tts.tts_text_queue.put(TTSMessageDTO(
+            sentence_id=sentence_id,
+            sentence_type=SentenceType.FIRST,
+            content_type=ContentType.ACTION,
+        ))
+        tts.tts_one_sentence(
+            conn, ContentType.TEXT, content_detail=text, sentence_id=sentence_id
+        )
+        tts.tts_text_queue.put(TTSMessageDTO(
+            sentence_id=sentence_id,
+            sentence_type=SentenceType.LAST,
+            content_type=ContentType.ACTION,
+        ))
+    except Exception:
+        await _stop_failed_proactive_tts(
+            conn, sentence_id, notification_name, tts_control_generation
+        )
+        raise
     conn.dialogue.put(Message(role="assistant", content=text))
     logger.bind(tag=TAG).info(f"已处理{notification_name}语音通知")
 
@@ -420,6 +440,53 @@ def _notification_state_is_current(conn, notification_state):
         conn.sentence_id == received_sentence_id
         and getattr(conn, "abort_generation", 0) == received_abort_generation
     )
+
+
+def _proactive_sentence_is_current(conn, sentence_id, notification_state):
+    _, received_abort_generation = notification_state
+    return (
+        conn.sentence_id == sentence_id
+        and getattr(conn, "abort_generation", 0) == received_abort_generation
+        and not conn.client_abort
+    )
+
+
+async def _stop_failed_proactive_tts(
+    conn, sentence_id, notification_name, tts_control_generation
+):
+    if conn.sentence_id != sentence_id:
+        return
+    try:
+        if _connection_is_active(conn):
+            await send_tts_message(
+                conn, "stop", expected_generation=tts_control_generation
+            )
+    except Exception as error:
+        logger.bind(tag=TAG).error(
+            f"{notification_name}通知失败后停止TTS异常: {type(error).__name__}"
+        )
+    finally:
+        if (
+            conn.sentence_id == sentence_id
+            and getattr(conn, "tts_control_generation", 0)
+            == tts_control_generation
+        ):
+            conn.client_is_speaking = False
+
+
+async def _stop_superseded_proactive_start(
+    conn, notification_name, tts_control_generation
+):
+    if not _connection_is_active(conn) or getattr(conn, "client_is_speaking", False):
+        return
+    try:
+        await send_tts_message(
+            conn, "stop", expected_generation=tts_control_generation
+        )
+    except Exception as error:
+        logger.bind(tag=TAG).error(
+            f"{notification_name}通知被替代后停止TTS异常: {type(error).__name__}"
+        )
 
 
 def _connection_is_active(conn):
