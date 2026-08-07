@@ -47,6 +47,27 @@ class _SelectionClient:
 
 
 class NeteaseMusicSelectionTest(unittest.IsolatedAsyncioTestCase):
+    def test_spoken_song_title_limits_artists_to_two(self):
+        song = {
+            "name": "合唱歌曲",
+            "ar": [{"name": "歌手一"}, {"name": "歌手二"}, {"name": "歌手三"}],
+        }
+
+        self.assertEqual(
+            netease._spoken_song_title(song),
+            "合唱歌曲 - 歌手一、歌手二等",
+        )
+        self.assertEqual(
+            netease._song_artist_names(song),
+            ["歌手一", "歌手二", "歌手三"],
+        )
+        self.assertEqual(
+            netease._spoken_song_title(
+                {"name": "双人歌曲", "ar": song["ar"][:2]}
+            ),
+            "双人歌曲 - 歌手一、歌手二",
+        )
+
     def test_parses_lrc_timestamps_for_client_playback_clock(self):
         lines = netease._parse_lrc_lyrics(
             "[ar:歌手]\n[00:01.20][00:03.450]第一句\n[00:05.000]第二句\n"

@@ -243,6 +243,15 @@ def _song_title(song):
     return f"{name} - {artists}" if artists else name
 
 
+def _spoken_song_title(song):
+    name = str(song.get("name", "未知歌曲")).strip()
+    artist_names = _song_artist_names(song)
+    spoken_artists = "、".join(artist_names[:2])
+    if len(artist_names) > 2:
+        spoken_artists += "等"
+    return f"{name} - {spoken_artists}" if spoken_artists else name
+
+
 def _song_artist_names(song):
     return [
         str(artist.get("name") or "").strip()
@@ -387,7 +396,7 @@ def _songs_by_artist(artist_name, songs):
 def _artist_queue_prompt(artist_name, tracks):
     return (
         f"正在播放{artist_name}的歌曲，共 {len(tracks)} 首，"
-        f"首先是《{_song_title(tracks[0])}》"
+        f"首先是《{_spoken_song_title(tracks[0])}》"
     )
 
 
@@ -857,7 +866,7 @@ async def _select_tracks(client, action, name, max_tracks):
         if not song:
             suffix = "，或先让当前设备扫码登录" if not client.is_authenticated else ""
             raise NeteaseMusicUnavailableError(f"没有找到可播放的《{name}》{suffix}")
-        return [song], f"正在为您播放，《{_song_title(song)}》"
+        return [song], f"正在为您播放，《{_spoken_song_title(song)}》"
 
     if action == "artist":
         artist_name = str(name or "").strip()
@@ -919,7 +928,7 @@ async def _select_tracks(client, action, name, max_tracks):
             raise NeteaseMusicUnavailableError("我的收藏中暂时没有歌曲")
         return (
             tracks,
-            f"正在播放我的收藏，共 {len(tracks)} 首，首先是《{_song_title(tracks[0])}》",
+            f"正在播放我的收藏，共 {len(tracks)} 首，首先是《{_spoken_song_title(tracks[0])}》",
         )
 
     if action == "daily":
@@ -945,7 +954,7 @@ async def _select_tracks(client, action, name, max_tracks):
         if not tracks:
             raise NeteaseMusicUnavailableError("当前没有可随机播放的歌曲")
         song = random.choice(tracks)
-        return [song], f"正在为您随机播放，《{_song_title(song)}》"
+        return [song], f"正在为您随机播放，《{_spoken_song_title(song)}》"
 
     raise NeteaseMusicError(f"不支持的网易云音乐播放类型: {action}")
 
@@ -1337,7 +1346,9 @@ async def _control_playback(conn, action, position=0):
                 response="已经是最后一首了",
             )
         state.index += 1
-        prompt = f"正在播放下一首，《{_song_title(state.resolved[state.index][0])}》"
+        prompt = (
+            f"正在播放下一首，《{_spoken_song_title(state.resolved[state.index][0])}》"
+        )
         _restart_saved_playback(conn, state, prompt)
         return ActionResponse(action=Action.RECORD, result=prompt, response=prompt)
 
@@ -1370,7 +1381,7 @@ async def _control_playback(conn, action, position=0):
         state.index = target_index
         prompt = (
             f"正在播放第 {target_position} 首，"
-            f"《{_song_title(state.resolved[target_index][0])}》"
+            f"《{_spoken_song_title(state.resolved[target_index][0])}》"
         )
         _restart_saved_playback(conn, state, prompt)
         return ActionResponse(action=Action.RECORD, result=prompt, response=prompt)
@@ -1383,13 +1394,15 @@ async def _control_playback(conn, action, position=0):
                 response="已经是第一首了",
             )
         state.index -= 1
-        prompt = f"正在播放上一首，《{_song_title(state.resolved[state.index][0])}》"
+        prompt = (
+            f"正在播放上一首，《{_spoken_song_title(state.resolved[state.index][0])}》"
+        )
         _restart_saved_playback(conn, state, prompt)
         return ActionResponse(action=Action.RECORD, result=prompt, response=prompt)
 
     if action == "resume":
         song = state.resolved[state.index][0]
-        prompt = f"继续播放，《{_song_title(song)}》"
+        prompt = f"继续播放，《{_spoken_song_title(song)}》"
         _restart_saved_playback(conn, state, prompt)
         return ActionResponse(action=Action.RECORD, result=prompt, response=prompt)
 
