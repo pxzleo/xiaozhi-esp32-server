@@ -76,23 +76,18 @@ DIRECT_ANSWER_TOOL = {
 }
 
 TOOL_CALL_NOTICES = {
-    "web_search": "我去搜索一下。",
-    "search_from_ragflow": "我去查一下资料。",
+    "web_search": "我来处理一下。",
+    "search_from_ragflow": "我来处理一下。",
 }
 
 
 def get_tool_call_notice(tool_calls):
-    """返回工具执行前播报的简短提示。"""
-    tool_names = [
-        tool_call.get("name")
-        for tool_call in tool_calls
-        if tool_call.get("name") and tool_call.get("name") != "direct_answer"
-    ]
-    if not tool_names:
-        return None
-    if len(tool_names) == 1:
-        return TOOL_CALL_NOTICES.get(tool_names[0], "我来处理一下。")
-    return "我来处理一下。"
+    """仅返回搜索工具执行前需要播报的简短提示。"""
+    for tool_call in tool_calls:
+        notice = TOOL_CALL_NOTICES.get(tool_call.get("name"))
+        if notice:
+            return notice
+    return None
 
 
 class ConnectionHandler:
@@ -1145,6 +1140,14 @@ class ConnectionHandler:
                 functions.append(DIRECT_ANSWER_TOOL)
 
         response_message = []
+        # 顶层函数调用需要先看到完整响应才能判断是否真的调用工具。
+        # 否则模型在 tool_calls 之前输出的客套话会被提前送入 TTS，
+        # 即使该工具不在提示白名单中也无法撤回。
+        defer_function_content = (
+            self.intent_type == "function_call"
+            and functions is not None
+            and depth == 0
+        )
 
         try:
             # 使用带记忆的对话
@@ -1226,29 +1229,31 @@ class ConnectionHandler:
                         tool_call_flag = True
                         self._merge_tool_calls(tool_calls_list, tools_call)
 
-                    # 流式提取 direct_answer 的 response 参数，实时送 TTS
-                    # 使用安全缓冲区，防止 JSON 闭合符号泄漏到 TTS
-                    _DA_STREAM_BUFFER = 5
-                    for tc in tool_calls_list:
-                        if tc["name"] == "direct_answer" and tc.get("arguments"):
-                            da_text = self._extract_direct_answer_response(tc["arguments"])
-                            sent_len = tc.get("_da_sent", 0)
-                            if da_text and len(da_text) > sent_len:
-                                safe_end = max(sent_len, len(da_text) - _DA_STREAM_BUFFER)
-                                if safe_end > sent_len:
-                                    new_part = da_text[sent_len:safe_end]
-                                    # 清理 delta 中可能泄漏的 JSON 闭合垃圾
-                                    new_part = self._clean_response_garbage(new_part)
-                                    if new_part:
-                                        tc["_da_sent"] = safe_end
-                                        self.tts.tts_text_queue.put(
-                                            TTSMessageDTO(
-                                                sentence_id=current_sentence_id,
-                                                sentence_type=SentenceType.MIDDLE,
-                                                content_type=ContentType.TEXT,
-                                                content_detail=new_part,
+                    # 顶层响应必须等工具列表完整后再处理 direct_answer，
+                    # 防止模型同时选择 direct_answer 和真实工具时提前播报。
+                    if not defer_function_content:
+                        # 使用安全缓冲区，防止 JSON 闭合符号泄漏到 TTS
+                        _DA_STREAM_BUFFER = 5
+                        for tc in tool_calls_list:
+                            if tc["name"] == "direct_answer" and tc.get("arguments"):
+                                da_text = self._extract_direct_answer_response(tc["arguments"])
+                                sent_len = tc.get("_da_sent", 0)
+                                if da_text and len(da_text) > sent_len:
+                                    safe_end = max(sent_len, len(da_text) - _DA_STREAM_BUFFER)
+                                    if safe_end > sent_len:
+                                        new_part = da_text[sent_len:safe_end]
+                                        # 清理 delta 中可能泄漏的 JSON 闭合垃圾
+                                        new_part = self._clean_response_garbage(new_part)
+                                        if new_part:
+                                            tc["_da_sent"] = safe_end
+                                            self.tts.tts_text_queue.put(
+                                                TTSMessageDTO(
+                                                    sentence_id=current_sentence_id,
+                                                    sentence_type=SentenceType.MIDDLE,
+                                                    content_type=ContentType.TEXT,
+                                                    content_detail=new_part,
+                                                )
                                             )
-                                        )
                 else:
                     content = response
 
@@ -1264,14 +1269,15 @@ class ConnectionHandler:
                 if content is not None and len(content) > 0:
                     if not tool_call_flag:
                         response_message.append(content)
-                        self.tts.tts_text_queue.put(
-                            TTSMessageDTO(
-                                sentence_id=current_sentence_id,
-                                sentence_type=SentenceType.MIDDLE,
-                                content_type=ContentType.TEXT,
-                                content_detail=content,
+                        if not defer_function_content:
+                            self.tts.tts_text_queue.put(
+                                TTSMessageDTO(
+                                    sentence_id=current_sentence_id,
+                                    sentence_type=SentenceType.MIDDLE,
+                                    content_type=ContentType.TEXT,
+                                    content_detail=content,
+                                )
                             )
-                        )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM stream processing error: {e}")
             self.tts.tts_text_queue.put(
@@ -1330,7 +1336,7 @@ class ConnectionHandler:
                 direct_answer_calls = [tc for tc in tool_calls_list if tc["name"] == "direct_answer"]
                 real_tool_calls = [tc for tc in tool_calls_list if tc["name"] != "direct_answer"]
 
-                if direct_answer_calls:
+                if direct_answer_calls and not real_tool_calls:
                     self.logger.bind(tag=TAG).debug(
                         f"模型选择 direct_answer，流式已播报，写入对话历史"
                     )
@@ -1356,17 +1362,20 @@ class ConnectionHandler:
                             self.tts.store_tts_text(current_sentence_id, da_response)
                             self.dialogue.put(Message(role="assistant", content=da_response))
 
-                    if not real_tool_calls:
-                        if depth == 0:
-                            self.tts.tts_text_queue.put(
-                                TTSMessageDTO(
-                                    sentence_id=current_sentence_id,
-                                    sentence_type=SentenceType.LAST,
-                                    content_type=ContentType.ACTION,
-                                )
+                    if depth == 0:
+                        self.tts.tts_text_queue.put(
+                            TTSMessageDTO(
+                                sentence_id=current_sentence_id,
+                                sentence_type=SentenceType.LAST,
+                                content_type=ContentType.ACTION,
                             )
-                        return
+                        )
+                    return
 
+                if direct_answer_calls:
+                    self.logger.bind(tag=TAG).warning(
+                        "模型同时选择 direct_answer 和真实工具，忽略 direct_answer"
+                    )
                     tool_calls_list = real_tool_calls
 
             if not bHasError and len(tool_calls_list) > 0:
@@ -1394,12 +1403,9 @@ class ConnectionHandler:
                     if self._is_chat_turn_cancelled(current_sentence_id):
                         return None
 
-                # LLM 流式阶段已播报过的文本
+                # 工具调用前由模型自行生成的客套话不播报，也不写入对话历史；
+                # 搜索提示统一由 get_tool_call_notice 决定。
                 streamed_text = ""
-                if len(response_message) > 0:
-                    streamed_text = "".join(response_message)
-                    self.tts.store_tts_text(current_sentence_id, streamed_text)
-                    self.dialogue.put(Message(role="assistant", content=streamed_text))
                 response_message.clear()
 
                 # 收集所有工具调用的 Future
@@ -1461,6 +1467,15 @@ class ConnectionHandler:
             return None
         if len(response_message) > 0:
             text_buff = "".join(response_message)
+            if defer_function_content:
+                self.tts.tts_text_queue.put(
+                    TTSMessageDTO(
+                        sentence_id=current_sentence_id,
+                        sentence_type=SentenceType.MIDDLE,
+                        content_type=ContentType.TEXT,
+                        content_detail=text_buff,
+                    )
+                )
             self.tts.store_tts_text(current_sentence_id, text_buff)
             self.dialogue.put(Message(role="assistant", content=text_buff))
 
