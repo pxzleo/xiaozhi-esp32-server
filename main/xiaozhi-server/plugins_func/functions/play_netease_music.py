@@ -147,7 +147,9 @@ play_netease_music_function_desc = {
             "用户说‘播放某位歌手的歌’时必须使用artist，不要使用song。"
             "用户说‘播放我的收藏’、‘播放收藏’或‘播放我喜欢的音乐’时必须使用favorites。"
             "用户说‘播放第几首’或‘跳到第几首’时必须使用jump，并填写position。"
-            "用户说‘下一首’、‘上一首’、‘暂停’、‘继续’或‘停止播放’时必须调用本工具。"
+            "用户说‘随机播放’、‘随便放首歌’、‘下一首’、‘上一首’、‘暂停’、"
+            "‘继续’或‘停止播放’时必须调用本工具。不得在未调用工具或未收到成功结果时"
+            "声称已经播放、切歌或加入播放队列。"
             "未登录时只能播放公开且无需会员的歌曲。"
         ),
         "parameters": {
@@ -599,9 +601,14 @@ class NeteaseMusicCache:
 
     def _reserve_download(self, size):
         with self._lock:
-            self._cleanup_locked()
             cache_key = str(self.cache_dir)
             reserved = _CACHE_RESERVED_BYTES.get(cache_key, 0)
+            required_bytes = reserved + size
+            if required_bytes > self.max_cache_bytes:
+                raise NeteaseMusicError(
+                    "网易云音乐缓存空间不足，无法准备更多歌曲"
+                )
+            self._cleanup_locked(required_bytes=required_bytes)
             if self._cache_size() + reserved + size > self.max_cache_bytes:
                 raise NeteaseMusicError(
                     "网易云音乐缓存空间不足，无法准备更多歌曲"
@@ -626,7 +633,10 @@ class NeteaseMusicCache:
             for candidate in candidates:
                 if candidate.suffix == ".part" or not candidate.is_file():
                     continue
-                if time.time() - candidate.stat().st_mtime <= self.ttl_seconds:
+                if (
+                    time.time() - candidate.stat().st_mtime <= self.ttl_seconds
+                    or self._is_protected(candidate)
+                ):
                     os.utime(candidate, None)
                     self._protect(candidate)
                     return candidate
@@ -637,7 +647,7 @@ class NeteaseMusicCache:
         with self._lock:
             self._cleanup_locked()
 
-    def _cleanup_locked(self):
+    def _cleanup_locked(self, required_bytes=0):
         files = [path for path in self.cache_dir.iterdir() if path.is_file()]
         now = time.time()
         for path in files:
@@ -661,8 +671,9 @@ class NeteaseMusicCache:
             key=lambda path: path.stat().st_mtime,
         )
         total = sum(path.stat().st_size for path in files)
+        target_size = max(0, self.max_cache_bytes - required_bytes)
         for path in files:
-            if total <= self.max_cache_bytes:
+            if total <= target_size:
                 break
             if self._is_protected(path):
                 continue
@@ -953,8 +964,9 @@ async def _select_tracks(client, action, name, max_tracks):
             tracks = [song for song in tracks if _is_public_free_song(song)]
         if not tracks:
             raise NeteaseMusicUnavailableError("当前没有可随机播放的歌曲")
-        song = random.choice(tracks)
-        return [song], f"正在为您随机播放，《{_spoken_song_title(song)}》"
+        tracks = list(tracks)
+        random.shuffle(tracks)
+        return tracks, "正在随机播放"
 
     raise NeteaseMusicError(f"不支持的网易云音乐播放类型: {action}")
 
@@ -1004,6 +1016,40 @@ async def _resolve_audio_files(client, cache, tracks, timeout_seconds):
     return resolved, errors
 
 
+async def _resolve_audio_files_to_limit(client, cache, tracks, limit, deadline):
+    resolved = []
+    skipped = []
+    cursor = 0
+    target = len(tracks) if limit is None else limit
+    loop = asyncio.get_running_loop()
+
+    while cursor < len(tracks) and len(resolved) < target:
+        batch_size = target - len(resolved)
+        batch = tracks[cursor : cursor + batch_size]
+        cursor += len(batch)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            skipped.append("歌曲准备超时")
+            break
+        try:
+            batch_resolved, batch_skipped = await _resolve_audio_files(
+                client,
+                cache,
+                batch,
+                remaining,
+            )
+        except NeteaseMusicUnavailableError as exc:
+            skipped.append(str(exc))
+            continue
+        resolved.extend(batch_resolved)
+        skipped.extend(batch_skipped)
+
+    if not resolved:
+        detail = skipped[0] if skipped else "没有可播放的歌曲"
+        raise NeteaseMusicUnavailableError(detail)
+    return resolved[:target], skipped
+
+
 async def _prepare_playback(
     client,
     cache,
@@ -1029,6 +1075,21 @@ async def _prepare_playback(
         raise NeteaseMusicUnavailableError(
             f"网易云音乐播放准备超过 {timeout_seconds} 秒，请稍后重试"
         ) from exc
+
+    if action == "random":
+        resolved, skipped = await _resolve_audio_files_to_limit(
+            client,
+            cache,
+            tracks,
+            max_tracks,
+            deadline,
+        )
+        prompt = (
+            f"随机播放 {len(resolved)} 首，"
+            f"先播《{_spoken_song_title(resolved[0][0])}》"
+        )
+        pending_tracks = []
+        return prompt, resolved, skipped, pending_tracks
 
     remaining = deadline - loop.time()
     if remaining <= 0:
@@ -1448,7 +1509,7 @@ async def play_netease_music(
             prepare_timeout,
             rolling=rolling,
         )
-        if skipped:
+        if skipped and action != "random":
             prompt += f"，其中 {len(skipped)} 首未能加入播放队列"
         cache.protect_for_playback(path for _song, path in resolved)
         load_more = None
@@ -1486,9 +1547,9 @@ async def play_netease_music(
         conn.logger.bind(tag=TAG).warning(f"网易云音乐不可播放: {exc}")
         return ActionResponse(action=Action.RESPONSE, result=str(exc), response=str(exc))
     except NeteaseMusicError as exc:
-        conn.logger.bind(tag=TAG).error(f"网易云音乐播放失败: {exc}")
+        conn.logger.bind(tag=TAG).warning(f"网易云音乐播放请求无效: {exc}")
         return ActionResponse(
             action=Action.RESPONSE,
             result=str(exc),
-            response="网易云音乐服务暂时不可用，请稍后再试",
+            response=str(exc),
         )

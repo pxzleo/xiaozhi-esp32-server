@@ -4,13 +4,16 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from core.connection import ConnectionHandler
+from core.utils.dialogue import Message
 
 
 class _Memory:
     def __init__(self, saved):
         self.saved = saved
+        self.dialogue = None
 
-    async def save_memory(self, _dialogue, _session_id):
+    async def save_memory(self, dialogue, _session_id):
+        self.dialogue = dialogue
         self.saved.set()
 
 
@@ -51,6 +54,37 @@ class ConnectionLifecycleTest(unittest.TestCase):
         asyncio.run(conn.close())
         self.assertTrue(conn._closed)
         self.assertEqual(conn._close_resources.await_count, 2)
+
+    def test_temporary_fewshot_is_not_saved_to_memory(self):
+        saved = threading.Event()
+        memory = _Memory(saved)
+        conn = ConnectionHandler.__new__(ConnectionHandler)
+        conn.session_id = "session-1"
+        conn._postprocessing_started = False
+        conn.dialogue = type(
+            "Dialogue",
+            (),
+            {
+                "dialogue": [
+                    Message(role="user", content="随机播放", is_temporary=True),
+                    Message(role="user", content="真实问题"),
+                ]
+            },
+        )()
+        conn.memory = memory
+        conn.server = None
+        conn.logger = Mock()
+        conn.logger.bind.return_value = conn.logger
+        conn.close = AsyncMock()
+
+        with patch(
+            "core.connection.generate_and_save_chat_title",
+            new=AsyncMock(),
+        ):
+            asyncio.run(conn._save_and_close(None))
+
+        self.assertTrue(saved.wait(0.5))
+        self.assertEqual([message.content for message in memory.dialogue], ["真实问题"])
 
 
 if __name__ == "__main__":

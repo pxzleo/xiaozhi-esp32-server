@@ -303,7 +303,11 @@ class ConnectionHandler:
             if self.session_id and not self._postprocessing_started:
                 self._postprocessing_started = True
                 session_id = self.session_id
-                dialogue_snapshot = list(self.dialogue.dialogue)
+                dialogue_snapshot = [
+                    message
+                    for message in self.dialogue.dialogue
+                    if not message.is_temporary
+                ]
                 memory = self.memory
                 server = self.server
 
@@ -786,6 +790,51 @@ class ConnectionHandler:
             self.dialogue.put(Message(
                 role="assistant", content="再见", is_temporary=True,
             ))
+
+        if "play_netease_music" in tool_names:
+            music_examples = (
+                (
+                    "随机播放",
+                    "fewshot_music_random_001",
+                    '{"action":"random","name":""}',
+                    "已建立随机播放队列",
+                ),
+                (
+                    "下一首",
+                    "fewshot_music_next_001",
+                    '{"action":"next","name":""}',
+                    "正在播放下一首",
+                ),
+            )
+            for user_text, tool_call_id, arguments, result in music_examples:
+                self.dialogue.put(
+                    Message(role="user", content=user_text, is_temporary=True)
+                )
+                self.dialogue.put(
+                    Message(
+                        role="assistant",
+                        tool_calls=[
+                            {
+                                "id": tool_call_id,
+                                "function": {
+                                    "arguments": arguments,
+                                    "name": "play_netease_music",
+                                },
+                                "type": "function",
+                                "index": 0,
+                            }
+                        ],
+                        is_temporary=True,
+                    )
+                )
+                self.dialogue.put(
+                    Message(
+                        role="tool",
+                        tool_call_id=tool_call_id,
+                        content=result,
+                        is_temporary=True,
+                    )
+                )
 
         self.logger.bind(tag=TAG).debug("已注入工具调用 few-shot 示例")
 

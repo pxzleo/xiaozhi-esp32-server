@@ -107,6 +107,16 @@ class NeteaseMusicSelectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(properties["position"]["type"], "integer")
         self.assertEqual(properties["position"]["minimum"], 1)
 
+    def test_tool_schema_requires_random_playback_to_call_tool(self):
+        description = netease.play_netease_music_function_desc["function"][
+            "description"
+        ]
+
+        self.assertIn("随机播放", description)
+        self.assertIn("必须调用本工具", description)
+        self.assertIn("不得在未调用工具", description)
+        self.assertIn("声称已经播放", description)
+
 
 class NeteaseDeviceCredentialTest(unittest.IsolatedAsyncioTestCase):
     async def test_fetches_current_device_credential_and_overrides_legacy_cookie(self):
@@ -367,6 +377,84 @@ class NeteaseDeviceCredentialTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(personal_fm[0]["id"], 12)
         self.assertIn("私人FM", fm_prompt)
 
+    async def test_random_builds_shuffled_candidate_pool(self):
+        client = _SelectionClient(authenticated=False)
+        client.toplist_tracks = AsyncMock(
+            return_value=[
+                {"id": index, "name": f"随机歌曲{index}", "fee": 0}
+                for index in range(1, 6)
+            ]
+        )
+
+        with patch.object(netease.random, "shuffle") as shuffle:
+            tracks, prompt = await netease._select_tracks(
+                client, "random", "", 3
+            )
+
+        shuffle.assert_called_once()
+        self.assertEqual([track["id"] for track in tracks], [1, 2, 3, 4, 5])
+        self.assertEqual(prompt, "正在随机播放")
+
+    async def test_user_input_error_is_spoken_verbatim(self):
+        conn = Mock()
+        conn.logger.bind.return_value = conn.logger
+        with (
+            patch.object(
+                netease,
+                "_device_plugin_config",
+                AsyncMock(return_value={"max_tracks": 20}),
+            ),
+            patch.object(netease, "NeteaseMusicClient"),
+            patch.object(netease, "NeteaseMusicCache"),
+            patch.object(
+                netease,
+                "_prepare_playback",
+                AsyncMock(side_effect=netease.NeteaseMusicError("请告诉我想播放的歌曲名称")),
+            ),
+        ):
+            response = await netease.play_netease_music(
+                conn, action="song", name=""
+            )
+
+        self.assertEqual(response.response, "请告诉我想播放的歌曲名称")
+
+    async def test_random_does_not_announce_replaced_candidates(self):
+        conn = Mock()
+        conn.logger.bind.return_value = conn.logger
+        cache = Mock()
+        resolved = [
+            ({"id": index, "name": f"歌曲{index}"}, Path(f"/cache/{index}.mp3"))
+            for index in range(20)
+        ]
+        with (
+            patch.object(
+                netease,
+                "_device_plugin_config",
+                AsyncMock(return_value={"max_tracks": 20}),
+            ),
+            patch.object(netease, "NeteaseMusicClient"),
+            patch.object(netease, "NeteaseMusicCache", return_value=cache),
+            patch.object(
+                netease,
+                "_prepare_playback",
+                AsyncMock(
+                    return_value=(
+                        "随机播放 20 首，先播《歌曲0》",
+                        resolved,
+                        ["候选一不可播放", "候选二不可播放"],
+                        [],
+                    )
+                ),
+            ),
+            patch.object(netease, "_start_playback"),
+        ):
+            response = await netease.play_netease_music(
+                conn, action="random", name=""
+            )
+
+        self.assertEqual(response.response, "随机播放 20 首，先播《歌曲0》")
+        self.assertNotIn("未能加入", response.response)
+
 
 class NeteaseMusicSecurityTest(unittest.TestCase):
     def test_cookie_is_redacted_inside_serialized_plugin_params(self):
@@ -478,6 +566,36 @@ class NeteaseMusicClientTest(unittest.IsolatedAsyncioTestCase):
 
 
 class NeteaseMusicPreparationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_random_replaces_unplayable_candidate_before_reaching_limit(self):
+        class Client:
+            async def playable_url(self, song):
+                if song["id"] == 2:
+                    raise netease.NeteaseMusicUnavailableError("不可播放")
+                return f"https://m801.music.126.net/{song['id']}.mp3"
+
+        class Cache:
+            async def download(self, song, _url):
+                return Path(f"/cache/{song['id']}.mp3")
+
+        tracks = [
+            {"id": 1, "name": "第一首"},
+            {"id": 2, "name": "失效歌曲"},
+            {"id": 3, "name": "候补歌曲"},
+        ]
+        with patch.object(
+            netease,
+            "_select_tracks",
+            new=AsyncMock(return_value=(tracks, "正在随机播放")),
+        ):
+            prompt, resolved, skipped, pending = await netease._prepare_playback(
+                Client(), Cache(), "random", "", 2, 1
+            )
+
+        self.assertEqual([song["id"] for song, _path in resolved], [1, 3])
+        self.assertEqual(pending, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("2 首", prompt)
+
     async def test_preparation_timeout_keeps_ready_tracks_and_cancels_slow_ones(self):
         class Client:
             async def playable_url(self, song):
@@ -633,6 +751,23 @@ class NeteaseMusicCacheTest(unittest.TestCase):
 
             self.assertEqual(cache._existing(42), path)
 
+    def test_cache_reuses_expired_file_while_playback_protects_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "42.mp3"
+            path.write_bytes(b"audio")
+            expired = path.stat().st_mtime - 7200
+            netease.os.utime(path, (expired, expired))
+            cache = netease.NeteaseMusicCache(
+                {"cache_dir": directory, "cache_ttl_hours": 1}
+            )
+            cache.protect_for_playback([path])
+
+            try:
+                self.assertEqual(cache._existing(42), path)
+                self.assertTrue(path.exists())
+            finally:
+                netease.release_cache_file(path)
+
     def test_cache_cleanup_keeps_active_partial_download(self):
         with tempfile.TemporaryDirectory() as directory:
             partial = Path(directory) / ".42.active.part"
@@ -686,6 +821,43 @@ class NeteaseMusicCacheTest(unittest.TestCase):
 
             with self.assertRaises(netease.NeteaseMusicError):
                 cache._reserve_download(5)
+
+    def test_cache_reservation_evicts_oldest_file_to_make_room(self):
+        with tempfile.TemporaryDirectory() as directory:
+            oldest = Path(directory) / "1.mp3"
+            newest = Path(directory) / "2.mp3"
+            oldest.write_bytes(b"12345")
+            newest.write_bytes(b"6789")
+            oldest.touch()
+            newest.touch()
+            oldest_mtime = oldest.stat().st_mtime - 10
+            netease.os.utime(oldest, (oldest_mtime, oldest_mtime))
+            cache = netease.NeteaseMusicCache({"cache_dir": directory})
+            cache.max_cache_bytes = 10
+
+            cache._reserve_download(5)
+            try:
+                self.assertFalse(oldest.exists())
+                self.assertTrue(newest.exists())
+            finally:
+                cache._release_download_reservation(5)
+
+    def test_cache_reservations_share_capacity_and_reject_oversized_total(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cached = Path(directory) / "1.mp3"
+            cached.write_bytes(b"123")
+            cache = netease.NeteaseMusicCache({"cache_dir": directory})
+            cache.max_cache_bytes = 10
+
+            cache._reserve_download(4)
+            cache._reserve_download(4)
+            try:
+                self.assertFalse(cached.exists())
+                with self.assertRaises(netease.NeteaseMusicError):
+                    cache._reserve_download(3)
+            finally:
+                cache._release_download_reservation(4)
+                cache._release_download_reservation(4)
 
     def test_saved_playback_queue_protects_file_until_connection_closes(self):
         with tempfile.TemporaryDirectory() as directory:

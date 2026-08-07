@@ -136,6 +136,39 @@ class ChatTurnIsolationTest(unittest.TestCase):
         ]
         self.assertNotIn("我来处理一下", "".join(spoken_text))
 
+    def test_music_fewshot_routes_random_and_next_to_real_tool(self):
+        conn = ConnectionHandler.__new__(ConnectionHandler)
+        conn.intent_type = "function_call"
+        conn.func_handler = Mock()
+        conn.func_handler.get_functions.return_value = [
+            {"type": "function", "function": {"name": "play_netease_music"}}
+        ]
+        conn.dialogue = _Dialogue()
+        conn.logger = Mock()
+        conn.logger.bind.return_value = conn.logger
+
+        conn._inject_tool_call_fewshot()
+
+        examples = {
+            message.content: conn.dialogue.messages[index + 1].tool_calls[0]
+            for index, message in enumerate(conn.dialogue.messages[:-1])
+            if message.role == "user" and message.content in {"随机播放", "下一首"}
+        }
+        self.assertEqual(
+            examples["随机播放"]["function"],
+            {
+                "arguments": '{"action":"random","name":""}',
+                "name": "play_netease_music",
+            },
+        )
+        self.assertEqual(
+            examples["下一首"]["function"],
+            {
+                "arguments": '{"action":"next","name":""}',
+                "name": "play_netease_music",
+            },
+        )
+
     def test_abort_cancels_active_llm_response(self):
         logger = Mock()
         logger.bind.return_value = logger
