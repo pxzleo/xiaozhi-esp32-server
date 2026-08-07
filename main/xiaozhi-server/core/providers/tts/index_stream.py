@@ -43,6 +43,7 @@ class TTSProvider(TTSProviderBase):
                 message = self.tts_text_queue.get(timeout=1)
                 if message.sentence_type == SentenceType.FIRST:
                     # 初始化参数
+                    self.current_sentence_id = message.sentence_id
                     self.tts_stop_request = False
                     self.processed_chars = 0
                     self.tts_text_buff = []
@@ -54,12 +55,50 @@ class TTSProvider(TTSProviderBase):
                         self.to_tts_single_stream(segment_text)
 
                 elif ContentType.FILE == message.content_type:
+                    # 先把待播报的引导语发出，为后续音乐建立有效的 TTS 会话。
+                    full_text = "".join(self.tts_text_buff)
+                    if full_text[self.processed_chars :]:
+                        self._process_remaining_text_stream()
                     logger.bind(tag=TAG).info(
                         f"添加音频文件到待播放列表: {message.content_file}"
                     )
-                    if message.content_file and os.path.exists(message.content_file):
-                        # 先处理文件音频数据
-                        self._process_audio_file_stream(message.content_file, callback=lambda audio_data: self.handle_audio_file(audio_data, message.content_detail))
+                    try:
+                        if message.content_file and os.path.exists(message.content_file):
+                            # 音乐文件逐帧转换后立即进入发送队列。
+                            def enqueue_current_file_frame(audio_data):
+                                if self.conn.stop_event.is_set():
+                                    raise InterruptedError
+                                if self.conn.client_abort:
+                                    raise InterruptedError
+                                if message.sentence_id != self.conn.sentence_id:
+                                    raise InterruptedError
+                                self.tts_audio_queue.put(
+                                    (
+                                        SentenceType.MIDDLE,
+                                        audio_data,
+                                        None,
+                                        message.sentence_id,
+                                    )
+                                )
+
+                            self._process_audio_file_stream(
+                                message.content_file,
+                                callback=enqueue_current_file_frame,
+                            )
+                    except InterruptedError:
+                        pass
+                    finally:
+                        if message.completion_event:
+                            self.tts_audio_queue.put(
+                                (
+                                    SentenceType.MIDDLE,
+                                    [],
+                                    None,
+                                    message.sentence_id,
+                                    message.completion_event,
+                                )
+                            )
+                            message.completion_event = None
 
                 if message.sentence_type == SentenceType.LAST:
                     # 处理剩余的文本
@@ -146,11 +185,18 @@ class TTSProvider(TTSProviderBase):
                         logger.bind(tag=TAG).error(
                             f"TTS请求失败: {resp.status}, {await resp.text()}"
                         )
-                        self.tts_audio_queue.put((SentenceType.LAST, [], None))
+                        self._enqueue_tts_error_end()
                         return
 
                     self.pcm_buffer.clear()
-                    self.tts_audio_queue.put((SentenceType.FIRST, [], text))
+                    self.tts_audio_queue.put(
+                        (
+                            SentenceType.FIRST,
+                            [],
+                            text,
+                            getattr(self, "current_sentence_id", None),
+                        )
+                    )
 
                     # 处理音频流数据
                     async for chunk in resp.content.iter_any():
@@ -185,7 +231,23 @@ class TTSProvider(TTSProviderBase):
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"TTS请求异常: {e}")
-            self.tts_audio_queue.put((SentenceType.LAST, [], None))
+            self._enqueue_tts_error_end()
+
+    def _enqueue_tts_error_end(self):
+        sentence_id = getattr(self, "current_sentence_id", None)
+        owns_audio_session = (
+            getattr(self.conn, "server_audio_playback_sentence_id", None)
+            == sentence_id
+        )
+        if not owns_audio_session:
+            self.tts_audio_queue.put(
+                (
+                    SentenceType.LAST,
+                    [],
+                    None,
+                    sentence_id,
+                )
+            )
 
     def audio_to_pcm_data_stream(
         self, audio_file_path, callback=None

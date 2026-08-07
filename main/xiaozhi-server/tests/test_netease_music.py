@@ -47,6 +47,15 @@ class _SelectionClient:
 
 
 class NeteaseMusicSelectionTest(unittest.IsolatedAsyncioTestCase):
+    def test_tool_schema_exposes_playback_controls(self):
+        actions = netease.play_netease_music_function_desc["function"]["parameters"][
+            "properties"
+        ]["action"]["enum"]
+
+        self.assertTrue(
+            {"next", "previous", "pause", "resume", "stop"}.issubset(actions)
+        )
+
     async def test_anonymous_search_excludes_vip_song(self):
         tracks, _ = await netease._select_tracks(
             _SelectionClient(authenticated=False),
@@ -311,6 +320,29 @@ class NeteaseMusicCacheTest(unittest.TestCase):
             with self.assertRaises(netease.NeteaseMusicError):
                 cache._reserve_download(5)
 
+    def test_saved_playback_queue_protects_file_until_connection_closes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queued = Path(directory) / "42.mp3"
+            queued.write_bytes(b"queued-audio")
+            cache = netease.NeteaseMusicCache({"cache_dir": directory})
+            cache.max_cache_bytes = 0
+            state = netease.NeteasePlaybackState(
+                resolved=[({"id": 42, "name": "测试歌曲"}, queued)]
+            )
+            connection = _Connection()
+            connection._netease_playback = state
+            cache.protect_for_playback([queued])
+            netease._protect_playback_state(state)
+
+            cache.cleanup()
+            self.assertTrue(queued.exists())
+            self.assertIn(str(queued.resolve()), netease._CACHE_ACTIVE_REFERENCES)
+
+            netease.close_netease_playback(connection)
+            self.assertNotIn(str(queued.resolve()), netease._CACHE_ACTIVE_REFERENCES)
+            cache.cleanup()
+            self.assertFalse(queued.exists())
+
 
 class NeteaseMusicDownloadTest(unittest.IsolatedAsyncioTestCase):
     async def test_download_rejects_redirected_replacement_source(self):
@@ -372,21 +404,119 @@ class _Connection:
         self.tts = _Tts()
 
 
-class NeteaseMusicQueueTest(unittest.TestCase):
-    def test_multiple_tracks_are_enqueued_in_order(self):
+class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
+    async def test_playlist_schedules_one_track_at_a_time(self):
         connection = _Connection()
         resolved = [
             ({"id": 1, "name": "第一首"}, Path("/cache/1.mp3")),
             ({"id": 2, "name": "第二首"}, Path("/cache/2.mp3")),
         ]
 
-        netease._enqueue_files(connection, "开始播放", resolved)
+        state = netease._start_playback(connection, "开始播放", resolved)
+        await asyncio.sleep(0)
 
         messages = connection.tts.tts_text_queue.items
         file_messages = [message for message in messages if message.content_type == netease.ContentType.FILE]
-        self.assertEqual([message.content_file for message in file_messages], ["/cache/1.mp3", "/cache/2.mp3"])
+        self.assertEqual([message.content_file for message in file_messages], ["/cache/1.mp3"])
         self.assertEqual(messages[0].sentence_type, netease.SentenceType.FIRST)
-        self.assertEqual(messages[-1].sentence_type, netease.SentenceType.LAST)
+        self.assertEqual(
+            connection.server_audio_playback_sentence_id,
+            connection.sentence_id,
+        )
+        self.assertIsNotNone(file_messages[0].completion_event)
+
+        file_messages[0].completion_event.set()
+        await asyncio.sleep(0.15)
+
+        file_messages = [
+            message
+            for message in messages
+            if message.content_type == netease.ContentType.FILE
+        ]
+        self.assertEqual(
+            [message.content_file for message in file_messages],
+            ["/cache/1.mp3", "/cache/2.mp3"],
+        )
+        self.assertEqual(state.index, 1)
+        netease.close_netease_playback(connection)
+
+    async def test_next_restarts_from_next_saved_track(self):
+        connection = _Connection()
+        connection._netease_playback = netease.NeteasePlaybackState(
+            resolved=[
+                ({"id": 1, "name": "第一首"}, Path("/cache/1.mp3")),
+                ({"id": 2, "name": "第二首"}, Path("/cache/2.mp3")),
+            ],
+            index=0,
+            status="paused",
+        )
+
+        response = netease._control_playback(connection, "next")
+        await asyncio.sleep(0)
+
+        self.assertEqual(response.response, "正在播放下一首，《第二首》")
+        self.assertEqual(connection._netease_playback.index, 1)
+        file_messages = [
+            message
+            for message in connection.tts.tts_text_queue.items
+            if message.content_type == netease.ContentType.FILE
+        ]
+        self.assertEqual(file_messages[0].content_file, "/cache/2.mp3")
+        netease.interrupt_netease_playback(connection)
+
+    def test_pause_and_stop_keep_or_clear_saved_queue(self):
+        connection = _Connection()
+        connection._netease_playback = netease.NeteasePlaybackState(
+            resolved=[({"id": 1, "name": "第一首"}, Path("/cache/1.mp3"))],
+            index=0,
+            status="playing",
+        )
+
+        paused = netease._control_playback(connection, "pause")
+        self.assertEqual(paused.response, "已暂停播放")
+        self.assertEqual(connection._netease_playback.status, "paused")
+        self.assertIsNone(connection.server_audio_playback_sentence_id)
+
+        stopped = netease._control_playback(connection, "stop")
+        self.assertEqual(stopped.response, "已停止播放")
+        self.assertIsNone(connection._netease_playback)
+        self.assertIsNone(connection.server_audio_playback_sentence_id)
+
+    async def test_previous_and_resume_restart_saved_track(self):
+        connection = _Connection()
+        connection._netease_playback = netease.NeteasePlaybackState(
+            resolved=[
+                ({"id": 1, "name": "第一首"}, Path("/cache/1.mp3")),
+                ({"id": 2, "name": "第二首"}, Path("/cache/2.mp3")),
+            ],
+            index=1,
+            status="paused",
+        )
+
+        previous = netease._control_playback(connection, "previous")
+        await asyncio.sleep(0)
+        self.assertEqual(previous.response, "正在播放上一首，《第一首》")
+        self.assertEqual(connection._netease_playback.index, 0)
+
+        netease.interrupt_netease_playback(connection)
+        resumed = netease._control_playback(connection, "resume")
+        await asyncio.sleep(0)
+        self.assertEqual(resumed.response, "继续播放，《第一首》")
+        self.assertEqual(connection._netease_playback.status, "playing")
+        netease.interrupt_netease_playback(connection)
+
+    def test_abort_pauses_but_keeps_saved_queue(self):
+        connection = _Connection()
+        state = netease.NeteasePlaybackState(
+            resolved=[({"id": 1, "name": "第一首"}, Path("/cache/1.mp3"))],
+            status="playing",
+        )
+        connection._netease_playback = state
+
+        netease.interrupt_netease_playback(connection)
+
+        self.assertIs(connection._netease_playback, state)
+        self.assertEqual(state.status, "paused")
 
     def test_intent_handler_does_not_speak_server_music_response_twice(self):
         self.assertTrue(handles_own_audio_response("play_music"))

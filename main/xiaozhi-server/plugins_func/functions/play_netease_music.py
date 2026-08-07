@@ -5,6 +5,7 @@ import random
 import re
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -39,6 +40,7 @@ PUBLIC_FREE_FEE_TYPES = {0, 8}
 _CACHE_LOCKS = {}
 _CACHE_PROTECTED_UNTIL = {}
 _CACHE_ACTIVE_REFERENCES = {}
+_CACHE_PLAYBACK_STATE_REFERENCES = {}
 _CACHE_RESERVED_BYTES = {}
 _CACHE_ACTIVE_PARTIALS = set()
 
@@ -66,6 +68,38 @@ def release_cache_file(path):
             _CACHE_PROTECTED_UNTIL.pop(key, None)
 
 
+def _protect_playback_state(state):
+    protected_paths = []
+    for _song, path in state.resolved:
+        cache_path = Path(path).resolve()
+        key = str(cache_path)
+        lock = _cache_lock(cache_path.parent)
+        with lock:
+            _CACHE_PLAYBACK_STATE_REFERENCES[key] = (
+                _CACHE_PLAYBACK_STATE_REFERENCES.get(key, 0) + 1
+            )
+        protected_paths.append(key)
+    state.protected_paths = protected_paths
+
+
+def _release_playback_state(state, release_queue_references=False):
+    for key in state.protected_paths:
+        cache_path = Path(key)
+        lock = _CACHE_LOCKS.get(str(cache_path.parent))
+        if lock is None:
+            continue
+        with lock:
+            remaining = _CACHE_PLAYBACK_STATE_REFERENCES.get(key, 0) - 1
+            if remaining > 0:
+                _CACHE_PLAYBACK_STATE_REFERENCES[key] = remaining
+            else:
+                _CACHE_PLAYBACK_STATE_REFERENCES.pop(key, None)
+    state.protected_paths = []
+    if release_queue_references:
+        for _song, path in state.resolved:
+            release_cache_file(path)
+
+
 class NeteaseMusicError(RuntimeError):
     """网易云音乐调用失败。"""
 
@@ -78,23 +112,47 @@ class NeteaseMusicUnavailableError(NeteaseMusicError):
     """歌曲对当前账号不可播放。"""
 
 
+@dataclass
+class NeteasePlaybackState:
+    resolved: list
+    index: int = 0
+    status: str = "playing"
+    generation: int = 0
+    task: object = None
+    protected_paths: list = field(default_factory=list)
+
+
 play_netease_music_function_desc = {
     "type": "function",
     "function": {
         "name": "play_netease_music",
         "description": (
             "通过网易云音乐播放歌曲。支持按歌名播放、播放当前登录账号的歌单、"
-            "每日推荐和私人FM。未登录时只能播放公开且无需会员的歌曲。"
+            "每日推荐和私人FM，以及上一首、下一首、暂停、继续和停止。"
+            "用户说‘下一首’、‘上一首’、‘暂停’、‘继续’或‘停止播放’时必须调用本工具。"
+            "未登录时只能播放公开且无需会员的歌曲。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["song", "playlist", "daily", "personal_fm", "random"],
+                    "enum": [
+                        "song",
+                        "playlist",
+                        "daily",
+                        "personal_fm",
+                        "random",
+                        "next",
+                        "previous",
+                        "pause",
+                        "resume",
+                        "stop",
+                    ],
                     "description": (
                         "播放类型：song按歌名播放；playlist播放用户歌单；"
-                        "daily播放每日推荐；personal_fm播放私人FM；random随机播放。"
+                        "daily播放每日推荐；personal_fm播放私人FM；random随机播放；"
+                        "next下一首；previous上一首；pause暂停；resume继续；stop停止。"
                     ),
                 },
                 "name": {
@@ -362,6 +420,8 @@ class NeteaseMusicCache:
 
     def _is_protected(self, path):
         key = str(path)
+        if _CACHE_PLAYBACK_STATE_REFERENCES.get(key, 0) > 0:
+            return True
         references = [
             expires_at
             for expires_at in _CACHE_ACTIVE_REFERENCES.get(key, [])
@@ -691,9 +751,43 @@ async def _prepare_playback(
     return prompt, resolved, skipped
 
 
-def _enqueue_files(conn, prompt, resolved):
+def _cancel_playback_task(state):
+    state.generation += 1
+    task = state.task
+    if task and not task.done():
+        task.cancel()
+    state.task = None
+
+
+def interrupt_netease_playback(conn):
+    state = getattr(conn, "_netease_playback", None)
+    if not state:
+        return
+    _cancel_playback_task(state)
+    conn.server_audio_playback_sentence_id = None
+    if state.status == "playing":
+        state.status = "paused"
+
+
+def close_netease_playback(conn):
+    state = getattr(conn, "_netease_playback", None)
+    if not state:
+        return
+    _cancel_playback_task(state)
+    _release_playback_state(state, release_queue_references=True)
+    conn._netease_playback = None
+    conn.server_audio_playback_sentence_id = None
+
+
+def _clear_audio_queues(conn):
+    clear_queues = getattr(conn, "clear_queues", None)
+    if callable(clear_queues):
+        clear_queues()
+
+
+def _enqueue_track(conn, prompt, song, path, completion_event, start_session):
     conn.tts.store_tts_text(conn.sentence_id, prompt)
-    if conn.intent_type == "intent_llm":
+    if start_session:
         conn.tts.tts_text_queue.put(
             TTSMessageDTO(
                 sentence_id=conn.sentence_id,
@@ -701,32 +795,165 @@ def _enqueue_files(conn, prompt, resolved):
                 content_type=ContentType.ACTION,
             )
         )
-    conn.tts.tts_text_queue.put(
-        TTSMessageDTO(
-            sentence_id=conn.sentence_id,
-            sentence_type=SentenceType.MIDDLE,
-            content_type=ContentType.TEXT,
-            content_detail=prompt,
-        )
-    )
-    for song, path in resolved:
+    if prompt:
         conn.tts.tts_text_queue.put(
             TTSMessageDTO(
                 sentence_id=conn.sentence_id,
                 sentence_type=SentenceType.MIDDLE,
-                content_type=ContentType.FILE,
-                content_detail=_song_title(song),
-                content_file=str(path),
+                content_type=ContentType.TEXT,
+                content_detail=prompt,
             )
         )
-    if conn.intent_type == "intent_llm":
-        conn.tts.tts_text_queue.put(
-            TTSMessageDTO(
-                sentence_id=conn.sentence_id,
-                sentence_type=SentenceType.LAST,
-                content_type=ContentType.ACTION,
-            )
+    conn.tts.tts_text_queue.put(
+        TTSMessageDTO(
+            sentence_id=conn.sentence_id,
+            sentence_type=SentenceType.MIDDLE,
+            content_type=ContentType.FILE,
+            content_detail=_song_title(song),
+            content_file=str(path),
+            completion_event=completion_event,
         )
+    )
+
+
+def _enqueue_playback_end(conn):
+    conn.tts.tts_text_queue.put(
+        TTSMessageDTO(
+            sentence_id=conn.sentence_id,
+            sentence_type=SentenceType.LAST,
+            content_type=ContentType.ACTION,
+        )
+    )
+    conn.server_audio_playback_sentence_id = None
+
+
+async def _run_playback(conn, state, generation, prompt):
+    start_session = True
+    try:
+        while state.generation == generation and state.index < len(state.resolved):
+            stop_event = getattr(conn, "stop_event", None)
+            if stop_event is not None and stop_event.is_set():
+                return
+            song, path = state.resolved[state.index]
+            completion_event = threading.Event()
+            _enqueue_track(
+                conn,
+                prompt if start_session else "",
+                song,
+                path,
+                completion_event,
+                start_session,
+            )
+            prompt = ""
+            start_session = False
+            while not completion_event.is_set():
+                await asyncio.sleep(0.1)
+                if state.generation != generation:
+                    return
+                if stop_event is not None and stop_event.is_set():
+                    return
+            if state.index + 1 >= len(state.resolved):
+                state.status = "stopped"
+                _enqueue_playback_end(conn)
+                return
+            state.index += 1
+    except asyncio.CancelledError:
+        return
+
+
+def _start_playback(conn, prompt, resolved, index=0):
+    previous = getattr(conn, "_netease_playback", None)
+    if previous:
+        _clear_audio_queues(conn)
+        _cancel_playback_task(previous)
+        _release_playback_state(previous, release_queue_references=True)
+    state = NeteasePlaybackState(
+        resolved=list(resolved),
+        index=index,
+        status="playing",
+    )
+    _protect_playback_state(state)
+    conn._netease_playback = state
+    conn.server_audio_playback_sentence_id = conn.sentence_id
+    state.task = asyncio.create_task(
+        _run_playback(conn, state, state.generation, prompt)
+    )
+    return state
+
+
+def _restart_saved_playback(conn, state, prompt):
+    _clear_audio_queues(conn)
+    _cancel_playback_task(state)
+    state.status = "playing"
+    conn.server_audio_playback_sentence_id = conn.sentence_id
+    state.task = asyncio.create_task(
+        _run_playback(conn, state, state.generation, prompt)
+    )
+
+
+def _control_playback(conn, action):
+    state = getattr(conn, "_netease_playback", None)
+    if not state or not state.resolved:
+        return ActionResponse(
+            action=Action.RESPONSE,
+            result="当前没有网易云音乐播放队列",
+            response="当前没有可控制的网易云音乐",
+        )
+
+    if action == "pause":
+        _clear_audio_queues(conn)
+        _cancel_playback_task(state)
+        conn.server_audio_playback_sentence_id = None
+        state.status = "paused"
+        return ActionResponse(
+            action=Action.RESPONSE,
+            result="已暂停播放",
+            response="已暂停播放",
+        )
+
+    if action == "stop":
+        _clear_audio_queues(conn)
+        _cancel_playback_task(state)
+        _release_playback_state(state, release_queue_references=True)
+        conn._netease_playback = None
+        conn.server_audio_playback_sentence_id = None
+        return ActionResponse(
+            action=Action.RESPONSE,
+            result="已停止播放",
+            response="已停止播放",
+        )
+
+    if action == "next":
+        if state.index + 1 >= len(state.resolved):
+            return ActionResponse(
+                action=Action.RESPONSE,
+                result="已经是最后一首",
+                response="已经是最后一首了",
+            )
+        state.index += 1
+        prompt = f"正在播放下一首，《{_song_title(state.resolved[state.index][0])}》"
+        _restart_saved_playback(conn, state, prompt)
+        return ActionResponse(action=Action.RECORD, result=prompt, response=prompt)
+
+    if action == "previous":
+        if state.index <= 0:
+            return ActionResponse(
+                action=Action.RESPONSE,
+                result="已经是第一首",
+                response="已经是第一首了",
+            )
+        state.index -= 1
+        prompt = f"正在播放上一首，《{_song_title(state.resolved[state.index][0])}》"
+        _restart_saved_playback(conn, state, prompt)
+        return ActionResponse(action=Action.RECORD, result=prompt, response=prompt)
+
+    if action == "resume":
+        song = state.resolved[state.index][0]
+        prompt = f"继续播放，《{_song_title(song)}》"
+        _restart_saved_playback(conn, state, prompt)
+        return ActionResponse(action=Action.RECORD, result=prompt, response=prompt)
+
+    raise NeteaseMusicError(f"不支持的播放控制: {action}")
 
 
 @register_function(
@@ -740,6 +967,9 @@ async def play_netease_music(
     name: str = "",
 ):
     try:
+        if action in {"next", "previous", "pause", "resume", "stop"}:
+            return _control_playback(conn, action)
+
         config = _plugin_config(conn)
         client = NeteaseMusicClient(config)
         cache = NeteaseMusicCache(config)
@@ -763,7 +993,7 @@ async def play_netease_music(
         if skipped:
             prompt += f"，其中 {len(skipped)} 首未能加入播放队列"
         cache.protect_for_playback(path for _song, path in resolved)
-        _enqueue_files(conn, prompt, resolved)
+        _start_playback(conn, prompt, resolved)
         if skipped:
             conn.logger.bind(tag=TAG).warning(
                 f"网易云播放队列跳过 {len(skipped)} 首不可播放歌曲: {'; '.join(skipped)}"

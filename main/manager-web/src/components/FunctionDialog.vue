@@ -189,13 +189,14 @@
 </template>
 
 <script>
-import Api from '@/apis/api';
+import Api, { getServiceUrl } from '@/apis/api';
 import i18n from '@/i18n';
 import featureManager from '@/utils/featureManager';
 import {
   checkNeteaseQrLogin,
   createNeteaseQrLogin,
   getNeteaseLoginProfile,
+  resolveNeteaseLoginApiBaseUrl,
 } from '@/utils/neteaseMusicLogin.mjs';
 
 const MUSIC_PROVIDER_CODES = new Set(['play_music', 'play_netease_music', 'hass_play_music']);
@@ -362,6 +363,28 @@ export default {
     currentNeteaseApiBaseUrl(func = this.currentFunction) {
       return func?.params?.api_base_url || '';
     },
+    currentNeteaseLoginApiBaseUrl(func = this.currentFunction) {
+      return resolveNeteaseLoginApiBaseUrl(this.currentNeteaseApiBaseUrl(func), getServiceUrl());
+    },
+    async fetchNeteaseLoginApi(url, options) {
+      const proxyBaseUrl = `${String(getServiceUrl() || '').replace(/\/+$/, '')}/models/provider/plugin/netease-login`;
+      if (!String(url).startsWith(proxyBaseUrl)) {
+        return fetch(url, options);
+      }
+
+      let accessToken;
+      try {
+        accessToken = JSON.parse(this.$store?.getters?.getToken || 'null')?.token;
+      } catch (error) {
+        throw new Error('智控台登录状态无效，请重新登录后再扫码');
+      }
+      if (!accessToken) {
+        throw new Error('智控台登录已失效，请重新登录后再扫码');
+      }
+      const headers = new Headers(options?.headers || {});
+      headers.set('Authorization', `Bearer ${accessToken}`);
+      return fetch(url, { ...options, headers });
+    },
     resetNeteaseLoginState() {
       this.neteaseLogin.status = 'anonymous';
       this.neteaseLogin.nickname = '';
@@ -397,9 +420,9 @@ export default {
       this.neteaseLogin.profileAbortController = controller;
       try {
         const profile = await getNeteaseLoginProfile(
-          this.currentNeteaseApiBaseUrl(func),
+          this.currentNeteaseLoginApiBaseUrl(func),
           cookie,
-          fetch,
+          (url, options) => this.fetchNeteaseLoginApi(url, options),
           controller.signal
         );
         if (this.neteaseLogin.profileAbortController !== controller) return;
@@ -427,8 +450,8 @@ export default {
       this.neteaseLogin.abortController = controller;
       try {
         const result = await createNeteaseQrLogin(
-          this.currentNeteaseApiBaseUrl(),
-          fetch,
+          this.currentNeteaseLoginApiBaseUrl(),
+          (url, options) => this.fetchNeteaseLoginApi(url, options),
           controller.signal
         );
         if (this.neteaseLogin.abortController !== controller) return;
@@ -462,9 +485,9 @@ export default {
       this.neteaseLogin.polling = true;
       try {
         const payload = await checkNeteaseQrLogin(
-          this.currentNeteaseApiBaseUrl(func),
+          this.currentNeteaseLoginApiBaseUrl(func),
           qrKey,
-          fetch,
+          (url, options) => this.fetchNeteaseLoginApi(url, options),
           controller.signal
         );
         if (this.neteaseLogin.abortController !== controller) return;

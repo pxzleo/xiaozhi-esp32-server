@@ -1464,7 +1464,11 @@ class ConnectionHandler:
             self.tts.store_tts_text(current_sentence_id, text_buff)
             self.dialogue.put(Message(role="assistant", content=text_buff))
 
-        if depth == 0:
+        owns_audio_session = (
+            getattr(self, "server_audio_playback_sentence_id", None)
+            == current_sentence_id
+        )
+        if depth == 0 and not owns_audio_session:
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
                     sentence_id=current_sentence_id,
@@ -1661,6 +1665,11 @@ class ConnectionHandler:
         try:
             if self.stop_event:
                 self.stop_event.set()
+            from plugins_func.functions.play_netease_music import (
+                close_netease_playback,
+            )
+
+            close_netease_playback(self)
             from core.handle.abortHandle import cancelActiveLLMResponse
 
             await cancelActiveLLMResponse(self, None)

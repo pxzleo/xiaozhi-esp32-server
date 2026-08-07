@@ -6,6 +6,31 @@ export function normalizeNeteaseApiBaseUrl(value) {
   return baseUrl;
 }
 
+export function resolveNeteaseLoginApiBaseUrl(apiBaseUrl, managerApiBaseUrl) {
+  const normalizedApiBaseUrl = normalizeNeteaseApiBaseUrl(apiBaseUrl);
+  const hostname = new URL(normalizedApiBaseUrl).hostname.toLowerCase();
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(hostname)) {
+    return normalizedApiBaseUrl;
+  }
+  const normalizedManagerApiBaseUrl = String(managerApiBaseUrl || '').trim().replace(/\/+$/, '');
+  return `${normalizedManagerApiBaseUrl}/models/provider/plugin/netease-login`;
+}
+
+function normalizeNeteaseRequestBaseUrl(value) {
+  const baseUrl = String(value || '').trim().replace(/\/+$/, '');
+  if (baseUrl.startsWith('/') && !baseUrl.startsWith('//')) {
+    return baseUrl;
+  }
+  return normalizeNeteaseApiBaseUrl(baseUrl);
+}
+
+let lastRequestTimestamp = 0;
+
+function nextRequestTimestamp() {
+  lastRequestTimestamp = Math.max(Date.now(), lastRequestTimestamp + 1);
+  return String(lastRequestTimestamp);
+}
+
 export async function requestNeteaseApi(
   baseUrl,
   path,
@@ -13,18 +38,21 @@ export async function requestNeteaseApi(
   fetchImpl = fetch,
   signal = undefined,
 ) {
-  const normalizedBaseUrl = normalizeNeteaseApiBaseUrl(baseUrl);
+  const normalizedBaseUrl = normalizeNeteaseRequestBaseUrl(baseUrl);
+  const timestamp = nextRequestTimestamp();
   const body = new URLSearchParams({
     ...params,
-    timestamp: String(Date.now()),
+    timestamp,
   });
+  const separator = path.includes('?') ? '&' : '?';
+  const requestUrl = `${normalizedBaseUrl}${path}${separator}timestamp=${timestamp}`;
   const controller = new AbortController();
   const abortRequest = () => controller.abort();
   signal?.addEventListener('abort', abortRequest, { once: true });
   const timeout = setTimeout(abortRequest, 10000);
   let response;
   try {
-    response = await fetchImpl(`${normalizedBaseUrl}${path}`, {
+    response = await fetchImpl(requestUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
       body,

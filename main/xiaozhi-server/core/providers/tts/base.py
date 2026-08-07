@@ -479,12 +479,14 @@ class TTSProviderBase(ABC):
                 future.result()
 
                 if completion_event:
-                    completion_future = asyncio.run_coroutine_threadsafe(
-                        _wait_for_audio_completion(self.conn),
-                        self.conn.loop,
-                    )
-                    completion_future.result()
-                    completion_event.set()
+                    try:
+                        completion_future = asyncio.run_coroutine_threadsafe(
+                            _wait_for_audio_completion(self.conn),
+                            self.conn.loop,
+                        )
+                        completion_future.result()
+                    finally:
+                        completion_event.set()
 
                 # 记录输出和报告
                 if self.conn.max_output_size > 0 and text:
