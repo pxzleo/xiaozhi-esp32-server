@@ -55,6 +55,11 @@ class ChatTurnIsolationTest(unittest.TestCase):
     def test_direct_answer_does_not_have_tool_notice(self):
         self.assertIsNone(get_tool_call_notice([{"name": "direct_answer"}]))
 
+    def test_schedule_tool_does_not_have_tool_notice(self):
+        self.assertIsNone(
+            get_tool_call_notice([{"name": "self_schedule_create"}])
+        )
+
     def test_music_tool_does_not_stream_model_or_direct_answer_preamble(self):
         conn = ConnectionHandler.__new__(ConnectionHandler)
         conn.server = None
@@ -156,6 +161,7 @@ class ChatTurnIsolationTest(unittest.TestCase):
 
         llm.cancel_response.assert_called_once_with("session-1", "turn-1")
         self.assertTrue(conn.client_abort)
+        self.assertEqual(1, conn.abort_generation)
         conn.clear_queues.assert_called_once_with()
         conn.clearSpeakStatus.assert_called_once_with()
 
@@ -309,6 +315,7 @@ class ChatTurnIsolationTest(unittest.TestCase):
 
         self.assertNotEqual(conn.sentence_id, "old-turn")
         self.assertFalse(conn.client_abort)
+        self.assertEqual(1, conn.abort_generation)
         self.assertEqual(len(executor.submissions), 1)
         submission = executor.submissions[0]
         self.assertIs(submission[0], conn.chat)

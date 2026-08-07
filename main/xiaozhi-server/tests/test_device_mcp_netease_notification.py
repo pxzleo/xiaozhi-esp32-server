@@ -1,7 +1,13 @@
+import asyncio
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from core.handle import receiveAudioHandle
+from core.handle.textHandler.mcpMessageHandler import McpTextMessageHandler
+from core.providers.tools.device_mcp.mcp_executor import DeviceMCPExecutor
 from core.providers.tools.device_mcp.mcp_handler import MCPClient, handle_mcp_message
+from plugins_func.register import Action
 
 
 class NeteaseMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
@@ -100,6 +106,348 @@ class NeteaseMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
 
         conn.tts.tts_one_sentence.assert_not_called()
         conn.dialogue.put.assert_not_called()
+
+
+class ScheduleMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _valid_payload(**overrides):
+        params = {
+            "version": 1,
+            "id": 7,
+            "kind": "reminder",
+            "label": "喝水",
+            "triggered_at": "2026-08-07T14:30:00",
+            "speak": True,
+        }
+        params.update(overrides)
+        return {
+            "jsonrpc": "2.0",
+            "method": "notifications/schedule/triggered",
+            "params": params,
+        }
+
+    async def test_valid_reminder_speaks_exact_text_without_llm(self):
+        conn = Mock()
+        conn.sentence_id = "old-turn"
+        conn.client_abort = False
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ) as cancel:
+            await handle_mcp_message(conn, Mock(), self._valid_payload(label="  喝水  "))
+
+        sentence_id, text = conn.tts.store_tts_text.call_args.args
+        self.assertEqual("提醒你：喝水", text)
+        self.assertEqual(sentence_id, conn.sentence_id)
+        self.assertEqual(
+            sentence_id,
+            conn.tts.tts_one_sentence.call_args.kwargs["sentence_id"],
+        )
+        self.assertEqual(
+            "提醒你：喝水",
+            conn.tts.tts_one_sentence.call_args.kwargs["content_detail"],
+        )
+        self.assertEqual(2, conn.tts.tts_text_queue.put.call_count)
+        first, last = [call.args[0] for call in conn.tts.tts_text_queue.put.call_args_list]
+        self.assertEqual("FIRST", first.sentence_type.name)
+        self.assertEqual("LAST", last.sentence_type.name)
+        cancel.assert_awaited_once_with(conn, "old-turn")
+        conn.dialogue.put.assert_called_once()
+        conn.llm.assert_not_called()
+
+    async def test_rejects_every_invalid_contract_field(self):
+        invalid_payloads = [
+            {"method": "notifications/schedule/triggered", "params": "invalid"},
+            self._valid_payload(version=None),
+            self._valid_payload(version=True),
+            self._valid_payload(version=1.0),
+            self._valid_payload(version=2),
+            self._valid_payload(id=None),
+            self._valid_payload(id=True),
+            self._valid_payload(id=1.0),
+            self._valid_payload(id=0),
+            self._valid_payload(id=-1),
+            self._valid_payload(kind="alarm"),
+            self._valid_payload(label=None),
+            self._valid_payload(label="   "),
+            self._valid_payload(label="醒" * 81),
+            self._valid_payload(triggered_at=None),
+            self._valid_payload(triggered_at="2026-8-07T14:30:00"),
+            self._valid_payload(triggered_at="2026-02-30T14:30:00"),
+            self._valid_payload(speak=False),
+            self._valid_payload(speak=1),
+        ]
+        conn = Mock()
+
+        for payload in invalid_payloads:
+            await handle_mcp_message(conn, Mock(), payload)
+
+        conn.tts.tts_one_sentence.assert_not_called()
+        conn.dialogue.put.assert_not_called()
+
+    async def test_label_is_never_written_to_debug_or_error_log(self):
+        secret = "PRIVATE_REMINDER_BODY"
+        conn = Mock()
+        conn.sentence_id = "old-turn"
+        conn.client_abort = False
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.logger"
+        ) as test_logger, patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ):
+            await handle_mcp_message(
+                conn, Mock(), self._valid_payload(label=secret, speak=False)
+            )
+
+        logged_values = " ".join(str(call) for call in test_logger.mock_calls)
+        self.assertNotIn(secret, logged_values)
+
+    async def test_old_device_abort_is_cleared_for_new_reminder_sentence(self):
+        conn = Mock()
+        conn.sentence_id = "old-turn"
+        conn.client_abort = True
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ):
+            await handle_mcp_message(conn, Mock(), self._valid_payload())
+
+        self.assertFalse(conn.client_abort)
+        self.assertNotEqual("old-turn", conn.sentence_id)
+        conn.tts.tts_one_sentence.assert_called_once()
+
+    async def test_new_sentence_during_cancel_wins_over_reminder(self):
+        conn = Mock()
+        conn.sentence_id = "old-turn"
+        conn.client_abort = True
+
+        async def start_new_turn(_conn, _old_id):
+            conn.sentence_id = "new-user-turn"
+            conn.client_abort = False
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(side_effect=start_new_turn),
+        ):
+            await handle_mcp_message(conn, Mock(), self._valid_payload())
+
+        self.assertEqual("new-user-turn", conn.sentence_id)
+        conn.tts.tts_one_sentence.assert_not_called()
+        conn.dialogue.put.assert_not_called()
+
+    async def test_new_abort_during_cancel_wins_over_reminder(self):
+        conn = Mock()
+        conn.sentence_id = "old-turn"
+        conn.client_abort = True
+
+        async def abort_new_notification(_conn, _old_id):
+            conn.client_abort = True
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(side_effect=abort_new_notification),
+        ):
+            await handle_mcp_message(conn, Mock(), self._valid_payload())
+
+        conn.tts.tts_one_sentence.assert_not_called()
+        conn.dialogue.put.assert_not_called()
+
+    async def test_new_sentence_before_notification_task_starts_wins(self):
+        conn = Mock()
+        conn.sentence_id = "old-turn"
+        conn.abort_generation = 1
+        conn.client_abort = True
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ) as cancel:
+            await McpTextMessageHandler().handle(
+                conn, {"payload": self._valid_payload()}
+            )
+            conn.sentence_id = "new-user-turn"
+            conn.client_abort = False
+            await asyncio.sleep(0)
+
+        cancel.assert_not_awaited()
+        self.assertEqual("new-user-turn", conn.sentence_id)
+        conn.tts.tts_one_sentence.assert_not_called()
+
+    async def test_new_abort_before_notification_task_starts_wins(self):
+        conn = Mock()
+        conn.sentence_id = "old-turn"
+        conn.abort_generation = 1
+        conn.client_abort = True
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ) as cancel:
+            await McpTextMessageHandler().handle(
+                conn, {"payload": self._valid_payload()}
+            )
+            conn.abort_generation = 2
+            await asyncio.sleep(0)
+
+        cancel.assert_not_awaited()
+        conn.tts.tts_one_sentence.assert_not_called()
+
+    async def test_real_asr_turn_before_notification_task_starts_wins(self):
+        conn = SimpleNamespace(
+            need_bind=False,
+            client_is_speaking=False,
+            client_listen_mode="realtime",
+            client_abort=True,
+            abort_generation=1,
+            sentence_id="old-turn",
+            last_tts_text="",
+            mcp_client=Mock(),
+            tts=Mock(),
+            dialogue=Mock(),
+        )
+        pending_notifications = []
+
+        def capture_notification(coroutine):
+            pending_notifications.append(coroutine)
+            return Mock()
+
+        with patch(
+            "core.handle.textHandler.mcpMessageHandler.asyncio.create_task",
+            side_effect=capture_notification,
+        ):
+            await McpTextMessageHandler().handle(
+                conn, {"payload": self._valid_payload()}
+            )
+
+        cancel_started = asyncio.Event()
+        keep_cancel_pending = asyncio.Event()
+
+        async def pending_user_cancel(_conn, _old_id):
+            cancel_started.set()
+            await keep_cancel_pending.wait()
+
+        with patch.object(
+            receiveAudioHandle,
+            "cancelActiveLLMResponse",
+            new=AsyncMock(side_effect=pending_user_cancel),
+        ):
+            user_turn = asyncio.create_task(
+                receiveAudioHandle.startToChat(conn, "你好")
+            )
+            await cancel_started.wait()
+            self.assertEqual(2, conn.abort_generation)
+            with patch(
+                "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+                new=AsyncMock(return_value=True),
+            ) as notification_cancel:
+                await pending_notifications[0]
+            user_turn.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await user_turn
+
+        notification_cancel.assert_not_awaited()
+        self.assertTrue(conn.client_abort)
+        self.assertEqual("old-turn", conn.sentence_id)
+        conn.tts.tts_one_sentence.assert_not_called()
+
+    async def test_unknown_notification_is_rejected(self):
+        conn = Mock()
+        secret = "UNKNOWN_PRIVATE_BODY"
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.logger"
+        ) as test_logger:
+            await handle_mcp_message(
+                conn,
+                Mock(),
+                {
+                    "method": "notifications/schedule/unknown",
+                    "params": {"label": secret, "speak": True},
+                },
+            )
+
+        conn.tts.tts_one_sentence.assert_not_called()
+        logged_values = " ".join(str(call) for call in test_logger.mock_calls)
+        self.assertNotIn(secret, logged_values)
+
+    async def test_schedule_description_reaches_main_llm_unchanged(self):
+        description = (
+            "支持‘半小时后提醒我喝水’等自然表达；缺少时间或提醒内容时必须先追问。"
+        )
+        client = MCPClient()
+        await client.add_tool(
+            {
+                "name": "self.schedule.create",
+                "description": description,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"when": {"type": "string"}},
+                    "required": ["when"],
+                },
+            }
+        )
+
+        tool = client.get_available_tools()[0]["function"]
+        self.assertEqual("self_schedule_create", tool["name"])
+        self.assertEqual(description, tool["description"])
+        self.assertIn("自然表达", tool["description"])
+        self.assertIn("必须先追问", tool["description"])
+
+
+class DeviceMcpExecutorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_device_response_is_authoritative_and_skips_second_llm(self):
+        conn = Mock()
+        conn.mcp_client.is_ready = AsyncMock(return_value=True)
+        executor = DeviceMCPExecutor(conn)
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_executor.call_mcp_tool",
+            new=AsyncMock(
+                return_value='{"action":"RESPONSE","response":"提醒已设置"}'
+            ),
+        ):
+            result = await executor.execute(
+                conn, "self_schedule_create", {"label": "喝水"}
+            )
+
+        self.assertEqual(Action.RESPONSE, result.action)
+        self.assertEqual("提醒已设置", result.response)
+
+    async def test_device_failure_is_error_and_never_claims_success(self):
+        conn = Mock()
+        conn.mcp_client.is_ready = AsyncMock(return_value=True)
+        executor = DeviceMCPExecutor(conn)
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_executor.call_mcp_tool",
+            new=AsyncMock(side_effect=RuntimeError("设备写入失败")),
+        ):
+            result = await executor.execute(
+                conn, "self_schedule_create", {"label": "喝水"}
+            )
+
+        self.assertEqual(Action.ERROR, result.action)
+        self.assertIn("设备写入失败", result.response)
+        self.assertNotIn("成功", result.response)
+
+    async def test_device_error_response_is_authoritative(self):
+        conn = Mock()
+        conn.mcp_client.is_ready = AsyncMock(return_value=True)
+        executor = DeviceMCPExecutor(conn)
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_executor.call_mcp_tool",
+            new=AsyncMock(
+                return_value='{"action":"ERROR","response":"缺少提醒时间"}'
+            ),
+        ):
+            result = await executor.execute(conn, "self_schedule_create", {})
+
+        self.assertEqual(Action.ERROR, result.action)
+        self.assertEqual("缺少提醒时间", result.response)
 
 
 if __name__ == "__main__":

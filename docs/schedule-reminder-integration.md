@@ -1,0 +1,51 @@
+# 设备本地日程提醒接入
+
+本文记录小智服务端与设备本地日程提醒的边界和通知契约。设备端的持久化、定时触发、停止与稍后提醒行为，以设备项目的 `docs/schedule-reminder.md` 为配套规范。
+
+## 架构边界
+
+- 日程由设备本地保存和调度；服务端不新增数据库、HTTP 接口、manager-api 或 manager-web 页面。
+- 服务端通过设备动态上报的 MCP 工具描述，将 `self.schedule.create/list/delete/clear/stop/snooze` 暴露给主 LLM。工具名会按既有规则转换为下划线形式，设备描述中的自然表达示例和缺失信息追问规则保持可见。
+- 工具执行结果以设备返回为准。设备返回 `action=RESPONSE` 时，服务端直接播报 `response`，不再交给第二次 LLM 改写；设备报错时必须按失败处理，不能声称创建成功。
+- 工具调用前提示“我来处理一下”只用于 `web_search` 和 `search_from_ragflow`，日程工具不播放该提示。
+
+## 触发通知契约
+
+设备在本地到点后，通过已有设备 MCP WebSocket 发送：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/schedule/triggered",
+  "params": {
+    "version": 1,
+    "id": 7,
+    "kind": "reminder",
+    "label": "喝水",
+    "triggered_at": "2026-08-07T14:30:00",
+    "speak": true
+  }
+}
+```
+
+服务端仅接受同时满足以下条件的通知：
+
+- `params` 是对象；
+- `version` 是非布尔整数且严格等于 `1`；
+- `id` 是非布尔正整数；
+- `kind` 严格等于 `reminder`；
+- `label` 去除首尾空白后包含 1 至 80 个 Unicode 字符；
+- `triggered_at` 是有效本地日期时间，格式严格为 `YYYY-MM-DDTHH:MM:SS`，不带时区；
+- `speak` 严格为 `true`。
+
+有效通知直接生成并播报 `提醒你：{label}`，同时按普通助手回复写入对话记录，不调用 LLM。无效或未知通知只记录不含 `label` 正文的安全日志，并拒绝播报。
+
+## 并发与打断语义
+
+设备触发提醒前会先发送 `abort`，因此服务端开始主动通知轮次时会清除旧轮次留下的 `client_abort`，分配新的 `sentence_id`，再取消旧 LLM。主动播报复用统一的 `FIRST → 单句文本 → LAST` TTS 序列和对话记录逻辑，网易云状态通知也使用同一处理器。
+
+取消旧 LLM 的等待期间，用户输入始终优先：如果新的用户轮次改变了 `sentence_id`，或再次设置 `client_abort=true`，该提醒立即失效，不得写入对话或开始播报。这一保护避免旧通知覆盖新用户请求。
+
+## 设备职责
+
+设备负责本地时间解释、日程持久化、到点触发、重启恢复、停止和稍后提醒。服务端只负责把动态工具提供给主 LLM、转发工具调用、处理权威设备响应，以及校验并播报到点通知。设备与服务端必须共同遵守上述版本化通知契约。

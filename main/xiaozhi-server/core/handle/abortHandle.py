@@ -44,6 +44,7 @@ async def handleAbortMessage(conn: "ConnectionHandler"):
     conn.logger.bind(tag=TAG).info("Abort message received")
     # 设置成打断状态，会自动打断llm、tts任务
     conn.close_after_chat = False
+    conn.abort_generation = getattr(conn, "abort_generation", 0) + 1
     conn.client_abort = True
     from plugins_func.functions.play_netease_music import interrupt_netease_playback
 

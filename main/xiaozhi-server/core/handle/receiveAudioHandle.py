@@ -123,6 +123,7 @@ async def startToChat(conn: "ConnectionHandler", text):
     if conn.client_is_speaking and conn.client_listen_mode != "manual":
         await handleAbortMessage(conn)
     else:
+        conn.abort_generation = getattr(conn, "abort_generation", 0) + 1
         conn.client_abort = True
         await cancelActiveLLMResponse(conn, previous_sentence_id)
     current_sentence_id = uuid.uuid4().hex

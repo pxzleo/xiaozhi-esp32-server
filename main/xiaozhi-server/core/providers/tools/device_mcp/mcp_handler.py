@@ -5,6 +5,7 @@ import json
 import re
 import uuid
 from concurrent.futures import Future
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from config.logger import setup_logging
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
 
 TAG = __name__
 logger = setup_logging()
+SCHEDULE_TRIGGERED_METHOD = "notifications/schedule/triggered"
+_LOCAL_DATETIME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
 
 
 def _device_tool_description(name: str, description: str) -> str:
@@ -136,14 +139,18 @@ async def send_mcp_message(conn: "ConnectionHandler", payload: dict):
 
 
 async def handle_mcp_message(
-    conn: "ConnectionHandler", mcp_client: MCPClient, payload: dict
+    conn: "ConnectionHandler",
+    mcp_client: MCPClient,
+    payload: dict,
+    notification_state=None,
 ):
     """处理MCP消息,包括初始化、工具列表和工具调用响应等"""
     if not isinstance(payload, dict):
         logger.bind(tag=TAG).error("MCP消息缺少payload字段或格式错误")
         return
-    if payload.get("method") == "notifications/netease_music/status":
-        logger.bind(tag=TAG).debug("处理网易云状态MCP通知")
+    method = payload.get("method")
+    if isinstance(method, str) and method.startswith("notifications/"):
+        logger.bind(tag=TAG).debug("处理设备MCP通知")
     else:
         logger.bind(tag=TAG).debug(f"处理MCP消息: {str(payload)[:100]}")
 
@@ -244,7 +251,17 @@ async def handle_mcp_message(
     elif "method" in payload:
         method = payload["method"]
         if method == "notifications/netease_music/status":
-            await _handle_netease_music_status_notification(conn, payload.get("params"))
+            await _handle_netease_music_status_notification(
+                conn, payload.get("params"), notification_state
+            )
+            return
+        if method == SCHEDULE_TRIGGERED_METHOD:
+            await _handle_schedule_triggered_notification(
+                conn, payload.get("params"), notification_state
+            )
+            return
+        if isinstance(method, str) and method.startswith("notifications/"):
+            logger.bind(tag=TAG).warning("拒绝未知的设备MCP通知")
             return
         logger.bind(tag=TAG).info(f"收到MCP客户端请求: {method}")
 
@@ -260,7 +277,9 @@ async def handle_mcp_message(
             )
 
 
-async def _handle_netease_music_status_notification(conn, params):
+async def _handle_netease_music_status_notification(
+    conn, params, notification_state=None
+):
     if not isinstance(params, dict):
         logger.bind(tag=TAG).warning("网易云状态通知参数格式错误")
         return
@@ -272,12 +291,85 @@ async def _handle_netease_music_status_notification(conn, params):
         return
 
     text = message.strip()
+    await _speak_proactive_notification(
+        conn, text, "网易云状态", notification_state
+    )
+
+
+async def _handle_schedule_triggered_notification(
+    conn, params, notification_state=None
+):
+    if not isinstance(params, dict):
+        logger.bind(tag=TAG).warning("日程提醒通知参数格式错误")
+        return
+
+    version = params.get("version")
+    schedule_id = params.get("id")
+    label = params.get("label")
+    triggered_at = params.get("triggered_at")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        logger.bind(tag=TAG).warning("日程提醒通知版本无效")
+        return
+    if (
+        not isinstance(schedule_id, int)
+        or isinstance(schedule_id, bool)
+        or schedule_id <= 0
+    ):
+        logger.bind(tag=TAG).warning("日程提醒通知ID无效")
+        return
+    if params.get("kind") != "reminder":
+        logger.bind(tag=TAG).warning("日程提醒通知类型无效")
+        return
+    if not isinstance(label, str):
+        logger.bind(tag=TAG).warning("日程提醒通知标题格式错误")
+        return
+    normalized_label = label.strip()
+    if not normalized_label or len(normalized_label) > 80:
+        logger.bind(tag=TAG).warning("日程提醒通知标题为空或过长")
+        return
+    if not isinstance(triggered_at, str) or not _LOCAL_DATETIME_PATTERN.fullmatch(
+        triggered_at
+    ):
+        logger.bind(tag=TAG).warning("日程提醒通知触发时间格式错误")
+        return
+    try:
+        datetime.strptime(triggered_at, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        logger.bind(tag=TAG).warning("日程提醒通知触发时间无效")
+        return
+    if params.get("speak") is not True:
+        logger.bind(tag=TAG).warning("日程提醒通知未要求语音播报")
+        return
+
+    await _speak_proactive_notification(
+        conn,
+        f"提醒你：{normalized_label}",
+        "日程提醒",
+        notification_state,
+    )
+
+
+async def _speak_proactive_notification(
+    conn, text, notification_name, notification_state=None
+):
+    if notification_state is not None:
+        received_sentence_id, received_abort_generation = notification_state
+        if (
+            conn.sentence_id != received_sentence_id
+            or getattr(conn, "abort_generation", 0) != received_abort_generation
+        ):
+            logger.bind(tag=TAG).info(
+                f"{notification_name}通知在处理前被新的对话轮次替代"
+            )
+            return
     previous_sentence_id = conn.sentence_id
     sentence_id = uuid.uuid4().hex
+    # 设备触发提醒前会先发 abort；该状态只属于旧轮次。
+    conn.client_abort = False
     conn.sentence_id = sentence_id
     await cancelActiveLLMResponse(conn, previous_sentence_id)
     if conn.sentence_id != sentence_id or conn.client_abort:
-        logger.bind(tag=TAG).info("网易云状态通知被新的对话轮次替代")
+        logger.bind(tag=TAG).info(f"{notification_name}通知被新的对话轮次替代")
         return
     conn.tts.store_tts_text(sentence_id, text)
     conn.tts.tts_text_queue.put(TTSMessageDTO(
@@ -294,7 +386,7 @@ async def _handle_netease_music_status_notification(conn, params):
         content_type=ContentType.ACTION,
     ))
     conn.dialogue.put(Message(role="assistant", content=text))
-    logger.bind(tag=TAG).info("已处理网易云登录状态语音通知")
+    logger.bind(tag=TAG).info(f"已处理{notification_name}语音通知")
 
 
 async def send_mcp_initialize_message(conn: "ConnectionHandler"):
