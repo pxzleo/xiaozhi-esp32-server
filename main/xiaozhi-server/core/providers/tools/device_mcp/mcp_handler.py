@@ -319,7 +319,8 @@ async def _handle_schedule_triggered_notification(
     ):
         logger.bind(tag=TAG).warning("日程提醒通知ID无效")
         return
-    if params.get("kind") != "reminder":
+    schedule_kind = params.get("kind")
+    if schedule_kind not in ("alarm", "reminder"):
         logger.bind(tag=TAG).warning("日程提醒通知类型无效")
         return
     if not isinstance(label, str):
@@ -343,11 +344,14 @@ async def _handle_schedule_triggered_notification(
         logger.bind(tag=TAG).warning("日程提醒通知未要求语音播报")
         return
 
+    if schedule_kind == "alarm":
+        text = f"闹铃时间到了：{normalized_label}"
+        notification_name = "闹铃"
+    else:
+        text = f"提醒你：{normalized_label}"
+        notification_name = "日程提醒"
     await _speak_proactive_notification(
-        conn,
-        f"提醒你：{normalized_label}",
-        "日程提醒",
-        notification_state,
+        conn, text, notification_name, notification_state
     )
 
 

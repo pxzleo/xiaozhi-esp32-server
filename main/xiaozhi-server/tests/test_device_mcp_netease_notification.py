@@ -158,6 +158,26 @@ class ScheduleMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put.assert_called_once()
         conn.llm.assert_not_called()
 
+    async def test_valid_alarm_speaks_exact_text_without_llm(self):
+        conn = Mock()
+        conn.sentence_id = "old-turn"
+        conn.client_abort = False
+
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
+            new=AsyncMock(return_value=True),
+        ):
+            await handle_mcp_message(
+                conn,
+                Mock(),
+                self._valid_payload(kind="alarm", label="  起床  "),
+            )
+
+        _, text = conn.tts.store_tts_text.call_args.args
+        self.assertEqual("闹铃时间到了：起床", text)
+        conn.tts.tts_one_sentence.assert_called_once()
+        conn.dialogue.put.assert_called_once()
+
     async def test_reconnected_reminder_waits_for_delayed_tts_initialization(self):
         tts_ready = asyncio.Event()
         conn = SimpleNamespace(
@@ -333,7 +353,7 @@ class ScheduleMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
             self._valid_payload(id=1.0),
             self._valid_payload(id=0),
             self._valid_payload(id=-1),
-            self._valid_payload(kind="alarm"),
+            self._valid_payload(kind="timer"),
             self._valid_payload(label=None),
             self._valid_payload(label="   "),
             self._valid_payload(label="醒" * 81),
