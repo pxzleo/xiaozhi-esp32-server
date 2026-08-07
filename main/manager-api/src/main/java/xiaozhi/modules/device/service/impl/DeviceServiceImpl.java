@@ -24,6 +24,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
@@ -59,6 +60,7 @@ import xiaozhi.modules.device.dto.DeviceReportReqDTO;
 import xiaozhi.modules.device.dto.DeviceReportRespDTO;
 import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.entity.OtaEntity;
+import xiaozhi.modules.device.netease.DeviceNeteaseService;
 import xiaozhi.modules.device.service.DeviceAddressBookService;
 import xiaozhi.modules.device.service.DeviceService;
 import xiaozhi.modules.device.service.OtaService;
@@ -78,6 +80,7 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
     private final RedisUtils redisUtils;
     private final OtaService otaService;
     private final DeviceAddressBookService deviceAddressBookService;
+    private final DeviceNeteaseService deviceNeteaseService;
 
     @Async
     public void updateDeviceConnectionInfo(String agentId, String deviceId, String appVersion) {
@@ -310,10 +313,14 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void unbindDevice(Long userId, String deviceId) {
         // 先查询设备信息，获取agentId和macAddress
-        DeviceEntity device = baseDao.selectById(deviceId);
+        DeviceEntity device = deviceDao.selectByIdForUpdate(deviceId);
         if (device == null) {
+            return;
+        }
+        if (!userId.equals(device.getUserId())) {
             return;
         }
         String macAddress = device.getMacAddress();
@@ -322,6 +329,7 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
             redisUtils.delete(RedisKeys.getAgentDeviceCountById(device.getAgentId()));
         }
 
+        deviceNeteaseService.revokeForDeviceRemoval(macAddress);
         UpdateWrapper<DeviceEntity> wrapper = new UpdateWrapper<>();
         wrapper.eq("user_id", userId);
         wrapper.eq("id", deviceId);
@@ -332,7 +340,11 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void deleteByUserId(Long userId) {
+        List<DeviceEntity> devices = deviceDao.selectByUserIdForUpdate(userId);
+        devices.stream().map(DeviceEntity::getMacAddress)
+                .forEach(deviceNeteaseService::revokeForDeviceRemoval);
         UpdateWrapper<DeviceEntity> wrapper = new UpdateWrapper<>();
         wrapper.eq("user_id", userId);
         baseDao.delete(wrapper);
@@ -346,11 +358,13 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void deleteByAgentId(String agentId) {
         // 先查询该智能体下的所有设备，获取mac地址用于删除通讯录记录
-        QueryWrapper<DeviceEntity> queryWrapper = new QueryWrapper<>();
-        queryWrapper.eq("agent_id", agentId);
-        List<DeviceEntity> devices = baseDao.selectList(queryWrapper);
+        List<DeviceEntity> devices = deviceDao.selectByAgentIdForUpdate(agentId);
+
+        devices.stream().map(DeviceEntity::getMacAddress)
+                .forEach(deviceNeteaseService::revokeForDeviceRemoval);
 
         // 删除设备
         UpdateWrapper<DeviceEntity> wrapper = new UpdateWrapper<>();

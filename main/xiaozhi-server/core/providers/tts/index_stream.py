@@ -81,9 +81,12 @@ class TTSProvider(TTSProviderBase):
                                     )
                                 )
 
+                            playback_callback = self._playback_file_callback(
+                                message, enqueue_current_file_frame
+                            )
                             self._process_audio_file_stream(
                                 message.content_file,
-                                callback=enqueue_current_file_frame,
+                                callback=playback_callback,
                             )
                     except InterruptedError:
                         pass

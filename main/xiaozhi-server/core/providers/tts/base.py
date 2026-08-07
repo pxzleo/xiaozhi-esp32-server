@@ -17,13 +17,18 @@ from core.utils import opus_encoder_utils
 from core.utils.tts import MarkdownCleaner, convert_percentage_to_range
 from core.utils.output_counter import add_device_output
 from core.handle.reportHandle import enqueue_tts_report
-from core.handle.sendAudioHandle import sendAudioMessage, _wait_for_audio_completion
+from core.handle.sendAudioHandle import (
+    sendAudioMessage,
+    queue_music_lyrics_event,
+    _wait_for_audio_completion,
+)
 from core.utils.util import audio_bytes_to_data_stream, audio_to_data_stream
 from core.providers.tts.dto.dto import (
     TTSMessageDTO,
     SentenceType,
     ContentType,
     InterfaceType,
+    PlaybackEventDTO,
 )
 
 TAG = __name__
@@ -396,7 +401,10 @@ class TTSProviderBase(ABC):
                     tts_file = message.content_file
                     if tts_file and os.path.exists(tts_file):
                         self._process_audio_file_stream(
-                            tts_file, callback=self.handle_opus
+                            tts_file,
+                            callback=self._playback_file_callback(
+                                message, self.handle_opus
+                            ),
                         )
                 if message.sentence_type == SentenceType.LAST:
                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
@@ -431,6 +439,13 @@ class TTSProviderBase(ABC):
             try:
                 try:
                     item = self.tts_audio_queue.get(timeout=0.1)
+                    if isinstance(item, PlaybackEventDTO):
+                        event_future = asyncio.run_coroutine_threadsafe(
+                            queue_music_lyrics_event(self.conn, item.event),
+                            self.conn.loop,
+                        )
+                        event_future.result()
+                        continue
                     completion_event = None
                     if len(item) == 5:
                         sentence_type, audio_datas, text, sentence_id, completion_event = item
@@ -494,6 +509,22 @@ class TTSProviderBase(ABC):
 
             except Exception as e:
                 logger.bind(tag=TAG).error(f"audio_play_priority_thread: {text} {e}")
+
+    def _enqueue_playback_event(self, message):
+        if message.playback_event:
+            self.tts_audio_queue.put(PlaybackEventDTO(message.playback_event))
+
+    def _playback_file_callback(self, message, callback):
+        event_pending = True
+
+        def wrapped(audio_data):
+            nonlocal event_pending
+            if event_pending:
+                self._enqueue_playback_event(message)
+                event_pending = False
+            callback(audio_data)
+
+        return wrapped
 
     async def start_session(self, session_id):
         pass

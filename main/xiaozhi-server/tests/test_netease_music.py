@@ -47,6 +47,31 @@ class _SelectionClient:
 
 
 class NeteaseMusicSelectionTest(unittest.IsolatedAsyncioTestCase):
+    def test_parses_lrc_timestamps_for_client_playback_clock(self):
+        lines = netease._parse_lrc_lyrics(
+            "[ar:歌手]\n[00:01.20][00:03.450]第一句\n[00:05.000]第二句\n"
+        )
+
+        self.assertEqual(
+            lines,
+            [
+                {"start_ms": 1200, "text": "第一句"},
+                {"start_ms": 3450, "text": "第一句"},
+                {"start_ms": 5000, "text": "第二句"},
+            ],
+        )
+
+    async def test_client_fetches_standard_timeline_lyrics(self):
+        client = netease.NeteaseMusicClient({"api_base_url": "http://localhost:3000"})
+        client._request = AsyncMock(
+            return_value={"lrc": {"lyric": "[00:01.000]第一句"}}
+        )
+
+        lyric = await client.lyrics(123)
+
+        self.assertEqual(lyric, "[00:01.000]第一句")
+        client._request.assert_awaited_once_with("/lyric", {"id": "123"})
+
     def test_tool_schema_exposes_playback_controls(self):
         properties = netease.play_netease_music_function_desc["function"]["parameters"][
             "properties"
@@ -60,6 +85,123 @@ class NeteaseMusicSelectionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(properties["position"]["type"], "integer")
         self.assertEqual(properties["position"]["minimum"], 1)
+
+
+class NeteaseDeviceCredentialTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fetches_current_device_credential_and_overrides_legacy_cookie(self):
+        conn = Mock()
+        conn.config = {
+            "plugins": {"play_netease_music": {"cookie": "legacy", "quality": "standard"}},
+            "manager-api": {"url": "http://manager/xiaozhi", "secret": "server-secret"},
+        }
+        conn.headers = {"device-id": "11:22:33:44:55:66"}
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "code": 0,
+            "data": {
+                "authorized": True,
+                "internalCredential": "device-cookie",
+                "credentialVersion": 7,
+            },
+        }
+        with patch.object(netease.httpx, "AsyncClient") as client_class:
+            client = client_class.return_value.__aenter__.return_value
+            client.post = AsyncMock(return_value=response)
+            config = await netease._device_plugin_config(conn)
+
+        self.assertEqual(config["cookie"], "device-cookie")
+        self.assertEqual(config["_credential_version"], 7)
+        url = client.post.await_args.args[0]
+        self.assertNotIn("device-cookie", url)
+        self.assertNotIn("legacy", url)
+
+    async def test_unconfigured_device_reports_manager_unavailable(self):
+        conn = Mock()
+        conn.config = {
+            "plugins": {"play_netease_music": {"cookie": "legacy"}},
+            "manager-api": {},
+        }
+        conn.headers = {"device-id": "11:22:33:44:55:66"}
+
+        with self.assertRaises(netease.NeteaseManagerUnavailableError):
+            await netease._device_plugin_config(conn)
+
+    async def test_explicitly_logged_out_device_stays_anonymous(self):
+        conn = Mock()
+        conn.config = {
+            "plugins": {"play_netease_music": {"cookie": "legacy"}},
+            "manager-api": {"url": "http://manager", "secret": "secret"},
+        }
+        conn.headers = {"device-id": "11:22:33:44:55:66"}
+        conn.config["manager-api"] = {"url": "http://manager", "secret": "secret"}
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "code": 0,
+            "data": {"authorized": False, "internalCredential": None},
+        }
+        with patch.object(netease.httpx, "AsyncClient") as client_class:
+            client_class.return_value.__aenter__.return_value.post = AsyncMock(return_value=response)
+            self.assertEqual((await netease._device_plugin_config(conn))["cookie"], "")
+
+    async def test_manager_transport_and_payload_failures_are_not_anonymous(self):
+        conn = Mock()
+        conn.config = {
+            "plugins": {"play_netease_music": {"cookie": "legacy"}},
+            "manager-api": {"url": "http://manager", "secret": "secret"},
+        }
+        conn.headers = {"device-id": "11:22:33:44:55:66"}
+
+        response_500 = Mock()
+        response_500.raise_for_status.side_effect = netease.httpx.HTTPError("500")
+        bad_json = Mock()
+        bad_json.raise_for_status.return_value = None
+        bad_json.json.side_effect = ValueError("bad json")
+        non_object_json = Mock()
+        non_object_json.raise_for_status.return_value = None
+        non_object_json.json.return_value = []
+        failures = [
+            netease.httpx.TimeoutException("timeout"),
+            response_500,
+            bad_json,
+            non_object_json,
+        ]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                with patch.object(netease.httpx, "AsyncClient") as client_class:
+                    client = client_class.return_value.__aenter__.return_value
+                    post = AsyncMock()
+                    client.post = post
+                    if isinstance(failure, Exception):
+                        post.side_effect = failure
+                    else:
+                        post.return_value = failure
+                    with self.assertRaises(netease.NeteaseManagerUnavailableError):
+                        await netease._device_plugin_config(conn)
+
+    async def test_authentication_failure_reports_the_exact_credential_version(self):
+        conn = Mock()
+        conn.logger.bind.return_value = conn.logger
+        config = {
+            "api_base_url": "http://localhost:3000",
+            "cookie": "device-cookie",
+            "_credential_version": 9,
+        }
+        with (
+            patch.object(netease, "_device_plugin_config", AsyncMock(return_value=config)),
+            patch.object(netease, "NeteaseMusicCache"),
+            patch.object(
+                netease,
+                "_prepare_playback",
+                AsyncMock(side_effect=netease.NeteaseAuthenticationRequiredError("expired")),
+            ),
+            patch.object(netease, "_invalidate_device_credential", AsyncMock()) as invalidate,
+        ):
+            response = await netease.play_netease_music(conn, action="song", name="测试")
+
+        invalidate.assert_awaited_once_with(conn, 9)
+        self.assertIn("重新扫码登录", response.response)
 
     def test_tool_schema_exposes_artist_queue(self):
         actions = netease.play_netease_music_function_desc["function"]["parameters"][
@@ -609,6 +751,43 @@ class _Connection:
 
 
 class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
+    async def test_track_queue_contains_timed_lyrics_start_event(self):
+        connection = _Connection()
+        lyrics_loader = AsyncMock(
+            return_value="[00:01.000]第一句\n[00:05.000]第二句"
+        )
+        state = netease._start_playback(
+            connection,
+            "开始播放",
+            [
+                (
+                    {
+                        "id": 1,
+                        "name": "测试歌曲",
+                        "ar": [{"name": "测试歌手"}],
+                    },
+                    Path("/cache/1.mp3"),
+                )
+            ],
+            lyrics_loader=lyrics_loader,
+        )
+        await asyncio.sleep(0.01)
+
+        file_message = next(
+            message
+            for message in connection.tts.tts_text_queue.items
+            if message.content_type == netease.ContentType.FILE
+        )
+        event = file_message.playback_event
+        self.assertEqual(event["action"], "start")
+        self.assertEqual(event["track"]["id"], "1")
+        self.assertEqual(event["track"]["title"], "测试歌曲")
+        self.assertEqual(event["track"]["artists"], ["测试歌手"])
+        self.assertEqual(event["lines"][0], {"start_ms": 1000, "text": "第一句"})
+        self.assertTrue(event["playback_id"])
+        lyrics_loader.assert_awaited_once_with(1)
+        netease.close_netease_playback(connection)
+
     async def test_playlist_schedules_one_track_at_a_time(self):
         connection = _Connection()
         resolved = [
@@ -770,6 +949,9 @@ class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_pause_and_stop_keep_or_clear_saved_queue(self):
         connection = _Connection()
+        connection.features = {"mcp": True}
+        connection.websocket = Mock()
+        connection.websocket.send = AsyncMock()
         connection._netease_playback = netease.NeteasePlaybackState(
             resolved=[({"id": 1, "name": "第一首"}, Path("/cache/1.mp3"))],
             index=0,
@@ -780,6 +962,9 @@ class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(paused.response, "已暂停播放")
         self.assertEqual(connection._netease_playback.status, "paused")
         self.assertIsNone(connection.server_audio_playback_sentence_id)
+        pause_event = connection.websocket.send.await_args.args[0]
+        self.assertIn('"action": "clear"', pause_event)
+        self.assertIn('"reason": "paused"', pause_event)
 
         stopped = await netease._control_playback(connection, "stop")
         self.assertEqual(stopped.response, "已停止播放")

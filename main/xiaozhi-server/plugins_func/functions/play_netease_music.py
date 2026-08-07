@@ -5,6 +5,7 @@ import random
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +14,7 @@ from urllib.parse import urlparse
 import httpx
 
 from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
+from core.handle.sendAudioHandle import send_music_lyrics_event
 from plugins_func.register import Action, ActionResponse, ToolType, register_function
 
 if TYPE_CHECKING:
@@ -28,6 +30,9 @@ DEFAULT_CACHE_TTL_HOURS = 24
 DEFAULT_MAX_FILE_SIZE_MB = 40
 DEFAULT_PREPARE_TIMEOUT_SECONDS = 20
 ROLLING_PREFETCH_THRESHOLD = 3
+LYRIC_FETCH_TIMEOUT_SECONDS = 3
+MAX_LYRIC_LINES = 500
+MAX_LYRIC_TEXT_CHARS = 32_000
 PREPARE_FILE_PROTECTION_SECONDS = 60
 QUEUE_FILE_PROTECTION_SECONDS = 12 * 3600
 SUPPORTED_QUALITY_LEVELS = {
@@ -113,6 +118,10 @@ class NeteaseMusicUnavailableError(NeteaseMusicError):
     """歌曲对当前账号不可播放。"""
 
 
+class NeteaseManagerUnavailableError(NeteaseMusicError):
+    """设备登录状态服务暂时不可用。"""
+
+
 @dataclass
 class NeteasePlaybackState:
     resolved: list
@@ -124,6 +133,7 @@ class NeteasePlaybackState:
     load_more: object = None
     prefetch_task: object = None
     source_exhausted: bool = False
+    lyrics_loader: object = None
 
 
 play_netease_music_function_desc = {
@@ -231,6 +241,70 @@ def _song_title(song):
     name = str(song.get("name", "未知歌曲")).strip()
     artists = _song_artists(song)
     return f"{name} - {artists}" if artists else name
+
+
+def _song_artist_names(song):
+    return [
+        str(artist.get("name") or "").strip()
+        for artist in (song.get("ar") or song.get("artists") or [])
+        if str(artist.get("name") or "").strip()
+    ]
+
+
+_LRC_TIMESTAMP_PATTERN = re.compile(
+    r"\[(\d{1,3}):(\d{2})(?:[\.:](\d{1,3}))?\]"
+)
+
+
+def _parse_lrc_lyrics(value):
+    parsed = []
+    total_text_chars = 0
+    for raw_line in str(value or "").splitlines():
+        timestamps = list(_LRC_TIMESTAMP_PATTERN.finditer(raw_line))
+        if not timestamps:
+            continue
+        text = _LRC_TIMESTAMP_PATTERN.sub("", raw_line).strip()
+        if not text:
+            continue
+        text = text[:200]
+        for timestamp in timestamps:
+            minutes = int(timestamp.group(1))
+            seconds = int(timestamp.group(2))
+            if seconds >= 60:
+                continue
+            fraction = timestamp.group(3) or "0"
+            milliseconds = int(fraction.ljust(3, "0")[:3])
+            start_ms = (minutes * 60 + seconds) * 1000 + milliseconds
+            if start_ms > 24 * 60 * 60 * 1000:
+                continue
+            if len(parsed) >= MAX_LYRIC_LINES:
+                break
+            if total_text_chars + len(text) > MAX_LYRIC_TEXT_CHARS:
+                break
+            parsed.append({"start_ms": start_ms, "text": text})
+            total_text_chars += len(text)
+        if (
+            len(parsed) >= MAX_LYRIC_LINES
+            or total_text_chars >= MAX_LYRIC_TEXT_CHARS
+        ):
+            break
+    return sorted(parsed, key=lambda line: line["start_ms"])
+
+
+def _build_lyrics_start_event(song, lyric_text):
+    lines = _parse_lrc_lyrics(lyric_text)
+    return {
+        "version": 1,
+        "action": "start",
+        "playback_id": uuid.uuid4().hex,
+        "track": {
+            "id": _safe_song_id(song.get("id")),
+            "title": str(song.get("name") or "未知歌曲").strip(),
+            "artists": _song_artist_names(song),
+        },
+        "available": bool(lines),
+        "lines": lines,
+    }
 
 
 def _is_public_free_song(song):
@@ -376,7 +450,7 @@ class NeteaseMusicClient:
 
     async def account_profile(self):
         if not self.is_authenticated:
-            raise NeteaseAuthenticationRequiredError("请先在管理端扫码登录网易云音乐")
+            raise NeteaseAuthenticationRequiredError("请先让当前设备扫码登录网易云音乐")
         if self._profile:
             return self._profile
         payload = await self._request("/user/account")
@@ -420,6 +494,11 @@ class NeteaseMusicClient:
         await self.account_profile()
         payload = await self._request("/personal_fm")
         return payload.get("data") or []
+
+    async def lyrics(self, song_id):
+        payload = await self._request("/lyric", {"id": _safe_song_id(song_id)})
+        lyric = payload.get("lrc", {}).get("lyric")
+        return lyric if isinstance(lyric, str) else ""
 
     async def playable_url(self, song):
         if not self.is_authenticated and not _is_public_free_song(song):
@@ -681,6 +760,78 @@ def _plugin_config(conn):
     return config
 
 
+async def _device_plugin_config(conn):
+    """返回当前设备配置；旧的智能体 cookie 永远不会进入播放客户端。"""
+    config = dict(_plugin_config(conn))
+    config["cookie"] = ""
+    manager_config = conn.config.get("manager-api", {})
+    manager_url = str(manager_config.get("url") or "").strip().rstrip("/")
+    manager_secret = str(manager_config.get("secret") or "").strip()
+    device_id = str((conn.headers or {}).get("device-id") or "").strip()
+    if not manager_url or not manager_secret or not device_id:
+        raise NeteaseManagerUnavailableError("设备登录状态服务未配置")
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0, connect=3.0),
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            response = await client.post(
+                f"{manager_url}/config/netease-auth",
+                headers={"Authorization": f"Bearer {manager_secret}"},
+                json={"macAddress": device_id},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        raise NeteaseManagerUnavailableError("设备登录状态服务暂时不可用") from exc
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    authorized = data.get("authorized") if isinstance(data, dict) else None
+    if (not isinstance(payload, dict) or payload.get("code") != 0
+            or not isinstance(data, dict) or not isinstance(authorized, bool)):
+        raise NeteaseManagerUnavailableError("设备登录状态服务返回了无效数据")
+    if authorized:
+        credential = str(data.get("internalCredential") or "").strip()
+        credential_version = data.get("credentialVersion")
+        if not credential or not isinstance(credential_version, int):
+            raise NeteaseManagerUnavailableError("设备登录状态服务返回了无效数据")
+        config["cookie"] = credential
+        config["_credential_version"] = credential_version
+    return config
+
+
+async def _invalidate_device_credential(conn, credential_version):
+    if credential_version is None:
+        return
+    manager_config = conn.config.get("manager-api", {})
+    manager_url = str(manager_config.get("url") or "").strip().rstrip("/")
+    manager_secret = str(manager_config.get("secret") or "").strip()
+    device_id = str((conn.headers or {}).get("device-id") or "").strip()
+    if not manager_url or not manager_secret or not device_id:
+        return
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0, connect=3.0),
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            response = await client.post(
+                f"{manager_url}/config/netease-auth/invalidate",
+                headers={"Authorization": f"Bearer {manager_secret}"},
+                json={
+                    "macAddress": device_id,
+                    "credentialVersion": credential_version,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("code") != 0:
+                raise ValueError("invalid manager-api response")
+    except (httpx.HTTPError, ValueError, TypeError):
+        conn.logger.bind(tag=TAG).warning("设备网易云凭证失效回报失败")
+
+
 async def _select_tracks(client, action, name, max_tracks):
     if client.is_authenticated:
         await client.account_profile()
@@ -704,7 +855,7 @@ async def _select_tracks(client, action, name, max_tracks):
             return tracks, _artist_queue_prompt(str(name).strip(), tracks)
         song = _best_song_match(name, songs)
         if not song:
-            suffix = "，或先在管理端扫码登录" if not client.is_authenticated else ""
+            suffix = "，或先让当前设备扫码登录" if not client.is_authenticated else ""
             raise NeteaseMusicUnavailableError(f"没有找到可播放的《{name}》{suffix}")
         return [song], f"正在为您播放，《{_song_title(song)}》"
 
@@ -720,7 +871,7 @@ async def _select_tracks(client, action, name, max_tracks):
             songs = [song for song in songs if _is_public_free_song(song)]
         tracks = _songs_by_artist(artist_name, songs)[:max_tracks]
         if not tracks:
-            suffix = "，或先在管理端扫码登录" if not client.is_authenticated else ""
+            suffix = "，或先让当前设备扫码登录" if not client.is_authenticated else ""
             raise NeteaseMusicUnavailableError(
                 f"没有找到歌手《{artist_name}》的可播放歌曲{suffix}"
             )
@@ -929,6 +1080,7 @@ def interrupt_netease_playback(conn):
     conn.server_audio_playback_sentence_id = None
     if state.status == "playing":
         state.status = "paused"
+    _schedule_lyrics_clear(conn, "interrupted")
 
 
 def close_netease_playback(conn):
@@ -939,6 +1091,7 @@ def close_netease_playback(conn):
     _release_playback_state(state, release_queue_references=True)
     conn._netease_playback = None
     conn.server_audio_playback_sentence_id = None
+    _schedule_lyrics_clear(conn, "closed")
 
 
 def _clear_audio_queues(conn):
@@ -947,7 +1100,15 @@ def _clear_audio_queues(conn):
         clear_queues()
 
 
-def _enqueue_track(conn, prompt, song, path, completion_event, start_session):
+def _enqueue_track(
+    conn,
+    prompt,
+    song,
+    path,
+    completion_event,
+    start_session,
+    playback_event=None,
+):
     conn.tts.store_tts_text(conn.sentence_id, prompt)
     if start_session:
         conn.tts.tts_text_queue.put(
@@ -974,8 +1135,18 @@ def _enqueue_track(conn, prompt, song, path, completion_event, start_session):
             content_detail=_song_title(song),
             content_file=str(path),
             completion_event=completion_event,
+            playback_event=playback_event,
         )
     )
+
+
+def _schedule_lyrics_clear(conn, reason):
+    if not getattr(conn, "features", {}).get("mcp"):
+        return
+    event = {"version": 1, "action": "clear", "reason": reason}
+    loop = getattr(conn, "loop", None)
+    if loop and loop.is_running():
+        asyncio.run_coroutine_threadsafe(send_music_lyrics_event(conn, event), loop)
 
 
 def _enqueue_playback_end(conn):
@@ -987,6 +1158,7 @@ def _enqueue_playback_end(conn):
         )
     )
     conn.server_audio_playback_sentence_id = None
+    _schedule_lyrics_clear(conn, "completed")
 
 
 def _protect_additional_tracks(state, resolved):
@@ -1030,6 +1202,18 @@ async def _run_playback(conn, state, generation, prompt):
             if stop_event is not None and stop_event.is_set():
                 return
             song, path = state.resolved[state.index]
+            lyric_text = ""
+            if state.lyrics_loader:
+                try:
+                    lyric_text = await asyncio.wait_for(
+                        state.lyrics_loader(song.get("id")),
+                        timeout=LYRIC_FETCH_TIMEOUT_SECONDS,
+                    )
+                except (asyncio.TimeoutError, NeteaseMusicError) as exc:
+                    conn.logger.bind(tag=TAG).warning(
+                        f"获取《{_song_title(song)}》歌词失败: {exc}"
+                    )
+            playback_event = _build_lyrics_start_event(song, lyric_text)
             completion_event = threading.Event()
             _enqueue_track(
                 conn,
@@ -1038,6 +1222,7 @@ async def _run_playback(conn, state, generation, prompt):
                 path,
                 completion_event,
                 start_session,
+                playback_event,
             )
             prompt = ""
             start_session = False
@@ -1062,7 +1247,14 @@ async def _run_playback(conn, state, generation, prompt):
         return
 
 
-def _start_playback(conn, prompt, resolved, index=0, load_more=None):
+def _start_playback(
+    conn,
+    prompt,
+    resolved,
+    index=0,
+    load_more=None,
+    lyrics_loader=None,
+):
     previous = getattr(conn, "_netease_playback", None)
     if previous:
         _clear_audio_queues(conn)
@@ -1074,6 +1266,7 @@ def _start_playback(conn, prompt, resolved, index=0, load_more=None):
         status="playing",
         load_more=load_more,
         source_exhausted=load_more is None,
+        lyrics_loader=lyrics_loader,
     )
     _protect_playback_state(state)
     conn._netease_playback = state
@@ -1108,6 +1301,9 @@ async def _control_playback(conn, action, position=0):
         _cancel_playback_task(state)
         conn.server_audio_playback_sentence_id = None
         state.status = "paused"
+        await send_music_lyrics_event(
+            conn, {"version": 1, "action": "clear", "reason": "paused"}
+        )
         return ActionResponse(
             action=Action.RESPONSE,
             result="已暂停播放",
@@ -1120,6 +1316,9 @@ async def _control_playback(conn, action, position=0):
         _release_playback_state(state, release_queue_references=True)
         conn._netease_playback = None
         conn.server_audio_playback_sentence_id = None
+        await send_music_lyrics_event(
+            conn, {"version": 1, "action": "clear", "reason": "stopped"}
+        )
         return ActionResponse(
             action=Action.RESPONSE,
             result="已停止播放",
@@ -1208,11 +1407,12 @@ async def play_netease_music(
     name: str = "",
     position: int = 0,
 ):
+    config = None
     try:
         if action in {"next", "previous", "jump", "pause", "resume", "stop"}:
             return await _control_playback(conn, action, position=position)
 
-        config = _plugin_config(conn)
+        config = await _device_plugin_config(conn)
         action = _normalize_music_action(action, name)
         client = NeteaseMusicClient(config)
         cache = NeteaseMusicCache(config)
@@ -1247,7 +1447,13 @@ async def play_netease_music(
                 max_tracks,
                 prepare_timeout,
             )
-        _start_playback(conn, prompt, resolved, load_more=load_more)
+        _start_playback(
+            conn,
+            prompt,
+            resolved,
+            load_more=load_more,
+            lyrics_loader=client.lyrics,
+        )
         if skipped:
             conn.logger.bind(tag=TAG).warning(
                 f"网易云播放队列跳过 {len(skipped)} 首不可播放歌曲: {'; '.join(skipped)}"
@@ -1257,9 +1463,12 @@ async def play_netease_music(
             result=f"已加入 {len(resolved)} 首歌曲",
             response=prompt,
         )
-    except NeteaseAuthenticationRequiredError as exc:
-        conn.logger.bind(tag=TAG).warning(f"网易云音乐需要重新登录: {exc}")
-        return ActionResponse(action=Action.RESPONSE, result=str(exc), response=str(exc))
+    except NeteaseAuthenticationRequiredError:
+        if isinstance(config, dict):
+            await _invalidate_device_credential(conn, config.get("_credential_version"))
+        message = "网易云音乐登录已失效，请让当前设备重新扫码登录"
+        conn.logger.bind(tag=TAG).warning("设备网易云凭证已失效，已请求撤销")
+        return ActionResponse(action=Action.RESPONSE, result=message, response=message)
     except NeteaseMusicUnavailableError as exc:
         conn.logger.bind(tag=TAG).warning(f"网易云音乐不可播放: {exc}")
         return ActionResponse(action=Action.RESPONSE, result=str(exc), response=str(exc))

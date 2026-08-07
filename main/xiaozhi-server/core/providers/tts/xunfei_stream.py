@@ -218,7 +218,13 @@ class TTSProvider(TTSProviderBase):
                     )
                     if message.content_file and os.path.exists(message.content_file):
                         # 先处理文件音频数据
-                        self._process_audio_file_stream(message.content_file, callback=lambda audio_data: self.handle_audio_file(audio_data, message.content_detail))
+                        callback = self._playback_file_callback(
+                            message,
+                            lambda audio_data: self.handle_audio_file(
+                                audio_data, message.content_detail
+                            ),
+                        )
+                        self._process_audio_file_stream(message.content_file, callback=callback)
 
                 # 处理会话结束
                 if message.sentence_type == SentenceType.LAST:

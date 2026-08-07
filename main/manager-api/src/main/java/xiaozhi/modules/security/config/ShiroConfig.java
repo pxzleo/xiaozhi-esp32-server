@@ -21,6 +21,7 @@ import org.springframework.context.annotation.Role;
 import jakarta.servlet.Filter;
 import xiaozhi.modules.security.oauth2.Oauth2Filter;
 import xiaozhi.modules.security.oauth2.Oauth2Realm;
+import xiaozhi.modules.security.device.DeviceTokenFilter;
 import xiaozhi.modules.security.secret.ServerSecretFilter;
 import xiaozhi.modules.sys.service.SysParamsService;
 
@@ -65,6 +66,7 @@ public class ShiroConfig {
         filters.put("oauth2", new Oauth2Filter());
         // 服务密钥过滤
         filters.put("server", new ServerSecretFilter(sysParamsService));
+        filters.put("device", new DeviceTokenFilter(sysParamsService));
         shiroFilter.setFilters(filters);
 
         // 添加Shiro的内置过滤器
@@ -91,6 +93,7 @@ public class ShiroConfig {
         filterMap.put("/user/retrieve-password", "anon");
         // 将config路径使用server服务过滤器
         filterMap.put("/config/**", "server");
+        filterMap.put("/device/netease/**", "device");
         filterMap.put("/device/address-book/call", "server");
         filterMap.put("/agent/chat-history/report", "server");
         filterMap.put("/agent/chat-history/download/**", "anon");

@@ -1,19 +1,35 @@
 """设备端MCP客户端支持模块"""
 
-import json
 import asyncio
+import json
 import re
+import uuid
 from concurrent.futures import Future
-from core.utils.util import get_vision_url, sanitize_tool_name
-from core.utils.auth import AuthToken
-from config.logger import setup_logging
 from typing import TYPE_CHECKING
+
+from config.logger import setup_logging
+from core.handle.abortHandle import cancelActiveLLMResponse
+from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
+from core.utils.dialogue import Message
+from core.utils.auth import AuthToken
+from core.utils.util import get_vision_url, sanitize_tool_name
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
 
 TAG = __name__
 logger = setup_logging()
+
+
+def _device_tool_description(name: str, description: str) -> str:
+    if name != "self.netease_music.logout":
+        return description
+    return (
+        f"{description}\n"
+        "当用户要求关闭或隐藏网易云登录二维码、取消本次扫码时，也必须调用本工具。"
+        "本工具会取消当前扫码会话并关闭二维码；不要调整屏幕亮度，"
+        "也不要在未调用本工具时声称二维码已经关闭。"
+    )
 
 
 class MCPClient:
@@ -64,7 +80,11 @@ class MCPClient:
     async def add_tool(self, tool_data: dict):
         async with self.lock:
             sanitized_name = sanitize_tool_name(tool_data["name"])
-            self.tools[sanitized_name] = tool_data
+            normalized_tool = dict(tool_data)
+            normalized_tool["description"] = _device_tool_description(
+                tool_data["name"], str(tool_data.get("description") or "")
+            )
+            self.tools[sanitized_name] = normalized_tool
             self.name_mapping[sanitized_name] = tool_data["name"]
             self._cached_available_tools = (
                 None  # Invalidate the cache when a tool is added
@@ -119,11 +139,13 @@ async def handle_mcp_message(
     conn: "ConnectionHandler", mcp_client: MCPClient, payload: dict
 ):
     """处理MCP消息,包括初始化、工具列表和工具调用响应等"""
-    logger.bind(tag=TAG).debug(f"处理MCP消息: {str(payload)[:100]}")
-
     if not isinstance(payload, dict):
         logger.bind(tag=TAG).error("MCP消息缺少payload字段或格式错误")
         return
+    if payload.get("method") == "notifications/netease_music/status":
+        logger.bind(tag=TAG).debug("处理网易云状态MCP通知")
+    else:
+        logger.bind(tag=TAG).debug(f"处理MCP消息: {str(payload)[:100]}")
 
     # Handle result
     if "result" in payload:
@@ -221,6 +243,9 @@ async def handle_mcp_message(
     # Handle method calls (requests from the client)
     elif "method" in payload:
         method = payload["method"]
+        if method == "notifications/netease_music/status":
+            await _handle_netease_music_status_notification(conn, payload.get("params"))
+            return
         logger.bind(tag=TAG).info(f"收到MCP客户端请求: {method}")
 
     elif "error" in payload:
@@ -233,6 +258,43 @@ async def handle_mcp_message(
             await mcp_client.reject_call_result(
                 msg_id, Exception(f"MCP错误: {error_msg}")
             )
+
+
+async def _handle_netease_music_status_notification(conn, params):
+    if not isinstance(params, dict):
+        logger.bind(tag=TAG).warning("网易云状态通知参数格式错误")
+        return
+    message = params.get("message")
+    if not isinstance(message, str) or not message.strip() or len(message) > 200:
+        logger.bind(tag=TAG).warning("网易云状态通知消息为空或过长")
+        return
+    if params.get("speak") is not True:
+        return
+
+    text = message.strip()
+    previous_sentence_id = conn.sentence_id
+    sentence_id = uuid.uuid4().hex
+    conn.sentence_id = sentence_id
+    await cancelActiveLLMResponse(conn, previous_sentence_id)
+    if conn.sentence_id != sentence_id or conn.client_abort:
+        logger.bind(tag=TAG).info("网易云状态通知被新的对话轮次替代")
+        return
+    conn.tts.store_tts_text(sentence_id, text)
+    conn.tts.tts_text_queue.put(TTSMessageDTO(
+        sentence_id=sentence_id,
+        sentence_type=SentenceType.FIRST,
+        content_type=ContentType.ACTION,
+    ))
+    conn.tts.tts_one_sentence(
+        conn, ContentType.TEXT, content_detail=text, sentence_id=sentence_id
+    )
+    conn.tts.tts_text_queue.put(TTSMessageDTO(
+        sentence_id=sentence_id,
+        sentence_type=SentenceType.LAST,
+        content_type=ContentType.ACTION,
+    ))
+    conn.dialogue.put(Message(role="assistant", content=text))
+    logger.bind(tag=TAG).info("已处理网易云登录状态语音通知")
 
 
 async def send_mcp_initialize_message(conn: "ConnectionHandler"):

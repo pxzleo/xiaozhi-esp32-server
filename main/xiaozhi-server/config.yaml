@@ -163,10 +163,9 @@ plugins:
       - ".p3"
     refresh_time: 300 # 刷新音乐列表的时间间隔，单位为秒
   # 网易云音乐播放，需要自行部署 NeteaseCloudMusicApiEnhanced。
-  # 未配置 cookie 时仅播放公开且无需会员的歌曲；cookie 由管理端扫码登录自动填写。
+  # 设备未扫码登录时仅播放公开且无需会员的歌曲；凭证由服务端按当前设备动态读取。
   play_netease_music:
     api_base_url: "http://127.0.0.1:3000"
-    cookie: ""
     quality: "standard"
     max_tracks: 20
     prepare_timeout_seconds: 20

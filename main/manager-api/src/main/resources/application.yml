@@ -64,3 +64,13 @@ mybatis-plus:
     prefix:
     blobType: BLOB
     boolValue: TRUE
+
+netease-music:
+  api-base-url: ${NETEASE_MUSIC_API_BASE_URL:http://127.0.0.1:3000}
+  public-base-url: ${NETEASE_MUSIC_PUBLIC_BASE_URL:http://192.168.100.149/xiaozhi}
+
+logging:
+  level:
+    # 授权表包含加密凭证，会话表包含二维码原文和加密 key，禁止 MyBatis 输出 SQL 参数。
+    xiaozhi.modules.device.netease.DeviceNeteaseAuthDao: INFO
+    xiaozhi.modules.device.netease.DeviceNeteaseSessionDao: INFO

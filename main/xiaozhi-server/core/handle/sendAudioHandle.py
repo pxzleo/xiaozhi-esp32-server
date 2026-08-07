@@ -18,6 +18,55 @@ AUDIO_FRAME_DURATION = 60
 PRE_BUFFER_COUNT = 5
 
 
+async def send_music_lyrics_event(conn: "ConnectionHandler", event: dict):
+    """在音乐音频帧之前向支持 MCP 的设备发送歌词播放事件。"""
+    if not getattr(conn, "features", {}).get("mcp"):
+        return False
+    message = {
+        "type": "mcp",
+        "payload": {
+            "jsonrpc": "2.0",
+            "method": "notifications/netease_music/lyrics",
+            "params": event,
+        },
+    }
+    await conn.websocket.send(json.dumps(message, ensure_ascii=False))
+    return True
+
+
+async def queue_music_lyrics_event(conn: "ConnectionHandler", event: dict):
+    """让歌词事件与已排队的提示音、后续音乐帧保持严格发送顺序。"""
+    if not getattr(conn, "features", {}).get("mcp"):
+        return False
+    rate_controller = getattr(conn, "audio_rate_controller", None)
+    flow_control = getattr(conn, "audio_flow_control", {})
+    pending_task = getattr(rate_controller, "pending_send_task", None)
+    if (
+        rate_controller
+        and pending_task
+        and not pending_task.done()
+        and flow_control.get("sentence_id") == conn.sentence_id
+    ):
+        completed = asyncio.Event()
+        errors = []
+
+        async def send_queued_event():
+            try:
+                await send_music_lyrics_event(conn, event)
+            except Exception as exc:
+                errors.append(exc)
+                raise
+            finally:
+                completed.set()
+
+        rate_controller.add_message(send_queued_event)
+        await asyncio.wait_for(completed.wait(), timeout=30)
+        if errors:
+            raise errors[0]
+        return True
+    return await send_music_lyrics_event(conn, event)
+
+
 async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text, sentence_id=None):
     # 跳过旧句子残留音频
     if sentence_id is not None and sentence_id != conn.sentence_id:

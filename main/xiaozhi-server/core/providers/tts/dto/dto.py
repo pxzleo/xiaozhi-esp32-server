@@ -37,6 +37,8 @@ class TTSMessageDTO:
         content_file: Optional[str] = None,
         # 当前文本播放完成后触发，用于需要严格等待播报结束的场景
         completion_event=None,
+        # 音频文件首帧发送前下发给设备的播放事件
+        playback_event=None,
     ):
         self.sentence_id = sentence_id
         self.sentence_type = sentence_type
@@ -44,3 +46,9 @@ class TTSMessageDTO:
         self.content_detail = content_detail
         self.content_file = content_file
         self.completion_event = completion_event
+        self.playback_event = playback_event
+
+
+class PlaybackEventDTO:
+    def __init__(self, event: dict):
+        self.event = event

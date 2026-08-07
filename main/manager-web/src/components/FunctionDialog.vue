@@ -66,28 +66,8 @@
         </h4>
         <div v-if="currentFunction" class="params-container">
           <el-form :model="currentFunction" class="param-form">
-            <div v-if="isNeteaseMusicFunction(currentFunction)" class="netease-login-panel">
-              <div class="netease-login-status">
-                <span>{{ $t('functionDialog.neteaseLoginStatus') }}</span>
-                <el-tag :type="neteaseLogin.status === 'loggedIn' ? 'success' : 'info'">
-                  {{ neteaseLoginStatusText }}
-                </el-tag>
-              </div>
-              <img v-if="neteaseLogin.qrImage" :src="neteaseLogin.qrImage" class="netease-qr-image"
-                :alt="$t('functionDialog.neteaseQrAlt')" />
-              <div class="netease-login-actions">
-                <el-button type="primary" size="small" :loading="neteaseLogin.loading"
-                  @click="startNeteaseQrLogin">
-                  {{ $t('functionDialog.neteaseScanLogin') }}
-                </el-button>
-                <el-button v-if="neteaseLogin.status === 'loggedIn'" size="small" @click="clearNeteaseLogin">
-                  {{ $t('functionDialog.neteaseLogout') }}
-                </el-button>
-              </div>
-              <p class="netease-login-tip">{{ $t('functionDialog.neteaseLoginTip') }}</p>
-            </div>
             <!-- 遍历 fieldsMeta，而不是 params 的 keys -->
-            <div v-if="visibleFunctionFields.length == 0 && !isNeteaseMusicFunction(currentFunction)">
+            <div v-if="visibleFunctionFields.length == 0">
               <el-empty :description="currentFunction.name + $t('functionDialog.noNeedToConfig')" />
             </div>
             <el-form-item v-for="field in visibleFunctionFields" :key="field.key" :label="field.label"
@@ -189,15 +169,9 @@
 </template>
 
 <script>
-import Api, { getServiceUrl } from '@/apis/api';
+import Api from '@/apis/api';
 import i18n from '@/i18n';
 import featureManager from '@/utils/featureManager';
-import {
-  checkNeteaseQrLogin,
-  createNeteaseQrLogin,
-  getNeteaseLoginProfile,
-  resolveNeteaseLoginApiBaseUrl,
-} from '@/utils/neteaseMusicLogin.mjs';
 
 const MUSIC_PROVIDER_CODES = new Set(['play_music', 'play_netease_music', 'hass_play_music']);
 
@@ -230,19 +204,6 @@ export default {
       // 添加一个标志位来跟踪是否已经保存
       hasSaved: false,
       loading: false,
-      neteaseLogin: {
-        status: 'anonymous',
-        nickname: '',
-        qrImage: '',
-        qrKey: '',
-        loading: false,
-        pollTimer: null,
-        polling: false,
-        abortController: null,
-        profileAbortController: null
-      },
-      neteaseOriginalCookies: {},
-
       mcpUrl: "",
       mcpStatus: "disconnected",
       mcpTools: [],
@@ -273,24 +234,10 @@ export default {
     },
     visibleFunctionFields() {
       return this.currentFunction?.fieldsMeta?.filter(field => field.type !== 'secret') || [];
-    },
-    neteaseLoginStatusText() {
-      if (this.neteaseLogin.status === 'loggedIn') {
-        return this.neteaseLogin.nickname || this.$t('functionDialog.neteaseLoggedIn');
-      }
-      if (this.neteaseLogin.status === 'waiting') {
-        return this.$t('functionDialog.neteaseWaitingScan');
-      }
-      if (this.neteaseLogin.status === 'expired') {
-        return this.$t('functionDialog.neteaseQrExpired');
-      }
-      return this.$t('functionDialog.neteaseAnonymous');
     }
   },
   watch: {
     currentFunction(newFn) {
-      this.stopNeteaseQrPolling();
-      this.resetNeteaseLoginState();
       if (!newFn) return;
       // 对每个字段，如果是 array 或 json，就在 textCache 里生成初始字符串
       newFn.fieldsMeta.forEach(f => {
@@ -306,12 +253,6 @@ export default {
           }
         }
       });
-      if (this.isNeteaseMusicFunction(newFn)) {
-        if (!(newFn.name in this.neteaseOriginalCookies)) {
-          this.$set(this.neteaseOriginalCookies, newFn.name, newFn.params?.cookie || '');
-        }
-        this.loadNeteaseLoginStatus(newFn);
-      }
     },
     async value(v) {
       this.dialogVisible = v;
@@ -350,181 +291,9 @@ export default {
       this.$emit('input', newVal);
     }
   },
-  beforeDestroy() {
-    this.stopNeteaseQrPolling();
-  },
   methods: {
-    isNeteaseMusicFunction(func) {
-      return func?.providerCode === 'play_netease_music';
-    },
     isMusicFunction(func) {
       return MUSIC_PROVIDER_CODES.has(func?.providerCode);
-    },
-    currentNeteaseApiBaseUrl(func = this.currentFunction) {
-      return func?.params?.api_base_url || '';
-    },
-    currentNeteaseLoginApiBaseUrl(func = this.currentFunction) {
-      return resolveNeteaseLoginApiBaseUrl(this.currentNeteaseApiBaseUrl(func), getServiceUrl());
-    },
-    async fetchNeteaseLoginApi(url, options) {
-      const proxyBaseUrl = `${String(getServiceUrl() || '').replace(/\/+$/, '')}/models/provider/plugin/netease-login`;
-      if (!String(url).startsWith(proxyBaseUrl)) {
-        return fetch(url, options);
-      }
-
-      let accessToken;
-      try {
-        accessToken = JSON.parse(this.$store?.getters?.getToken || 'null')?.token;
-      } catch (error) {
-        throw new Error('智控台登录状态无效，请重新登录后再扫码');
-      }
-      if (!accessToken) {
-        throw new Error('智控台登录已失效，请重新登录后再扫码');
-      }
-      const headers = new Headers(options?.headers || {});
-      headers.set('Authorization', `Bearer ${accessToken}`);
-      return fetch(url, { ...options, headers });
-    },
-    resetNeteaseLoginState() {
-      this.neteaseLogin.status = 'anonymous';
-      this.neteaseLogin.nickname = '';
-      this.neteaseLogin.qrImage = '';
-      this.neteaseLogin.qrKey = '';
-      this.neteaseLogin.loading = false;
-    },
-    stopNeteaseQrPolling() {
-      if (this.neteaseLogin.pollTimer) {
-        clearInterval(this.neteaseLogin.pollTimer);
-        this.neteaseLogin.pollTimer = null;
-      }
-      if (this.neteaseLogin.abortController) {
-        this.neteaseLogin.abortController.abort();
-        this.neteaseLogin.abortController = null;
-      }
-      if (this.neteaseLogin.profileAbortController) {
-        this.neteaseLogin.profileAbortController.abort();
-        this.neteaseLogin.profileAbortController = null;
-      }
-      this.neteaseLogin.polling = false;
-    },
-    async loadNeteaseLoginStatus(func = this.currentFunction) {
-      const cookie = func?.params?.cookie;
-      if (!cookie) {
-        this.neteaseLogin.status = 'anonymous';
-        return;
-      }
-      if (this.neteaseLogin.profileAbortController) {
-        this.neteaseLogin.profileAbortController.abort();
-      }
-      const controller = new AbortController();
-      this.neteaseLogin.profileAbortController = controller;
-      try {
-        const profile = await getNeteaseLoginProfile(
-          this.currentNeteaseLoginApiBaseUrl(func),
-          cookie,
-          (url, options) => this.fetchNeteaseLoginApi(url, options),
-          controller.signal
-        );
-        if (this.neteaseLogin.profileAbortController !== controller) return;
-        if (this.currentFunction !== func || func.params?.cookie !== cookie) return;
-        if (!profile) {
-          this.neteaseLogin.status = 'expired';
-          return;
-        }
-        this.neteaseLogin.status = 'loggedIn';
-        this.neteaseLogin.nickname = profile.nickname || '';
-      } catch (error) {
-        if (this.neteaseLogin.profileAbortController !== controller) return;
-        if (this.currentFunction !== func || func.params?.cookie !== cookie) return;
-        this.neteaseLogin.status = 'expired';
-      } finally {
-        if (this.neteaseLogin.profileAbortController === controller) {
-          this.neteaseLogin.profileAbortController = null;
-        }
-      }
-    },
-    async startNeteaseQrLogin() {
-      this.stopNeteaseQrPolling();
-      this.neteaseLogin.loading = true;
-      const controller = new AbortController();
-      this.neteaseLogin.abortController = controller;
-      try {
-        const result = await createNeteaseQrLogin(
-          this.currentNeteaseLoginApiBaseUrl(),
-          (url, options) => this.fetchNeteaseLoginApi(url, options),
-          controller.signal
-        );
-        if (this.neteaseLogin.abortController !== controller) return;
-        this.neteaseLogin.abortController = null;
-        this.neteaseLogin.qrKey = result.key;
-        this.neteaseLogin.qrImage = result.qrImage;
-        this.neteaseLogin.status = 'waiting';
-        this.neteaseLogin.pollTimer = setInterval(() => this.pollNeteaseQrLogin(), 2000);
-        await this.pollNeteaseQrLogin();
-      } catch (error) {
-        if (this.neteaseLogin.abortController !== controller) return;
-        this.neteaseLogin.abortController = null;
-        this.neteaseLogin.status = 'anonymous';
-        this.$message.error(error.message || this.$t('functionDialog.neteaseLoginFailed'));
-      } finally {
-        this.neteaseLogin.loading = false;
-      }
-    },
-    async pollNeteaseQrLogin() {
-      if (
-        !this.neteaseLogin.qrKey ||
-        this.neteaseLogin.status !== 'waiting' ||
-        this.neteaseLogin.polling
-      ) {
-        return;
-      }
-      const qrKey = this.neteaseLogin.qrKey;
-      const func = this.currentFunction;
-      const controller = new AbortController();
-      this.neteaseLogin.abortController = controller;
-      this.neteaseLogin.polling = true;
-      try {
-        const payload = await checkNeteaseQrLogin(
-          this.currentNeteaseLoginApiBaseUrl(func),
-          qrKey,
-          (url, options) => this.fetchNeteaseLoginApi(url, options),
-          controller.signal
-        );
-        if (this.neteaseLogin.abortController !== controller) return;
-        if (this.currentFunction !== func || this.neteaseLogin.qrKey !== qrKey) return;
-        if (payload.code === 800) {
-          this.neteaseLogin.status = 'expired';
-          this.stopNeteaseQrPolling();
-          return;
-        }
-        if (payload.code !== 803 || !payload.cookie) {
-          return;
-        }
-        this.stopNeteaseQrPolling();
-        this.$set(this.currentFunction.params, 'cookie', payload.cookie);
-        this.handleParamChange(this.currentFunction, 'cookie', payload.cookie);
-        this.neteaseLogin.qrImage = '';
-        await this.loadNeteaseLoginStatus(this.currentFunction);
-        this.$message.success(this.$t('functionDialog.neteaseLoginSuccess'));
-      } catch (error) {
-        if (this.neteaseLogin.abortController !== controller) return;
-        if (this.currentFunction !== func || this.neteaseLogin.qrKey !== qrKey) return;
-        this.stopNeteaseQrPolling();
-        this.neteaseLogin.status = 'anonymous';
-        this.$message.error(error.message || this.$t('functionDialog.neteaseLoginFailed'));
-      } finally {
-        if (this.neteaseLogin.abortController === controller) {
-          this.neteaseLogin.abortController = null;
-          this.neteaseLogin.polling = false;
-        }
-      }
-    },
-    clearNeteaseLogin() {
-      this.stopNeteaseQrPolling();
-      this.$set(this.currentFunction.params, 'cookie', '');
-      this.handleParamChange(this.currentFunction, 'cookie', '');
-      this.resetNeteaseLoginState();
-      this.$message.success(this.$t('functionDialog.neteaseLogoutSuccess'));
     },
     /**
      * 加载功能状态
@@ -668,14 +437,6 @@ export default {
     },
 
     closeDialog() {
-      this.stopNeteaseQrPolling();
-      Object.entries(this.neteaseOriginalCookies).forEach(([name, cookie]) => {
-        const func = this.allFunctions.find(item => item.name === name);
-        if (func?.params) {
-          this.$set(func.params, 'cookie', cookie);
-        }
-      });
-      this.neteaseOriginalCookies = {};
       this.tempFunctions = {};
       this.selectedNames = this.functions.map(f => f.name);
       this.currentFunction = null;
@@ -685,8 +446,6 @@ export default {
     },
 
     saveSelection() {
-      this.stopNeteaseQrPolling();
-      this.neteaseOriginalCookies = {};
       Object.keys(this.tempFunctions).forEach(name => {
         this.modifiedFunctions[name] = JSON.parse(JSON.stringify(this.tempFunctions[name]));
       });
@@ -897,36 +656,6 @@ export default {
       }
     }
   }
-}
-
-.netease-login-panel {
-  padding: 14px;
-  margin-bottom: 16px;
-  border: 1px solid #ebeef5;
-  border-radius: 6px;
-  background: #fafafa;
-}
-
-.netease-login-status,
-.netease-login-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.netease-qr-image {
-  display: block;
-  width: 180px;
-  height: 180px;
-  margin: 14px auto;
-}
-
-.netease-login-tip {
-  margin: 10px 0 0;
-  color: #909399;
-  font-size: 13px;
-  line-height: 1.5;
 }
 
 .params-container {

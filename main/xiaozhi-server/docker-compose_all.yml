@@ -50,6 +50,10 @@ services:
       - SPRING_DATA_REDIS_HOST=xiaozhi-esp32-server-redis
       - SPRING_DATA_REDIS_PASSWORD=
       - SPRING_DATA_REDIS_PORT=6379
+      # 启用设备网易云登录时必须从宿主环境传入 manager-api 可达的上游地址
+      - NETEASE_MUSIC_API_BASE_URL
+      # 必须是设备可访问的HTTP/HTTPS manager-api基址，例如 http://192.168.100.149/xiaozhi
+      - NETEASE_MUSIC_PUBLIC_BASE_URL
     volumes:
       # 配置文件目录
       - ./uploadfile:/uploadfile
