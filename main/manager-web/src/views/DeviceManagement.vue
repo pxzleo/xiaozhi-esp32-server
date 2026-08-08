@@ -61,6 +61,9 @@
                 <el-button v-if="isGenerate(scope.row)" size="mini" type="text" @click="handleGenertor(scope.row)">
                   {{ $t('device.deviceThemeGeneration') }}
                 </el-button>
+                <el-button size="mini" type="text" @click="openProactiveAssistant(scope.row)">
+                  {{ $t('proactive.title') }}
+                </el-button>
               </template>
               <template slot="footer-btns">
                 <div class="ctrl_btn">
@@ -88,6 +91,7 @@
       @refresh="fetchBindDevices(currentAgentId)" />
     <ManualAddDeviceDialog :visible.sync="manualAddDeviceDialogVisible" :agent-id="currentAgentId"
       @refresh="fetchBindDevices(currentAgentId)" />
+    <ProactiveAssistantDialog :visible.sync="proactiveDialogVisible" :device="proactiveDevice" />
     <el-footer>
       <version-footer />
     </el-footer>
@@ -103,6 +107,7 @@ import VersionFooter from "@/components/VersionFooter.vue";
 import MacAddressMask from "@/components/MacAddressMask.vue";
 import CustomButton from "@/components/CustomButton.vue";
 import CustomTable from "@/components/CustomTable.vue";
+import ProactiveAssistantDialog from '@/components/ProactiveAssistantDialog.vue';
 import {
   compareTimestamps,
   formatCreateDate,
@@ -121,6 +126,7 @@ export default {
     MacAddressMask,
     CustomButton,
     CustomTable,
+    ProactiveAssistantDialog,
   },
   data() {
     return {
@@ -138,6 +144,8 @@ export default {
       userApi: null,
       firmwareTypes: [],
       mqttServiceAvailable: false,
+      proactiveDialogVisible: false,
+      proactiveDevice: {},
     };
   },
   computed: {
@@ -261,6 +269,10 @@ export default {
     },
     handleManualAddDevice() {
       this.manualAddDeviceDialogVisible = true;
+    },
+    openProactiveAssistant(device) {
+      this.proactiveDevice = device;
+      this.proactiveDialogVisible = true;
     },
     submitRemark(row) {
       if (row._submitting) return;
