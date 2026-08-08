@@ -45,6 +45,17 @@ manager-api 请求体中的 `created_at`、`expires_at` 和 `seen_at` 使用 Uni
 - `PUT /device/proactive/preferences/{deviceId}/today-silent`：静默至服务端所在时区的次日零点。
 - `GET /device/proactive/events`：分页参数为 `page`（1 至 1000）和 `limit`（1 至 100），可选 `device_id`、`topic`、`delivery_status`、`event_type` 过滤；未给 `device_id` 时只查询本人全部绑定设备。
 - `GET /device/proactive/habits`、`DELETE /device/proactive/habits/{habitId}`：列出本人设备的习惯或删除指定候选；列表可选 `device_id`。
+- `GET|PUT /device/proactive/monitors/{deviceId}`：原子读取或同时更新本人设备的天气、新闻监测配置。天气默认 30 分钟、新闻默认 10 分钟，两类默认启用；配置字段严格校验，未知字段拒绝，普通监测首次运行以空 `state` 建立基线。
+- `GET /device/proactive/pending`：设备使用 `Device-Id`、`Client-Id` 和 Bearer HMAC 令牌鉴权。每次探测更新两类监测的 `last_probe_at`，只返回一个未过期、可领取的 `weather_alert/news_alert` 安全信封，不返回 payload 或 reason；无事件时返回 `pending=false,retry_after_seconds=300`。禁用监测、今日静默、安静时段和主题 allow/block 会抑制普通事件；仅 critical 天气绕过，新闻永不绕过；`conservative` 也只允许 critical 天气。
+
+外界监测内部接口继续位于 `/config/proactive/**` 并使用 server-secret：
+
+- `POST /config/proactive/monitors/claim`：每次最多领取 100 条到期任务，只选择 15 分钟内有设备探测的记录；数据库以 owner 和唯一 token 做 CAS，租约固定 120 秒，多实例只能有一个领取者成功。
+- `POST /config/proactive/monitors/complete`：只有匹配且未过期的 owner/token 可以更新 state、成功时间、下次检查时间和错误码并释放租约；状态 JSON 有大小上限且禁止推理链字段。
+- `GET /config/proactive/monitor-events/{eventId}?mac_address=...`：按 MAC 与 event ID 读取权威天气或新闻事件；投递仍复用既有 180 秒 `/events/{eventId}/claim` 接口。
+- `POST /config/proactive/classifier/evaluate`：仅接受有界的新闻标题、来源和事实，使用全局独立分类模型，禁止回退设备智能体模型。提示词要求单个严格 JSON 且禁止推理链；manager-api 同时校验 JSON 结构、索引完整性和字段范围，再把原始 JSON 文本交给调用方复核。
+
+超级管理员通过 `GET|PUT /proactive/classifier/model` 读取或保存独立 LLM model id，并通过 `POST /proactive/classifier/model/test` 检查可用性。未配置、非 LLM、未启用或缺少必要连接配置时明确返回不可用；任何接口都不得返回模型密钥。
 
 manager-web 在设备管理列表的单台设备操作区提供“主动助理”入口，使用同一弹窗分为设置、事件审计和习惯三个区域：
 
@@ -58,7 +69,7 @@ manager-web 在设备管理列表的单台设备操作区提供“主动助理�
 
 `conservative` 只执行关键事件属于设备端或服务端的策略执行职责；manager-api 只持久化偏好与完整事件审计，不在写入审计事件时按模式过滤。内部按 MAC 操作时必须且只能匹配一个现有设备；重复 MAC 会明确报错，不会任取其中一条记录。
 
-所有接口枚举使用小写值。主题仅允许 `reminder`、`calendar`、`weather`、`music`、`health`、`habit`、`system`。事件 payload 只允许 `title`、`message`、`reference_id`、`scheduled_at`、`action`、`source`，每个值必须是非空字符串，`scheduled_at` 必须是 ISO 本地日期时间。习惯 payload 只允许 `description`、`suggested_mode`、`suggested_time`、`topic`：`description` 必须是非空短文本，`topic` 必须是上述小写主题，`suggested_mode` 只允许 `conservative`、`active`、`aggressive`，`suggested_time` 必须为 `HH:mm`。任一 payload 序列化后最多 512 字节，不接收也不保存自由推理链。响应将 JSON 字段解析为对象，不返回数据库中的原始 JSON 文本。
+所有接口枚举使用小写值。主题仅允许 `reminder`、`calendar`、`weather`、`news`、`music`、`health`、`habit`、`system`，事件类型增加 `news_alert`。事件 payload 只允许 `title`、`message`、`reference_id`、`scheduled_at`、`action`、`source`，每个值必须是非空字符串，`scheduled_at` 必须是 ISO 本地日期时间。习惯 payload 只允许 `description`、`suggested_mode`、`suggested_time`、`topic`：`description` 必须是非空短文本，`topic` 必须是上述小写主题，`suggested_mode` 只允许 `conservative`、`active`、`aggressive`，`suggested_time` 必须为 `HH:mm`。任一 payload 序列化后最多 512 字节，不接收也不保存自由推理链。响应将 JSON 字段解析为对象，不返回数据库中的原始 JSON 文本。
 
 ### 服务端执行契约
 

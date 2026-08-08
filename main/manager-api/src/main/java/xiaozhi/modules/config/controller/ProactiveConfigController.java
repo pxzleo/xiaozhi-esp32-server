@@ -25,15 +25,46 @@ import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceUpdate;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceView;
 import xiaozhi.modules.device.proactive.ProactiveService;
+import xiaozhi.modules.device.proactive.ProactiveMonitorService;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.ClassifierEvaluate;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.ClassifierResult;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.MonitorComplete;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.MonitorLeaseRequest;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.MonitorTask;
 
 @RestController
 @RequestMapping("/config/proactive")
 @Validated
 public class ProactiveConfigController {
     private final ProactiveService service;
+    private final ProactiveMonitorService monitorService;
 
-    public ProactiveConfigController(ProactiveService service) {
+    public ProactiveConfigController(ProactiveService service, ProactiveMonitorService monitorService) {
         this.service = service;
+        this.monitorService = monitorService;
+    }
+
+    @PostMapping("/monitors/claim")
+    public Result<List<MonitorTask>> claimMonitors(@Valid @RequestBody MonitorLeaseRequest request) {
+        return new Result<List<MonitorTask>>().ok(
+                monitorService.claimDue(request.getLeaseOwner(), request.getLimit()));
+    }
+
+    @PostMapping("/monitors/complete")
+    public Result<Void> completeMonitor(@Valid @RequestBody MonitorComplete request) {
+        monitorService.complete(request);
+        return new Result<>();
+    }
+
+    @GetMapping("/monitor-events/{eventId}")
+    public Result<EventView> monitorEvent(@PathVariable @Size(max = 64) String eventId,
+            @RequestParam("mac_address") @NotBlank @Size(max = 50) String macAddress) {
+        return new Result<EventView>().ok(service.monitorEvent(macAddress, eventId));
+    }
+
+    @PostMapping("/classifier/evaluate")
+    public Result<ClassifierResult> evaluate(@Valid @RequestBody ClassifierEvaluate request) {
+        return new Result<ClassifierResult>().ok(monitorService.evaluate(request));
     }
 
     @GetMapping("/preferences/{macAddress}")

@@ -94,6 +94,7 @@ public class ShiroConfig {
         // 将config路径使用server服务过滤器
         filterMap.put("/config/**", "server");
         filterMap.put("/device/netease/**", "device");
+        filterMap.put("/device/proactive/pending", "device");
         filterMap.put("/device/address-book/call", "server");
         filterMap.put("/agent/chat-history/report", "server");
         filterMap.put("/agent/chat-history/download/**", "anon");

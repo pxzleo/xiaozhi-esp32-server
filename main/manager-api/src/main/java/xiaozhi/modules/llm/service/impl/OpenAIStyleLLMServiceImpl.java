@@ -75,7 +75,7 @@ public class OpenAIStyleLLMServiceImpl implements LLMService {
 
     @Override
     public String generateSummary(String conversation, String promptTemplate, String modelId) {
-        if (!isAvailable()) {
+        if (modelId == null ? !isAvailable() : !isAvailable(modelId)) {
             log.warn("LLM服务不可用，无法生成总结");
             return "LLM服务不可用，无法生成总结";
         }
@@ -162,6 +162,24 @@ public class OpenAIStyleLLMServiceImpl implements LLMService {
         }
 
         return "生成总结失败，请稍后重试";
+    }
+
+    @Override
+    public String generateStructured(String input, String promptTemplate, String modelId) {
+        if (StringUtils.isBlank(modelId)) {
+            throw new IllegalArgumentException("结构化任务必须指定模型ID");
+        }
+        if (!isAvailable(modelId)) {
+            throw new IllegalStateException("指定模型不可用");
+        }
+        String output = generateSummary(input, promptTemplate, modelId);
+        if ("LLM服务不可用，无法生成总结".equals(output)
+                || "未找到可用的LLM模型配置".equals(output)
+                || "LLM配置不完整，无法生成总结".equals(output)
+                || "生成总结失败，请稍后重试".equals(output)) {
+            throw new IllegalStateException("指定模型调用失败: " + output);
+        }
+        return output;
     }
 
     @Override
@@ -291,13 +309,20 @@ public class OpenAIStyleLLMServiceImpl implements LLMService {
                 log.warn("未找到指定的LLM模型配置，modelId: {}", modelId);
                 return false;
             }
+            if (!"LLM".equalsIgnoreCase(modelConfig.getModelType())
+                    || !Integer.valueOf(1).equals(modelConfig.getIsEnabled())) {
+                log.warn("指定模型不是已启用的LLM，modelId: {}", modelId);
+                return false;
+            }
 
             JSONObject configJson = modelConfig.getConfigJson();
             String baseUrl = configJson.getStr("base_url");
             String apiKey = configJson.getStr("api_key");
+            String modelName = configJson.getStr("model_name");
 
             return baseUrl != null && !baseUrl.trim().isEmpty() &&
-                    apiKey != null && !apiKey.trim().isEmpty();
+                    apiKey != null && !apiKey.trim().isEmpty() &&
+                    modelName != null && !modelName.trim().isEmpty();
         } catch (Exception e) {
             log.error("检查LLM服务可用性时发生异常，modelId: {}", modelId, e);
             return false;

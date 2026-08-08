@@ -114,6 +114,7 @@ public class ProactiveService {
     @Transactional
     public EventView upsertEvent(EventUpsert request) {
         DeviceEntity device = resolveByMac(request.getMacAddress());
+        if (!request.isMonitorTopicValid()) throw new RenException("外界监测事件的topic与event_type不匹配");
         validateEventPayload(request.getPayload());
         if (deviceDao.selectByIdForUpdate(device.getId()) == null) throw new RenException("设备不存在");
         ProactiveEventEntity existing = eventDao.selectByDeviceAndEventIdForUpdate(
@@ -222,6 +223,13 @@ public class ProactiveService {
                 .eq(ProactiveHabitEntity::getAccepted, false)
                 .eq(ProactiveHabitEntity::getDismissed, false)
                 .orderByDesc(ProactiveHabitEntity::getLastSeenAt)).stream().map(this::toHabit).toList();
+    }
+
+    public EventView monitorEvent(String macAddress, String eventId) {
+        if (StringUtils.isAnyBlank(macAddress, eventId)) throw new RenException("外界事件查询参数不能为空");
+        ProactiveEventEntity event = eventDao.selectMonitorEventByMacAndEventId(macAddress, eventId);
+        if (event == null) throw new RenException("外界监测事件不存在");
+        return toEvent(event);
     }
 
     public PageData<EventView> events(Long userId, String deviceId, Topic topic,

@@ -85,6 +85,7 @@ public interface Constant {
      * 服务器密钥
      */
     String SERVER_SECRET = "server.secret";
+    String PROACTIVE_CLASSIFIER_MODEL_ID = "proactive.classifier.model_id";
 
     /**
      * SM2公钥

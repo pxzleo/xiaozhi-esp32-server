@@ -23,11 +23,14 @@ import xiaozhi.modules.device.proactive.ProactiveDTOs.EventView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceUpdate;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceView;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.MonitorsUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.MonitorsView;
 import xiaozhi.modules.device.proactive.ProactiveEnums.DeliveryStatus;
 import xiaozhi.modules.device.proactive.ProactiveEnums.EventType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 import xiaozhi.modules.device.proactive.ProactiveEnums;
 import xiaozhi.modules.device.proactive.ProactiveService;
+import xiaozhi.modules.device.proactive.ProactiveMonitorService;
 import xiaozhi.modules.security.user.SecurityUser;
 
 @RestController
@@ -36,9 +39,23 @@ import xiaozhi.modules.security.user.SecurityUser;
 @Validated
 public class DeviceProactiveController {
     private final ProactiveService service;
+    private final ProactiveMonitorService monitorService;
 
-    public DeviceProactiveController(ProactiveService service) {
+    public DeviceProactiveController(ProactiveService service, ProactiveMonitorService monitorService) {
         this.service = service;
+        this.monitorService = monitorService;
+    }
+
+    @GetMapping("/monitors/{deviceId}")
+    public Result<MonitorsView> monitors(@PathVariable @Size(max = 32) String deviceId) {
+        return new Result<MonitorsView>().ok(monitorService.getMonitors(SecurityUser.getUserId(), deviceId));
+    }
+
+    @PutMapping("/monitors/{deviceId}")
+    public Result<MonitorsView> updateMonitors(@PathVariable @Size(max = 32) String deviceId,
+            @Valid @RequestBody MonitorsUpdate request) {
+        return new Result<MonitorsView>().ok(
+                monitorService.updateMonitors(SecurityUser.getUserId(), deviceId, request));
     }
 
     @GetMapping("/preferences")

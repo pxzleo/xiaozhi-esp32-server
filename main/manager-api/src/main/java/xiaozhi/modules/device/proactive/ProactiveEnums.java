@@ -35,7 +35,7 @@ public final class ProactiveEnums {
         @JsonCreator public static Mode fromWire(String value) { return parseWire(Mode.class, value); }
     }
     public enum Topic implements WireEnum {
-        REMINDER, CALENDAR, WEATHER, MUSIC, HEALTH, HABIT, SYSTEM;
+        REMINDER, CALENDAR, WEATHER, NEWS, MUSIC, HEALTH, HABIT, SYSTEM;
         @JsonCreator public static Topic fromWire(String value) { return parseWire(Topic.class, value); }
     }
     public enum Priority implements WireEnum {
@@ -43,7 +43,7 @@ public final class ProactiveEnums {
         @JsonCreator public static Priority fromWire(String value) { return parseWire(Priority.class, value); }
     }
     public enum EventType implements WireEnum {
-        REMINDER, DUE_SOON, SCHEDULE_CHANGE, WEATHER_ALERT, MUSIC_STATUS, HABIT_SUGGESTION, SYSTEM;
+        REMINDER, DUE_SOON, SCHEDULE_CHANGE, WEATHER_ALERT, NEWS_ALERT, MUSIC_STATUS, HABIT_SUGGESTION, SYSTEM;
         @JsonCreator public static EventType fromWire(String value) { return parseWire(EventType.class, value); }
     }
     public enum DeliveryStatus implements WireEnum {
@@ -57,5 +57,9 @@ public final class ProactiveEnums {
     public enum HabitType implements WireEnum {
         TIME_PATTERN, REPEATED_ACTION, CONTENT_PREFERENCE;
         @JsonCreator public static HabitType fromWire(String value) { return parseWire(HabitType.class, value); }
+    }
+    public enum MonitorType implements WireEnum {
+        WEATHER, NEWS;
+        @JsonCreator public static MonitorType fromWire(String value) { return parseWire(MonitorType.class, value); }
     }
 }

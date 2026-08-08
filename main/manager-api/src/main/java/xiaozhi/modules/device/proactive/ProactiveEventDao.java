@@ -103,4 +103,27 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
     long countForUser(@Param("userId") Long userId, @Param("deviceId") String deviceId,
             @Param("topic") String topic, @Param("status") String status,
             @Param("eventType") String eventType);
+
+    @Select("""
+            SELECT * FROM ai_device_proactive_event
+            WHERE device_id = #{deviceId}
+              AND event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
+              AND (expires_at IS NULL OR expires_at > #{now})
+              AND (delivery_status = 'PENDING'
+                   OR (delivery_status = 'CLAIMED' AND (claimed_at IS NULL OR claimed_at < #{claimCutoff})))
+            ORDER BY CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+                     WHEN 'NORMAL' THEN 2 ELSE 3 END,
+                     created_at, id
+            LIMIT 20
+            """)
+    List<ProactiveEventEntity> selectPendingMonitorEvents(@Param("deviceId") String deviceId,
+            @Param("now") Date now, @Param("claimCutoff") Date claimCutoff);
+
+    @Select("""
+            SELECT * FROM ai_device_proactive_event
+            WHERE mac_address = #{macAddress} AND event_id = #{eventId}
+              AND event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
+            """)
+    ProactiveEventEntity selectMonitorEventByMacAndEventId(@Param("macAddress") String macAddress,
+            @Param("eventId") String eventId);
 }

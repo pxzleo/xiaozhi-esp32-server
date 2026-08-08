@@ -76,4 +76,7 @@ public interface LLMService {
      * @return 标题（约15字）
      */
     String generateTitle(String conversation, String modelId);
+
+    /** 使用明确指定的模型执行严格结构化任务；不会回退默认模型。 */
+    String generateStructured(String input, String promptTemplate, String modelId);
 }
