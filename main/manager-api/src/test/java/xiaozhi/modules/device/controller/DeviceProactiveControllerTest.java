@@ -30,7 +30,7 @@ class DeviceProactiveControllerTest {
         assertArrayEquals(new String[] {"sys:role:normal"}, permission.value());
 
         ProactiveMonitorService monitorService = mock(ProactiveMonitorService.class);
-        MonitorsView view = new MonitorsView("device-1", null, null, "广州", null,
+        MonitorsView view = new MonitorsView("device-1", null, null, "广州", null, true,
                 new ClassifierAvailabilityView(true, true, null));
         when(monitorService.getMonitors(7L, "device-1")).thenReturn(view);
         DeviceProactiveController controller = new DeviceProactiveController(

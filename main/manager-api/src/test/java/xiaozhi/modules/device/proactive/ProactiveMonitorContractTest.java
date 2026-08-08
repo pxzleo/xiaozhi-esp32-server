@@ -13,11 +13,16 @@ import java.util.Set;
 
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
+import org.apache.shiro.authz.annotation.RequiresPermissions;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import xiaozhi.modules.device.proactive.ProactiveDTOs.MonitorsUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.ExternalMonitoringUpdate;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.NewsMonitorConfig;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.WeatherMonitorConfig;
 import xiaozhi.modules.device.proactive.ProactiveEnums.EventType;
@@ -27,8 +32,56 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 import xiaozhi.modules.device.proactive.ProactiveEnums.WeatherHazardType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.WeatherWarningSeverity;
 import xiaozhi.modules.security.config.ShiroConfig;
+import xiaozhi.modules.device.controller.ProactiveSettingsController;
+import xiaozhi.modules.config.controller.ProactiveConfigController;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.EventUpsert;
 
 class ProactiveMonitorContractTest {
+    @Test
+    void externalMonitoringMigrationDefaultsFalseAndIsOrderedAdditively() throws Exception {
+        String sql = Files.readString(Path.of("src/main/resources/db/changelog/202608090100.sql"));
+        assertTrue(sql.contains("'proactive.external_monitoring_enabled', 'false', 'boolean', 0"));
+        assertTrue(sql.contains("WHERE NOT EXISTS"));
+        assertFalse(sql.toLowerCase().contains("update ai_device_proactive_monitor"));
+        String master = Files.readString(
+                Path.of("src/main/resources/db/changelog/db.changelog-master.yaml"));
+        assertTrue(master.indexOf("202608090100") > master.indexOf("202608082300"));
+        assertTrue(master.indexOf("202608090130") > master.indexOf("202608090100"));
+    }
+
+    @Test
+    void externalMonitoringSettingsAreStrictAndSuperAdminOnly() throws Exception {
+        RequiresPermissions permission = ProactiveSettingsController.class
+                .getAnnotation(RequiresPermissions.class);
+        assertEquals(Set.of("sys:role:superAdmin"), Set.of(permission.value()));
+        RequestMapping root = ProactiveSettingsController.class.getAnnotation(RequestMapping.class);
+        assertEquals("/proactive/settings", root.value()[0]);
+        Method get = ProactiveSettingsController.class.getMethod("externalMonitoring");
+        Method put = ProactiveSettingsController.class.getMethod(
+                "saveExternalMonitoring", ExternalMonitoringUpdate.class);
+        assertEquals("/external-monitoring", get.getAnnotation(GetMapping.class).value()[0]);
+        assertEquals("/external-monitoring", put.getAnnotation(PutMapping.class).value()[0]);
+
+        ObjectMapper mapper = new ObjectMapper();
+        assertThrows(Exception.class, () -> mapper.readValue(
+                "{\"enabled\":true,\"unknown\":1}", ExternalMonitoringUpdate.class));
+        try (var factory = jakarta.validation.Validation.buildDefaultValidatorFactory()) {
+            assertFalse(factory.getValidator().validate(
+                    mapper.readValue("{}", ExternalMonitoringUpdate.class)).isEmpty());
+        }
+    }
+
+    @Test
+    void monitorEventCreateEndpointReturnsAuthoritativeDedupeResultContract() throws Exception {
+        Method create = ProactiveConfigController.class.getMethod("monitorEvent", EventUpsert.class);
+        assertEquals("/monitor-events",
+                create.getAnnotation(org.springframework.web.bind.annotation.PostMapping.class).value()[0]);
+        Set<String> fields = Arrays.stream(ProactiveDTOs.EventCreateResult.class.getRecordComponents())
+                .map(java.lang.reflect.RecordComponent::getName)
+                .collect(java.util.stream.Collectors.toSet());
+        assertEquals(Set.of("created", "deduped", "authoritativeEventId", "event"), fields);
+    }
+
     @Test
     void enumWireValuesAndTopicCapacityAreExtendedCompatibly() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
@@ -200,6 +253,8 @@ class ProactiveMonitorContractTest {
 
         Method candidates = ProactiveMonitorDao.class.getMethod("selectDueCandidates", int.class);
         String select = candidates.getAnnotation(Select.class).value()[0];
+        assertTrue(select.contains("proactive.external_monitoring_enabled"));
+        assertTrue(select.contains("LOWER(TRIM(g.param_value)) = 'true'"));
         assertTrue(select.contains("last_probe_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)"));
         assertTrue(select.contains("LIMIT #{limit}"));
         assertTrue(select.contains("lease_until IS NULL OR m.lease_until <= CURRENT_TIMESTAMP"));
@@ -209,10 +264,12 @@ class ProactiveMonitorContractTest {
         Method claim = ProactiveMonitorDao.class.getMethod("claimCas", String.class, String.class,
                 String.class, String.class);
         String claimSql = claim.getAnnotation(Update.class).value()[0];
-        assertTrue(claimSql.contains("lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 120 SECOND)"));
-        assertTrue(claimSql.contains("lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP"));
-        assertTrue(claimSql.contains("last_probe_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)"));
-        assertTrue(claimSql.contains("updated_at = CURRENT_TIMESTAMP"));
+        assertTrue(claimSql.contains("INNER JOIN sys_params g"));
+        assertTrue(claimSql.contains("proactive.external_monitoring_enabled"));
+        assertTrue(claimSql.contains("m.lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 120 SECOND)"));
+        assertTrue(claimSql.contains("m.lease_until IS NULL OR m.lease_until <= CURRENT_TIMESTAMP"));
+        assertTrue(claimSql.contains("m.last_probe_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)"));
+        assertTrue(claimSql.contains("m.updated_at = CURRENT_TIMESTAMP"));
         assertFalse(claimSql.contains("#{leaseUntil}"));
         assertFalse(claimSql.contains("#{now}"));
 
@@ -238,11 +295,16 @@ class ProactiveMonitorContractTest {
         Method pending = ProactiveEventDao.class.getMethod("selectPendingMonitorEvents",
                 String.class, java.util.Date.class, java.util.Date.class);
         String sql = pending.getAnnotation(Select.class).value()[0];
+        assertTrue(sql.contains("INNER JOIN sys_params g"));
+        assertTrue(sql.contains("proactive.external_monitoring_enabled"));
+        assertTrue(sql.contains("LOWER(TRIM(g.param_value)) = 'true'"));
         assertTrue(sql.contains("event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')"));
         assertTrue(sql.contains("delivery_status = 'PENDING'"));
         assertTrue(sql.contains("claimed_at < #{claimCutoff}"));
         assertFalse(java.util.Arrays.stream(ProactiveDTOs.PendingEnvelope.class.getRecordComponents())
                 .anyMatch(component -> component.getName().equals("payload") || component.getName().equals("reason")));
+        assertTrue(Arrays.stream(ProactiveDTOs.MonitorsView.class.getRecordComponents())
+                .anyMatch(component -> component.getName().equals("externalMonitoringEnabled")));
     }
 
     @Test

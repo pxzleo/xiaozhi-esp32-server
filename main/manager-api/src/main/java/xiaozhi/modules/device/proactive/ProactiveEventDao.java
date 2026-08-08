@@ -60,6 +60,8 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
                     WHEN 'WEATHER_ALERT' THEN 'WEATHER'
                     WHEN 'NEWS_ALERT' THEN 'NEWS'
                  END
+            LEFT JOIN sys_params g
+              ON g.param_code = 'proactive.external_monitoring_enabled'
             SET e.claimed_at = CASE
                     WHEN e.claim_token = #{claimToken} AND e.claimed_at >= #{leaseCutoff} THEN e.claimed_at
                     ELSE #{now} END,
@@ -67,7 +69,8 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
                 e.updated_at = #{now}
             WHERE e.device_id = #{deviceId} AND e.event_id = #{eventId}
               AND (e.expires_at IS NULL OR e.expires_at > #{now})
-              AND (e.event_type NOT IN ('WEATHER_ALERT', 'NEWS_ALERT') OR m.enabled = 1)
+              AND (e.event_type NOT IN ('WEATHER_ALERT', 'NEWS_ALERT')
+                   OR (m.enabled = 1 AND LOWER(TRIM(g.param_value)) = 'true'))
               AND (e.delivery_status = 'PENDING'
                    OR (e.delivery_status = 'CLAIMED' AND e.claim_token = #{claimToken})
                    OR (e.delivery_status = 'CLAIMED'
@@ -112,15 +115,19 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             @Param("eventType") String eventType);
 
     @Select("""
-            SELECT * FROM ai_device_proactive_event
-            WHERE device_id = #{deviceId}
-              AND event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
-              AND (expires_at IS NULL OR expires_at > #{now})
-              AND (delivery_status = 'PENDING'
-                   OR (delivery_status = 'CLAIMED' AND (claimed_at IS NULL OR claimed_at < #{claimCutoff})))
-            ORDER BY CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+            SELECT e.* FROM ai_device_proactive_event e
+            INNER JOIN sys_params g
+              ON g.param_code = 'proactive.external_monitoring_enabled'
+             AND LOWER(TRIM(g.param_value)) = 'true'
+            WHERE e.device_id = #{deviceId}
+              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
+              AND (e.expires_at IS NULL OR e.expires_at > #{now})
+              AND (e.delivery_status = 'PENDING'
+                   OR (e.delivery_status = 'CLAIMED'
+                       AND (e.claimed_at IS NULL OR e.claimed_at < #{claimCutoff})))
+            ORDER BY CASE e.priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
                      WHEN 'NORMAL' THEN 2 ELSE 3 END,
-                     created_at, id
+                     e.created_at, e.id
             LIMIT 20
             """)
     List<ProactiveEventEntity> selectPendingMonitorEvents(@Param("deviceId") String deviceId,
@@ -135,6 +142,9 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
                     WHEN 'WEATHER_ALERT' THEN 'WEATHER'
                     WHEN 'NEWS_ALERT' THEN 'NEWS'
                  END
+            INNER JOIN sys_params g
+              ON g.param_code = 'proactive.external_monitoring_enabled'
+             AND LOWER(TRIM(g.param_value)) = 'true'
             WHERE e.mac_address = #{macAddress} AND e.event_id = #{eventId}
               AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
             """)

@@ -40,6 +40,7 @@ import xiaozhi.modules.device.proactive.ProactiveDTOs.ClassifierEvaluate;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.ClassifierAvailabilityView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.ClassifierModelView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.ClassifierResult;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.ExternalMonitoringView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.MonitorComplete;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.MonitorSetting;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.MonitorTask;
@@ -139,6 +140,9 @@ public class ProactiveMonitorService {
         if (monitorDao.probeAndRebaselineIfOffline(deviceId) != 2) {
             throw new RenException("设备监测探测状态更新失败");
         }
+        if (!externalMonitoringEnabled()) {
+            return new PendingEnvelope(false, null, null, null, null, null, EMPTY_RETRY_SECONDS);
+        }
         Map<MonitorType, ProactiveMonitorEntity> monitors = monitorMap(monitorDao.selectByDevice(deviceId));
         PreferenceView preference = proactiveService.getPreferenceByMac(device.getMacAddress());
         Date claimCutoff = new Date(now.getTime() - 180_000L);
@@ -153,6 +157,7 @@ public class ProactiveMonitorService {
 
     @Transactional
     public List<MonitorTask> claimDue(String leaseOwner, int limit) {
+        if (!externalMonitoringEnabled()) return List.of();
         List<MonitorTask> claimed = new ArrayList<>();
         Map<String, WorkerInputs> inputsByDevice = new HashMap<>();
         List<ProactiveMonitorEntity> candidates = monitorDao.selectDueCandidates(limit);
@@ -207,6 +212,21 @@ public class ProactiveMonitorService {
         return new ClassifierModelView(modelId, modelId != null && llmService.isAvailable(modelId));
     }
 
+    public ExternalMonitoringView externalMonitoringSetting() {
+        return new ExternalMonitoringView(externalMonitoringEnabled());
+    }
+
+    public ExternalMonitoringView saveExternalMonitoringSetting(boolean enabled) {
+        if (sysParamsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, false) == null) {
+            throw new RenException("外界监测全局开关系统参数不存在");
+        }
+        if (sysParamsService.updateValueByCode(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED,
+                Boolean.toString(enabled)) != 1) {
+            throw new RenException("外界监测全局开关系统参数不存在");
+        }
+        return externalMonitoringSetting();
+    }
+
     public ClassifierResult evaluate(ClassifierEvaluate request) {
         String modelId = requireConfiguredModel();
         if (!llmService.isAvailable(modelId)) throw new RenException("外界分类模型不可用");
@@ -236,6 +256,14 @@ public class ProactiveMonitorService {
     private String configuredModelId() {
         String value = sysParamsService.getValue(Constant.PROACTIVE_CLASSIFIER_MODEL_ID, true);
         return StringUtils.isBlank(value) || "null".equalsIgnoreCase(value) ? null : value.trim();
+    }
+
+    private boolean externalMonitoringEnabled() {
+        String value = sysParamsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, true);
+        if (StringUtils.isBlank(value) || "null".equalsIgnoreCase(value)) return false;
+        if ("true".equalsIgnoreCase(value.trim())) return true;
+        if ("false".equalsIgnoreCase(value.trim())) return false;
+        throw new RenException("外界监测全局开关系统参数无效");
     }
 
     private boolean isVisible(ProactiveEventEntity event,
@@ -283,6 +311,7 @@ public class ProactiveMonitorService {
         WeatherLocation location = workerInputs(device).weather().location();
         return new MonitorsView(device.getId(), weatherView(map.get(MonitorType.WEATHER)),
                 newsView(map.get(MonitorType.NEWS)), location.value(), location.error(),
+                externalMonitoringEnabled(),
                 classifierAvailability());
     }
 

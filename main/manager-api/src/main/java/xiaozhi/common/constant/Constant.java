@@ -86,6 +86,7 @@ public interface Constant {
      */
     String SERVER_SECRET = "server.secret";
     String PROACTIVE_CLASSIFIER_MODEL_ID = "proactive.classifier.model_id";
+    String PROACTIVE_EXTERNAL_MONITORING_ENABLED = "proactive.external_monitoring_enabled";
 
     /**
      * SM2公钥

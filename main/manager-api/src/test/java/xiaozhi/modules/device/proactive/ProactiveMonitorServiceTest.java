@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -78,6 +80,8 @@ class ProactiveMonitorServiceTest {
         device.setUserId(7L);
         device.setAgentId("agent-1");
         when(deviceDao.selectById("device-1")).thenReturn(device);
+        when(paramsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, true))
+                .thenReturn("true");
     }
 
     @Test
@@ -105,6 +109,7 @@ class ProactiveMonitorServiceTest {
         assertEquals("广州", view.weatherLocation());
         assertNull(view.weatherLocationError());
         assertTrue(view.classifier().configured());
+        assertTrue(view.externalMonitoringEnabled());
         assertTrue(view.classifier().available());
         assertNull(view.classifier().error());
         String json = assertDoesNotThrow(() -> new ObjectMapper().writeValueAsString(view));
@@ -202,6 +207,57 @@ class ProactiveMonitorServiceTest {
     }
 
     @Test
+    void globalSwitchOffHidesPendingWithoutChangingDeviceMonitorConfiguration() {
+        when(paramsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, true))
+                .thenReturn("false");
+        when(monitorDao.probeAndRebaselineIfOffline("device-1")).thenReturn(2);
+
+        var envelope = service.pending("device-1");
+
+        assertFalse(envelope.pending());
+        assertEquals(300, envelope.retryAfterSeconds());
+        verify(eventDao, never()).selectPendingMonitorEvents(any(), any(), any());
+        verify(monitorDao, never()).updateConfiguration(any(), any(), anyBoolean(),
+                anyInt(), any(), any());
+    }
+
+    @Test
+    void globalSwitchOffIsReadOnlyInUserViewAndKeepsPerDeviceSettingsEnabled() {
+        when(paramsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, true))
+                .thenReturn("false");
+        when(paramsService.getValue(Constant.PROACTIVE_CLASSIFIER_MODEL_ID, true)).thenReturn("");
+        when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
+                monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
+        when(agentPluginMappingService.proactiveMonitorPluginParamsByAgentId("agent-1"))
+                .thenReturn(List.of(weatherPlugin("{\"default_location\":\"广州\"}")));
+
+        var view = service.getMonitors(7L, "device-1");
+
+        assertFalse(view.externalMonitoringEnabled());
+        assertTrue(view.weather().enabled());
+        assertTrue(view.news().enabled());
+        verify(monitorDao, never()).updateConfiguration(any(), any(), anyBoolean(),
+                anyInt(), any(), any());
+    }
+
+    @Test
+    void turningGlobalSwitchBackOnRevealsExistingUnexpiredPendingEvent() {
+        when(paramsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, true))
+                .thenReturn("false", "true");
+        when(monitorDao.probeAndRebaselineIfOffline("device-1")).thenReturn(2);
+        when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
+                monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
+        when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
+                preference(Set.of(), Set.of()));
+        when(eventDao.selectPendingMonitorEvents(eq("device-1"), any(), any())).thenReturn(List.of(
+                event(EventType.NEWS_ALERT, Topic.NEWS, Priority.HIGH)));
+
+        assertFalse(service.pending("device-1").pending());
+        assertTrue(service.pending("device-1").pending());
+        verify(eventDao).selectPendingMonitorEvents(eq("device-1"), any(), any());
+    }
+
+    @Test
     void criticalWeatherBypassesSilenceButNewsNeverDoes() {
         when(monitorDao.probeAndRebaselineIfOffline("device-1")).thenReturn(2);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
@@ -271,6 +327,16 @@ class ProactiveMonitorServiceTest {
         when(monitorDao.completeCas(eq("device-1"), eq("WEATHER"), eq("worker-1"),
                 eq("wrong-token"), eq(true), any(), eq(null))).thenReturn(0);
         assertThrows(RenException.class, () -> service.complete(complete));
+    }
+
+    @Test
+    void globalSwitchOffReturnsNoDueTasksAndDoesNotAttemptLease() {
+        when(paramsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, true))
+                .thenReturn("false");
+
+        assertTrue(service.claimDue("worker-1", 20).isEmpty());
+        verify(monitorDao, never()).selectDueCandidates(anyInt());
+        verify(monitorDao, never()).claimCas(any(), any(), any(), any());
     }
 
     @Test
@@ -505,6 +571,22 @@ class ProactiveMonitorServiceTest {
         assertTrue(service.evaluate(request).output().contains("\"is_major\":true"));
         verify(llmService).generateStructured(any(),
                 org.mockito.ArgumentMatchers.contains("禁止输出思维过程"), eq("model-1"));
+    }
+
+    @Test
+    void globalSwitchDefaultsOffSavesStrictBooleanAndRejectsCorruptValue() {
+        when(paramsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, true))
+                .thenReturn(null, "false", "invalid");
+        when(paramsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, false))
+                .thenReturn("false");
+        when(paramsService.updateValueByCode(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, "false"))
+                .thenReturn(1);
+
+        assertFalse(service.externalMonitoringSetting().enabled());
+        assertFalse(service.saveExternalMonitoringSetting(false).enabled());
+        assertThrows(RenException.class, () -> service.externalMonitoringSetting());
+        verify(paramsService).updateValueByCode(
+                Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, "false");
     }
 
     @Test

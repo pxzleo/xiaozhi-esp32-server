@@ -18,10 +18,75 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import jakarta.validation.Validation;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.EventUpsert;
+import xiaozhi.modules.device.proactive.ProactiveEnums.DedupePolicy;
+import xiaozhi.modules.device.proactive.ProactiveEnums.EventType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Mode;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 
 class ProactiveContractTest {
+    @Test
+    void externalRollingPoliciesHaveFixedWindowsAndLegacyEventsNeedNoPolicy() {
+        EventUpsert news = new EventUpsert();
+        news.setEventType(EventType.NEWS_ALERT);
+        news.setDedupePolicy(DedupePolicy.ROLLING_WINDOW);
+        news.setDedupeWindowHours(24);
+        assertTrue(news.isDedupePolicyValid());
+        news.setDedupeWindowHours(23);
+        assertFalse(news.isDedupePolicyValid());
+
+        EventUpsert warning = new EventUpsert();
+        warning.setEventType(EventType.WEATHER_ALERT);
+        warning.setDedupePolicy(DedupePolicy.EVENT_ID);
+        assertTrue(warning.isDedupePolicyValid());
+        EventUpsert forecast = new EventUpsert();
+        forecast.setEventType(EventType.WEATHER_ALERT);
+        forecast.setDedupePolicy(DedupePolicy.ROLLING_WINDOW);
+        forecast.setDedupeWindowHours(12);
+        assertTrue(forecast.isDedupePolicyValid());
+
+        EventUpsert reminder = new EventUpsert();
+        reminder.setEventType(EventType.REMINDER);
+        assertTrue(reminder.isDedupePolicyValid());
+    }
+
+    @Test
+    void rollingDedupeLedgerUsesDatabaseClockUniqueLockAndHashOnlyStorage() throws Exception {
+        String migration = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src/main/resources/db/changelog/202608090130.sql"));
+        assertTrue(migration.contains("PRIMARY KEY (`device_id`, `event_type`, `dedupe_hash`)"));
+        assertTrue(migration.contains("`dedupe_hash` char(64)"));
+        assertTrue(migration.contains("ON DELETE CASCADE"));
+        assertFalse(migration.contains("title"));
+        assertFalse(migration.contains("url"));
+
+        Method insert = ProactiveEventDedupeDao.class.getMethod("insertIfAbsent",
+                String.class, String.class, String.class);
+        String insertSql = insert.getAnnotation(Insert.class).value()[0];
+        assertTrue(insertSql.contains("INSERT IGNORE"));
+        assertTrue(insertSql.contains("CURRENT_TIMESTAMP"));
+        Method lock = ProactiveEventDedupeDao.class.getMethod("selectForUpdate",
+                String.class, String.class, String.class);
+        assertTrue(lock.getAnnotation(org.apache.ibatis.annotations.Select.class).value()[0]
+                .contains("FOR UPDATE"));
+        Method recent = ProactiveEventDedupeDao.class.getMethod("selectRecentEventId",
+                String.class, String.class, String.class, int.class);
+        String recentSql = recent.getAnnotation(org.apache.ibatis.annotations.Select.class).value()[0];
+        assertTrue(recentSql.contains("last_created_at > DATE_SUB(CURRENT_TIMESTAMP,"));
+        assertTrue(recentSql.contains("INTERVAL #{windowHours} HOUR"));
+        assertFalse(recentSql.contains("UTC_DATE"));
+        Method mark = ProactiveEventDedupeDao.class.getMethod("markCreated",
+                String.class, String.class, String.class, String.class);
+        assertTrue(mark.getAnnotation(Update.class).value()[0]
+                .contains("last_created_at = CURRENT_TIMESTAMP"));
+
+        Method globalGate = ProactiveGlobalDao.class.getMethod(
+                "selectExternalMonitoringValueForUpdate");
+        String globalGateSql = globalGate.getAnnotation(Select.class).value()[0];
+        assertTrue(globalGateSql.contains("proactive.external_monitoring_enabled"));
+        assertTrue(globalGateSql.contains("FOR UPDATE"));
+    }
+
     @Test
     void migrationAddsOnlyScopedTablesAndRequiredIdempotencyKeys() throws Exception {
         try (var stream = getClass().getResourceAsStream("/db/changelog/202608081200.sql")) {
@@ -182,6 +247,9 @@ class ProactiveContractTest {
         assertTrue(claimSql.contains("WHEN 'WEATHER_ALERT' THEN 'WEATHER'"));
         assertTrue(claimSql.contains("WHEN 'NEWS_ALERT' THEN 'NEWS'"));
         assertTrue(claimSql.contains("m.enabled = 1"));
+        assertTrue(claimSql.contains("proactive.external_monitoring_enabled"));
+        assertTrue(claimSql.contains("LOWER(TRIM(g.param_value)) = 'true'"));
+        assertTrue(claimSql.contains("e.event_type NOT IN ('WEATHER_ALERT', 'NEWS_ALERT')"));
         assertFalse(claimSql.contains("priority"));
 
         Method monitorRead = ProactiveEventDao.class.getMethod(
@@ -189,6 +257,8 @@ class ProactiveContractTest {
         String monitorReadSql = monitorRead.getAnnotation(Select.class).value()[0];
         assertTrue(monitorReadSql.contains("INNER JOIN ai_device_proactive_monitor m"));
         assertTrue(monitorReadSql.contains("m.enabled = 1"));
+        assertTrue(monitorReadSql.contains("proactive.external_monitoring_enabled"));
+        assertTrue(monitorReadSql.contains("LOWER(TRIM(g.param_value)) = 'true'"));
         assertTrue(monitorReadSql.contains("WHEN 'WEATHER_ALERT' THEN 'WEATHER'"));
         assertTrue(monitorReadSql.contains("WHEN 'NEWS_ALERT' THEN 'NEWS'"));
     }

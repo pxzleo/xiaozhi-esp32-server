@@ -22,6 +22,7 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 import xiaozhi.modules.device.proactive.ProactiveEnums.DeliveryStatus;
+import xiaozhi.modules.device.proactive.ProactiveEnums.DedupePolicy;
 import xiaozhi.modules.device.proactive.ProactiveEnums.EventType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.HabitType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Mode;
@@ -163,9 +164,17 @@ public final class ProactiveDTOs {
             MonitorView<NewsMonitorConfig> news,
             @JsonProperty("weather_location") String weatherLocation,
             @JsonProperty("weather_location_error") String weatherLocationError,
+            @JsonProperty("external_monitoring_enabled") boolean externalMonitoringEnabled,
             @JsonProperty("classifier") ClassifierAvailabilityView classifier) {}
 
     public record ClassifierAvailabilityView(boolean configured, boolean available, String error) {}
+
+    @Data
+    public static class ExternalMonitoringUpdate extends StrictRequest {
+        @NotNull private Boolean enabled;
+    }
+
+    public record ExternalMonitoringView(boolean enabled) {}
 
     public record PendingEnvelope(boolean pending,
             @JsonProperty("event_id") String eventId, Topic topic, Priority priority,
@@ -255,6 +264,8 @@ public final class ProactiveDTOs {
         @JsonProperty("expires_at") private Date expiresAt;
         @NotBlank(message = "dedupe_key不能为空") @Size(max = 128)
         @JsonProperty("dedupe_key") private String dedupeKey;
+        @JsonProperty("dedupe_policy") private DedupePolicy dedupePolicy;
+        @Min(1) @Max(168) @JsonProperty("dedupe_window_hours") private Integer dedupeWindowHours;
         @NotNull @JsonProperty("requires_response") private Boolean requiresResponse;
 
         @AssertTrue(message = "expires_at必须晚于created_at")
@@ -271,7 +282,26 @@ public final class ProactiveDTOs {
                 default -> true;
             };
         }
+
+        @AssertTrue(message = "外界监测事件去重策略无效")
+        public boolean isDedupePolicyValid() {
+            if (eventType == null) return true;
+            if (eventType == EventType.NEWS_ALERT) {
+                return dedupePolicy == DedupePolicy.ROLLING_WINDOW
+                        && Integer.valueOf(24).equals(dedupeWindowHours);
+            }
+            if (eventType == EventType.WEATHER_ALERT) {
+                return dedupePolicy == DedupePolicy.EVENT_ID && dedupeWindowHours == null
+                        || dedupePolicy == DedupePolicy.ROLLING_WINDOW
+                           && Integer.valueOf(12).equals(dedupeWindowHours);
+            }
+            return dedupePolicy == null && dedupeWindowHours == null;
+        }
     }
+
+    public record EventCreateResult(boolean created, boolean deduped,
+            @JsonProperty("authoritative_event_id") String authoritativeEventId,
+            EventView event) {}
 
     @Data
     public static class EventStatusUpdate extends StrictRequest {

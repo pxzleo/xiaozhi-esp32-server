@@ -19,6 +19,7 @@ import xiaozhi.common.utils.Result;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventStatusUpdate;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventClaim;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventUpsert;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.EventCreateResult;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitObserve;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitView;
@@ -81,6 +82,12 @@ public class ProactiveConfigController {
     @PostMapping("/events")
     public Result<EventView> event(@Valid @RequestBody EventUpsert request) {
         return new Result<EventView>().ok(service.upsertEvent(request));
+    }
+
+    @PostMapping("/monitor-events")
+    public Result<EventCreateResult> monitorEvent(
+            @Valid @RequestBody EventUpsert request) {
+        return new Result<EventCreateResult>().ok(service.createMonitorEvent(request));
     }
 
     @PutMapping("/events/{eventId}/status")

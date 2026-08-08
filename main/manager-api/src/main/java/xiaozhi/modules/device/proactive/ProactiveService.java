@@ -3,6 +3,8 @@ package xiaozhi.modules.device.proactive;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -12,11 +14,13 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
@@ -32,6 +36,7 @@ import xiaozhi.common.page.PageData;
 import xiaozhi.modules.device.dao.DeviceDao;
 import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventStatusUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.EventCreateResult;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventClaim;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventUpsert;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventView;
@@ -40,6 +45,7 @@ import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceUpdate;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceView;
 import xiaozhi.modules.device.proactive.ProactiveEnums.DeliveryStatus;
+import xiaozhi.modules.device.proactive.ProactiveEnums.DedupePolicy;
 import xiaozhi.modules.device.proactive.ProactiveEnums.EventType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.HabitType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Mode;
@@ -59,14 +65,19 @@ public class ProactiveService {
     private final DeviceDao deviceDao;
     private final ProactivePreferenceDao preferenceDao;
     private final ProactiveEventDao eventDao;
+    private final ProactiveEventDedupeDao eventDedupeDao;
+    private final ProactiveGlobalDao globalDao;
     private final ProactiveHabitDao habitDao;
     private final ObjectMapper objectMapper;
 
     public ProactiveService(DeviceDao deviceDao, ProactivePreferenceDao preferenceDao,
-            ProactiveEventDao eventDao, ProactiveHabitDao habitDao, ObjectMapper objectMapper) {
+            ProactiveEventDao eventDao, ProactiveEventDedupeDao eventDedupeDao,
+            ProactiveGlobalDao globalDao, ProactiveHabitDao habitDao, ObjectMapper objectMapper) {
         this.deviceDao = deviceDao;
         this.preferenceDao = preferenceDao;
         this.eventDao = eventDao;
+        this.eventDedupeDao = eventDedupeDao;
+        this.globalDao = globalDao;
         this.habitDao = habitDao;
         this.objectMapper = objectMapper;
     }
@@ -116,21 +127,87 @@ public class ProactiveService {
 
     @Transactional
     public EventView upsertEvent(EventUpsert request) {
+        if (isExternal(request.getEventType())) {
+            throw new RenException("外界监测事件必须使用monitor-events接口");
+        }
+        return createEvent(request).event();
+    }
+
+    @Transactional
+    public EventCreateResult createMonitorEvent(EventUpsert request) {
+        if (!isExternal(request.getEventType())) {
+            throw new RenException("monitor-events接口仅允许外界监测事件");
+        }
+        return createEvent(request);
+    }
+
+    private EventCreateResult createEvent(EventUpsert request) {
         DeviceEntity device = resolveByMac(request.getMacAddress());
         if (!request.isMonitorTopicValid()) throw new RenException("外界监测事件的topic与event_type不匹配");
+        if (!request.isDedupePolicyValid()) throw new RenException("外界监测事件去重策略无效");
         validateEventPayload(request.getPayload());
         if (deviceDao.selectByIdForUpdate(device.getId()) == null) throw new RenException("设备不存在");
+        boolean external = isExternal(request.getEventType());
+        if (external) {
+            String globalValue = globalDao.selectExternalMonitoringValueForUpdate();
+            if (StringUtils.isBlank(globalValue) || "false".equalsIgnoreCase(globalValue.trim())) {
+                throw new RenException("外界监测全局开关未开启");
+            }
+            if (!"true".equalsIgnoreCase(globalValue.trim())) {
+                throw new RenException("外界监测全局开关系统参数无效");
+            }
+        }
+        if (external && (StringUtils.isBlank(request.getDedupeKey())
+                || !request.getDedupeKey().matches("[A-Za-z0-9:_-]{1,128}"))) {
+            throw new RenException("外界监测事件dedupe_key格式无效");
+        }
+        if (request.getDedupePolicy() == DedupePolicy.ROLLING_WINDOW) {
+            return createRollingWindowEvent(device, request);
+        }
+        EventWrite write = upsertEventLocked(device, request, request.getEventId());
+        return new EventCreateResult(write.created(), !write.created(), write.event().eventId(), write.event());
+    }
+
+    private boolean isExternal(EventType eventType) {
+        return eventType == EventType.WEATHER_ALERT || eventType == EventType.NEWS_ALERT;
+    }
+
+    private EventCreateResult createRollingWindowEvent(DeviceEntity device, EventUpsert request) {
+        String eventType = request.getEventType().name();
+        String dedupeHash = sha256(request.getDedupeKey());
+        eventDedupeDao.insertIfAbsent(device.getId(), eventType, dedupeHash);
+        if (eventDedupeDao.selectForUpdate(device.getId(), eventType, dedupeHash) == null) {
+            throw new RenException("外界监测事件去重账本创建失败");
+        }
+        String recentEventId = eventDedupeDao.selectRecentEventId(device.getId(), eventType,
+                dedupeHash, request.getDedupeWindowHours());
+        if (StringUtils.isNotBlank(recentEventId)) {
+            ProactiveEventEntity authoritative = eventDao.selectByDeviceAndEventId(
+                    device.getId(), recentEventId);
+            if (authoritative == null) throw new RenException("外界监测事件去重账本引用无效");
+            return new EventCreateResult(false, true, recentEventId, toEvent(authoritative));
+        }
+        EventWrite write = upsertEventLocked(device, request, "ext-" + UUID.randomUUID());
+        if (eventDedupeDao.markCreated(device.getId(), eventType, dedupeHash,
+                write.event().eventId()) != 1) {
+            throw new RenException("外界监测事件去重账本更新失败");
+        }
+        return new EventCreateResult(write.created(), !write.created(),
+                write.event().eventId(), write.event());
+    }
+
+    private EventWrite upsertEventLocked(DeviceEntity device, EventUpsert request, String eventId) {
         ProactiveEventEntity existing = eventDao.selectByDeviceAndEventIdForUpdate(
-                device.getId(), request.getEventId());
+                device.getId(), eventId);
         if (existing != null) {
             verifyIdempotentEvent(existing, request);
-            return toEvent(existing);
+            return new EventWrite(false, toEvent(existing));
         }
         Date now = new Date();
         ProactiveEventEntity entity = new ProactiveEventEntity();
         entity.setDeviceId(device.getId());
         entity.setMacAddress(device.getMacAddress());
-        entity.setEventId(request.getEventId());
+        entity.setEventId(eventId);
         entity.setTopic(request.getTopic().name());
         entity.setPriority(request.getPriority().name());
         entity.setReason(request.getReason());
@@ -145,11 +222,22 @@ public class ProactiveService {
         entity.setUpdatedAt(now);
         eventDao.insertIfAbsent(entity);
         ProactiveEventEntity stored = eventDao.selectByDeviceAndEventIdForUpdate(
-                device.getId(), request.getEventId());
+                device.getId(), eventId);
         if (stored == null) throw new RenException("主动事件写入失败");
         verifyIdempotentEvent(stored, request);
-        return toEvent(stored);
+        return new EventWrite(true, toEvent(stored));
     }
+
+    private String sha256(String value) {
+        try {
+            return HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("JVM不支持SHA-256", exception);
+        }
+    }
+
+    private record EventWrite(boolean created, EventView event) {}
 
     @Transactional
     public EventView updateEventStatus(String eventId, EventStatusUpdate request) {

@@ -46,6 +46,12 @@ public final class ProactiveEnums {
         REMINDER, DUE_SOON, SCHEDULE_CHANGE, WEATHER_ALERT, NEWS_ALERT, MUSIC_STATUS, HABIT_SUGGESTION, SYSTEM;
         @JsonCreator public static EventType fromWire(String value) { return parseWire(EventType.class, value); }
     }
+    public enum DedupePolicy implements WireEnum {
+        EVENT_ID, ROLLING_WINDOW;
+        @JsonCreator public static DedupePolicy fromWire(String value) {
+            return parseWire(DedupePolicy.class, value);
+        }
+    }
     public enum DeliveryStatus implements WireEnum {
         PENDING, CLAIMED, DELIVERED, FAILED, EXPIRED, DISMISSED;
         @JsonCreator public static DeliveryStatus fromWire(String value) { return parseWire(DeliveryStatus.class, value); }

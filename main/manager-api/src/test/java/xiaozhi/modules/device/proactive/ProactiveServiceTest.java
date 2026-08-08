@@ -19,7 +19,9 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,6 +37,7 @@ import xiaozhi.modules.device.proactive.ProactiveDTOs.EventUpsert;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitObserve;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceUpdate;
 import xiaozhi.modules.device.proactive.ProactiveEnums.DeliveryStatus;
+import xiaozhi.modules.device.proactive.ProactiveEnums.DedupePolicy;
 import xiaozhi.modules.device.proactive.ProactiveEnums.EventType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.HabitType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Mode;
@@ -46,6 +49,8 @@ class ProactiveServiceTest {
     private DeviceDao deviceDao;
     private ProactivePreferenceDao preferenceDao;
     private ProactiveEventDao eventDao;
+    private ProactiveEventDedupeDao eventDedupeDao;
+    private ProactiveGlobalDao globalDao;
     private ProactiveHabitDao habitDao;
     private ProactiveService service;
     private DeviceEntity device;
@@ -55,8 +60,11 @@ class ProactiveServiceTest {
         deviceDao = mock(DeviceDao.class);
         preferenceDao = mock(ProactivePreferenceDao.class);
         eventDao = mock(ProactiveEventDao.class);
+        eventDedupeDao = mock(ProactiveEventDedupeDao.class);
+        globalDao = mock(ProactiveGlobalDao.class);
         habitDao = mock(ProactiveHabitDao.class);
-        service = new ProactiveService(deviceDao, preferenceDao, eventDao, habitDao, new ObjectMapper());
+        service = new ProactiveService(deviceDao, preferenceDao, eventDao, eventDedupeDao,
+                globalDao, habitDao, new ObjectMapper());
         device = new DeviceEntity();
         device.setId("device-1");
         device.setMacAddress("11:22:33:44:55:66");
@@ -64,6 +72,7 @@ class ProactiveServiceTest {
         when(deviceDao.selectList(any())).thenReturn(List.of(device));
         when(deviceDao.selectById("device-1")).thenReturn(device);
         when(deviceDao.selectByIdForUpdate("device-1")).thenReturn(device);
+        when(globalDao.selectExternalMonitoringValueForUpdate()).thenReturn("true");
     }
 
     @Test
@@ -278,18 +287,29 @@ class ProactiveServiceTest {
         EventUpsert request = eventRequest();
         request.setTopic(Topic.NEWS);
         request.setEventType(EventType.NEWS_ALERT);
+        request.setDedupePolicy(DedupePolicy.ROLLING_WINDOW);
+        request.setDedupeWindowHours(24);
         request.setPayload(Map.of("message", "重大新闻", "reference_url", referenceUrl));
-        ProactiveEventEntity stored = eventEntity(request);
-        stored.setPayload(new ObjectMapper().writeValueAsString(request.getPayload()));
-        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
-                .thenReturn(null, stored);
-        when(eventDao.selectMonitorEventByMacAndEventId(device.getMacAddress(), "event-1"))
-                .thenReturn(stored);
+        AtomicReference<ProactiveEventEntity> inserted = new AtomicReference<>();
+        when(eventDedupeDao.selectForUpdate(eq("device-1"), eq("NEWS_ALERT"), any()))
+                .thenReturn(new ProactiveEventDedupeEntity());
+        when(eventDedupeDao.markCreated(eq("device-1"), eq("NEWS_ALERT"), any(), any()))
+                .thenReturn(1);
+        when(eventDao.selectByDeviceAndEventIdForUpdate(eq("device-1"), any()))
+                .thenAnswer(ignored -> inserted.get());
+        when(eventDao.insertIfAbsent(any(ProactiveEventEntity.class))).thenAnswer(call -> {
+            inserted.set(call.getArgument(0));
+            return 1;
+        });
+        when(eventDao.selectMonitorEventByMacAndEventId(eq(device.getMacAddress()), any()))
+                .thenAnswer(ignored -> inserted.get());
 
-        assertEquals(referenceUrl, service.upsertEvent(request).payload().get("reference_url"));
+        var created = service.createMonitorEvent(request);
+        assertEquals(referenceUrl, created.event().payload().get("reference_url"));
         verify(eventDao).insertIfAbsent(argThat(event -> event.getPayload().contains(referenceUrl)));
         assertEquals(referenceUrl,
-                service.monitorEvent(device.getMacAddress(), "event-1").payload().get("reference_url"));
+                service.monitorEvent(device.getMacAddress(), created.authoritativeEventId())
+                        .payload().get("reference_url"));
     }
 
     @Test
@@ -315,6 +335,173 @@ class ProactiveServiceTest {
             request.setPayload(Map.of("reference_url", referenceUrl));
             assertThrows(RenException.class, () -> service.upsertEvent(request));
         }
+    }
+
+    @Test
+    void concurrentRollingNewsCreatesOnceAndReturnsAuthoritativeEventDespitePayloadChanges() throws Exception {
+        EventUpsert first = rollingNewsRequest("news-event-1", "第一版摘要");
+        EventUpsert second = rollingNewsRequest("news-event-2", "模型变化后的摘要");
+        ReentrantLock ledgerLock = new ReentrantLock();
+        AtomicReference<String> recentEventId = new AtomicReference<>();
+        Map<String, ProactiveEventEntity> stored = new ConcurrentHashMap<>();
+        when(eventDedupeDao.selectForUpdate(eq("device-1"), eq("NEWS_ALERT"), any()))
+                .thenAnswer(ignored -> {
+                    ledgerLock.lock();
+                    return new ProactiveEventDedupeEntity();
+                });
+        when(eventDedupeDao.selectRecentEventId(eq("device-1"), eq("NEWS_ALERT"), any(), eq(24)))
+                .thenAnswer(ignored -> {
+                    String value = recentEventId.get();
+                    if (value != null) ledgerLock.unlock();
+                    return value;
+                });
+        when(eventDedupeDao.markCreated(eq("device-1"), eq("NEWS_ALERT"), any(), any()))
+                .thenAnswer(call -> {
+                    recentEventId.set(call.getArgument(3));
+                    ledgerLock.unlock();
+                    return 1;
+                });
+        when(eventDao.selectByDeviceAndEventIdForUpdate(eq("device-1"), any()))
+                .thenAnswer(call -> stored.get(call.getArgument(1)));
+        when(eventDao.insertIfAbsent(any(ProactiveEventEntity.class))).thenAnswer(call -> {
+            ProactiveEventEntity entity = call.getArgument(0);
+            stored.put(entity.getEventId(), entity);
+            return 1;
+        });
+        when(eventDao.selectByDeviceAndEventId(eq("device-1"), any()))
+                .thenAnswer(call -> stored.get(call.getArgument(1)));
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var firstResult = executor.submit(() -> service.createMonitorEvent(first));
+            var secondResult = executor.submit(() -> service.createMonitorEvent(second));
+            var left = firstResult.get();
+            var right = secondResult.get();
+            assertEquals(1, List.of(left, right).stream().filter(result -> result.created()).count());
+            assertEquals(1, List.of(left, right).stream().filter(result -> result.deduped()).count());
+            assertEquals(left.authoritativeEventId(), right.authoritativeEventId());
+        }
+        verify(eventDao, times(1)).insertIfAbsent(any(ProactiveEventEntity.class));
+        verify(eventDedupeDao, times(1)).markCreated(eq("device-1"), eq("NEWS_ALERT"),
+                argThat(hash -> hash.length() == 64 && !hash.contains("news-cluster")), any());
+    }
+
+    @Test
+    void externalDedupePoliciesAndKeysAreStrictWhileLegacyReminderRemainsCompatible() {
+        EventUpsert news = rollingNewsRequest("news-event", "摘要");
+        news.setDedupeWindowHours(12);
+        assertThrows(RenException.class, () -> service.createMonitorEvent(news));
+
+        EventUpsert weather = eventRequest();
+        weather.setTopic(Topic.WEATHER);
+        weather.setEventType(EventType.WEATHER_ALERT);
+        weather.setDedupeKey("https://must-not-be-a-key.example/title");
+        weather.setDedupePolicy(DedupePolicy.EVENT_ID);
+        assertThrows(RenException.class, () -> service.createMonitorEvent(weather));
+
+        EventUpsert reminder = eventRequest();
+        ProactiveEventEntity stored = eventEntity(reminder);
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1")).thenReturn(stored);
+        assertEquals("event-1", service.upsertEvent(reminder).eventId());
+    }
+
+    @Test
+    void globalSwitchIsLockedBeforeExternalEventCreation() {
+        when(globalDao.selectExternalMonitoringValueForUpdate()).thenReturn("false");
+
+        assertThrows(RenException.class,
+                () -> service.createMonitorEvent(rollingNewsRequest("news-event", "摘要")));
+
+        verify(eventDedupeDao, never()).insertIfAbsent(any(), any(), any());
+        verify(eventDao, never()).insertIfAbsent(any(ProactiveEventEntity.class));
+    }
+
+    @Test
+    void invalidLockedGlobalSwitchValueFailsExplicitly() {
+        when(globalDao.selectExternalMonitoringValueForUpdate()).thenReturn("enabled");
+
+        RenException error = assertThrows(RenException.class,
+                () -> service.createMonitorEvent(rollingNewsRequest("news-event", "摘要")));
+
+        assertEquals("外界监测全局开关系统参数无效", error.getMessage());
+        verify(eventDedupeDao, never()).insertIfAbsent(any(), any(), any());
+    }
+
+    @Test
+    void monitorAndLegacyEventEndpointsHaveDisjointEventTypes() {
+        EventUpsert reminder = eventRequest();
+        EventUpsert news = rollingNewsRequest("news-event", "摘要");
+
+        assertThrows(RenException.class, () -> service.createMonitorEvent(reminder));
+        assertThrows(RenException.class, () -> service.upsertEvent(news));
+
+        verify(globalDao, never()).selectExternalMonitoringValueForUpdate();
+        verify(eventDao, never()).insertIfAbsent(any(ProactiveEventEntity.class));
+    }
+
+    @Test
+    void expiredRollingWindowCreatesFreshAuthoritativeIdEvenIfCallerIdIsReused() {
+        EventUpsert request = rollingNewsRequest("caller-stable-id", "摘要");
+        Map<String, ProactiveEventEntity> stored = new ConcurrentHashMap<>();
+        when(eventDedupeDao.selectForUpdate(eq("device-1"), eq("NEWS_ALERT"), any()))
+                .thenReturn(new ProactiveEventDedupeEntity());
+        when(eventDedupeDao.selectRecentEventId(eq("device-1"), eq("NEWS_ALERT"), any(), eq(24)))
+                .thenReturn(null);
+        when(eventDedupeDao.markCreated(eq("device-1"), eq("NEWS_ALERT"), any(), any()))
+                .thenReturn(1);
+        when(eventDao.selectByDeviceAndEventIdForUpdate(eq("device-1"), any()))
+                .thenAnswer(call -> stored.get(call.getArgument(1)));
+        when(eventDao.insertIfAbsent(any(ProactiveEventEntity.class))).thenAnswer(call -> {
+            ProactiveEventEntity entity = call.getArgument(0);
+            stored.put(entity.getEventId(), entity);
+            return 1;
+        });
+
+        var first = service.createMonitorEvent(request);
+        var afterWindow = service.createMonitorEvent(request);
+
+        assertTrue(first.created());
+        assertTrue(afterWindow.created());
+        assertFalse(first.authoritativeEventId().equals(afterWindow.authoritativeEventId()));
+        assertFalse(first.authoritativeEventId().equals(request.getEventId()));
+    }
+
+    @Test
+    void rollingLedgerIsScopedByDeviceAndDedupeKey() {
+        DeviceEntity secondDevice = new DeviceEntity();
+        secondDevice.setId("device-2");
+        secondDevice.setMacAddress("22:33:44:55:66:77");
+        secondDevice.setUserId(8L);
+        EventUpsert first = rollingNewsRequest("caller-1", "摘要一");
+        EventUpsert second = rollingNewsRequest("caller-2", "摘要二");
+        second.setMacAddress(secondDevice.getMacAddress());
+        second.setDedupeKey("news-cluster-fedcba9876543210");
+        Map<String, String> hashes = new ConcurrentHashMap<>();
+        Map<String, ProactiveEventEntity> stored = new ConcurrentHashMap<>();
+        when(deviceDao.selectList(any())).thenReturn(List.of(device), List.of(secondDevice));
+        when(deviceDao.selectByIdForUpdate("device-2")).thenReturn(secondDevice);
+        when(eventDedupeDao.insertIfAbsent(any(), eq("NEWS_ALERT"), any()))
+                .thenAnswer(call -> {
+                    hashes.put(call.getArgument(0), call.getArgument(2));
+                    return 1;
+                });
+        when(eventDedupeDao.selectForUpdate(any(), eq("NEWS_ALERT"), any()))
+                .thenReturn(new ProactiveEventDedupeEntity());
+        when(eventDedupeDao.markCreated(any(), eq("NEWS_ALERT"), any(), any())).thenReturn(1);
+        when(eventDao.selectByDeviceAndEventIdForUpdate(any(), any()))
+                .thenAnswer(call -> stored.get(call.getArgument(0) + ":" + call.getArgument(1)));
+        when(eventDao.insertIfAbsent(any(ProactiveEventEntity.class))).thenAnswer(call -> {
+            ProactiveEventEntity entity = call.getArgument(0);
+            stored.put(entity.getDeviceId() + ":" + entity.getEventId(), entity);
+            return 1;
+        });
+
+        var firstResult = service.createMonitorEvent(first);
+        var secondResult = service.createMonitorEvent(second);
+
+        assertTrue(firstResult.created());
+        assertTrue(secondResult.created());
+        assertEquals(2, hashes.size());
+        assertFalse(hashes.get("device-1").equals(hashes.get("device-2")));
     }
 
     @Test
@@ -622,6 +809,18 @@ class ProactiveServiceTest {
         EventClaim value = new EventClaim();
         value.setMacAddress(device.getMacAddress());
         value.setClaimToken(token);
+        return value;
+    }
+
+    private EventUpsert rollingNewsRequest(String eventId, String message) {
+        EventUpsert value = eventRequest();
+        value.setEventId(eventId);
+        value.setTopic(Topic.NEWS);
+        value.setEventType(EventType.NEWS_ALERT);
+        value.setPayload(Map.of("message", message, "source", "权威来源"));
+        value.setDedupeKey("news-cluster-abcdef0123456789");
+        value.setDedupePolicy(DedupePolicy.ROLLING_WINDOW);
+        value.setDedupeWindowHours(24);
         return value;
     }
 
