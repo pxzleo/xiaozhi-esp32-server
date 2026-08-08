@@ -1,0 +1,70 @@
+package xiaozhi.modules.config.controller;
+
+import java.util.List;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.validation.annotation.Validated;
+
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+import xiaozhi.common.utils.Result;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.EventStatusUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.EventUpsert;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.EventView;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitObserve;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitView;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceView;
+import xiaozhi.modules.device.proactive.ProactiveService;
+
+@RestController
+@RequestMapping("/config/proactive")
+@Validated
+public class ProactiveConfigController {
+    private final ProactiveService service;
+
+    public ProactiveConfigController(ProactiveService service) {
+        this.service = service;
+    }
+
+    @GetMapping("/preferences/{macAddress}")
+    public Result<PreferenceView> preference(@PathVariable @Size(max = 50) String macAddress) {
+        return new Result<PreferenceView>().ok(service.getPreferenceByMac(macAddress));
+    }
+
+    @PutMapping("/preferences/{macAddress}")
+    public Result<PreferenceView> updatePreference(@PathVariable @Size(max = 50) String macAddress,
+            @Valid @RequestBody PreferenceUpdate request) {
+        return new Result<PreferenceView>().ok(service.updatePreferenceByMac(macAddress, request));
+    }
+
+    @PostMapping("/events")
+    public Result<EventView> event(@Valid @RequestBody EventUpsert request) {
+        return new Result<EventView>().ok(service.upsertEvent(request));
+    }
+
+    @PutMapping("/events/{eventId}/status")
+    public Result<EventView> eventStatus(@PathVariable @Size(max = 64) String eventId,
+            @Valid @RequestBody EventStatusUpdate request) {
+        return new Result<EventView>().ok(service.updateEventStatus(eventId, request));
+    }
+
+    @PostMapping("/habits/observe")
+    public Result<HabitView> observe(@Valid @RequestBody HabitObserve request) {
+        return new Result<HabitView>().ok(service.observeHabit(request));
+    }
+
+    @GetMapping("/habits/candidates")
+    public Result<List<HabitView>> candidates(
+            @RequestParam("mac_address") @NotBlank @Size(max = 50) String macAddress) {
+        return new Result<List<HabitView>>().ok(service.candidatesByMac(macAddress));
+    }
+}

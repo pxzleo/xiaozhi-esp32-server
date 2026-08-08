@@ -23,3 +23,26 @@
 - 网易云音乐连续两次失败时，最多每小时给出一次检查登录状态的建议；单次失败仍只返回原始明确错误。
 - 用户只表达“晚点、有空、回头做某事”但没有明确要求提醒或没有时间时，必须先询问是否需要提醒及具体时间，禁止创建不完整任务。
 - 设备发现同类型、同内容、同一时刻但不同日期的多个单次闹铃或提醒时，在创建确认后建议改成重复任务。该判断只使用设备上真实存在的任务，不根据模型猜测习惯。
+
+### v2 管理数据契约
+
+本节仅定义 manager-api 的持久化与管理接口，不改变上面的设备通知协议或播报语义。内部接口继续使用现有 server-secret 鉴权；用户接口继续使用登录令牌，并且所有按 `device_id` 的操作都校验设备属于当前用户。无权访问与不存在统一返回“设备不存在”，避免枚举其他用户的设备。
+
+内部接口：
+
+- `GET /config/proactive/preferences/{macAddress}`、`PUT /config/proactive/preferences/{macAddress}`：读取或更新设备偏好。
+- `POST /config/proactive/events`：按全局唯一 `event_id` 以及设备内唯一 `(device_id, dedupe_key)` 幂等写入事件。
+- `PUT /config/proactive/events/{eventId}/status`：请求体必须带 `mac_address`，按设备与事件共同更新投递状态。
+- `POST /config/proactive/habits/observe`：按 `(device_id, habit_type, habit_key)` 原子累加证据；证据达到 3 次后进入候选。
+- `GET /config/proactive/habits/candidates?mac_address=...`：列出尚未接受或忽略的建议候选。
+
+用户接口：
+
+- `GET /device/proactive/preferences`、`GET|PUT /device/proactive/preferences/{deviceId}`：列出本人设备或管理单个设备偏好。
+- `PUT /device/proactive/preferences/{deviceId}/today-silent`：静默至服务端所在时区的次日零点。
+- `GET /device/proactive/events`：分页参数为 `page`（从 1 开始）和 `limit`（1 至 100），可选 `device_id`、`topic`、`delivery_status`、`event_type` 过滤；未给 `device_id` 时只查询本人全部绑定设备。
+- `GET /device/proactive/habits`、`DELETE /device/proactive/habits/{habitId}`：列出本人设备的习惯或删除指定候选；列表可选 `device_id`。
+
+偏好默认模式为 `aggressive`、每日上限 5 次且没有默认安静时段。`active` 未显式给出 `daily_limit` 时为 3，`conservative` 为 1 且只用于关键事件，`today_silent` 为 0。进入当日静默会保留 `previous_mode` 和次日恢复时间；读取偏好时若静默已到期，manager-api 原子恢复原模式并递增 `version`。安静时段必须同时给出 `quiet_start`、`quiet_end` 且不能相同。
+
+所有接口枚举使用小写值。主题仅允许 `reminder`、`calendar`、`weather`、`music`、`health`、`habit`、`system`。事件 payload 只允许 `title`、`message`、`reference_id`、`scheduled_at`、`action`、`source`；习惯 payload 只允许 `description`、`suggested_mode`、`suggested_time`、`topic`。payload 值只能是空值、字符串、数字或布尔值，字符串最多 512 个字符，不接收也不保存自由推理链。响应将 JSON 字段解析为对象或数组，不返回数据库中的原始 JSON 文本。
