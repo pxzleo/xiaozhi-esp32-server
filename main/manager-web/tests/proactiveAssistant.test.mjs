@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  PROACTIVE_DELIVERY_STATUSES,
   DeviceRequestGate,
   belongsToDevice,
   buildEventQuery,
@@ -11,6 +12,10 @@ import {
   recoverPreferenceFailure,
   validatePreference,
 } from '../src/utils/proactiveAssistant.mjs';
+
+test('exposes claimed events in the delivery status filter', () => {
+  assert.equal(PROACTIVE_DELIVERY_STATUSES.includes('claimed'), true);
+});
 
 test('clears failed loads but preserves a verified preference after mutation failure', () => {
   const current = {

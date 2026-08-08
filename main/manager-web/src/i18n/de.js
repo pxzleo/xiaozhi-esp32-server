@@ -1747,6 +1747,7 @@ export default {
   'proactive.eventType.habit_suggestion': 'Gewohnheitsvorschlag',
   'proactive.eventType.system': 'System',
   'proactive.deliveryStatus.pending': 'Ausstehend',
+  'proactive.deliveryStatus.claimed': 'Beansprucht',
   'proactive.deliveryStatus.delivered': 'Zugestellt',
   'proactive.deliveryStatus.failed': 'Fehlgeschlagen',
   'proactive.deliveryStatus.expired': 'Abgelaufen',

@@ -1747,6 +1747,7 @@ export default {
   'proactive.eventType.habit_suggestion': '習慣建議',
   'proactive.eventType.system': '系統',
   'proactive.deliveryStatus.pending': '待傳送',
+  'proactive.deliveryStatus.claimed': '已領取',
   'proactive.deliveryStatus.delivered': '已傳送',
   'proactive.deliveryStatus.failed': '失敗',
   'proactive.deliveryStatus.expired': '已過期',

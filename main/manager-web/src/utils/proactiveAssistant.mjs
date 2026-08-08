@@ -9,7 +9,7 @@ export const PROACTIVE_EVENT_TYPES = [
   'habit_suggestion',
   'system',
 ];
-export const PROACTIVE_DELIVERY_STATUSES = ['pending', 'delivered', 'failed', 'expired', 'dismissed'];
+export const PROACTIVE_DELIVERY_STATUSES = ['pending', 'claimed', 'delivered', 'failed', 'expired', 'dismissed'];
 
 export class DeviceRequestGate {
   constructor() {

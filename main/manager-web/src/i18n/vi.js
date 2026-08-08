@@ -1747,6 +1747,7 @@ export default {
   'proactive.eventType.habit_suggestion': 'Gợi ý thói quen',
   'proactive.eventType.system': 'Hệ thống',
   'proactive.deliveryStatus.pending': 'Đang chờ',
+  'proactive.deliveryStatus.claimed': 'Đã nhận',
   'proactive.deliveryStatus.delivered': 'Đã gửi',
   'proactive.deliveryStatus.failed': 'Thất bại',
   'proactive.deliveryStatus.expired': 'Đã hết hạn',
