@@ -17,6 +17,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import xiaozhi.common.utils.Result;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventStatusUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.EventClaim;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventUpsert;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitObserve;
@@ -55,6 +56,12 @@ public class ProactiveConfigController {
     public Result<EventView> eventStatus(@PathVariable @Size(max = 64) String eventId,
             @Valid @RequestBody EventStatusUpdate request) {
         return new Result<EventView>().ok(service.updateEventStatus(eventId, request));
+    }
+
+    @PostMapping("/events/{eventId}/claim")
+    public Result<Boolean> eventClaim(@PathVariable @Size(max = 64) String eventId,
+            @Valid @RequestBody EventClaim request) {
+        return new Result<Boolean>().ok(service.claimEvent(eventId, request));
     }
 
     @PostMapping("/habits/observe")

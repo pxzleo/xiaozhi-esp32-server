@@ -108,6 +108,12 @@ public final class ProactiveDTOs {
     }
 
     @Data
+    public static class EventClaim extends StrictRequest {
+        @NotBlank(message = "mac_address不能为空") @Size(max = 50)
+        @JsonProperty("mac_address") private String macAddress;
+    }
+
+    @Data
     public static class HabitObserve extends StrictRequest {
         @NotBlank(message = "mac_address不能为空") @Size(max = 50)
         @JsonProperty("mac_address") private String macAddress;

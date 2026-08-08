@@ -1911,7 +1911,7 @@ class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("连续失败", response)
         self.assertIn("检查登录状态", response)
-        self.assertIs(audit.call_args.kwargs["delivered"], False)
+        self.assertIsNone(audit.call_args.kwargs["delivered"])
         claim.assert_called_once()
 
     async def test_late_night_audit_fails_when_playback_is_cancelled(self):

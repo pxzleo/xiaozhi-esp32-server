@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 import queue
 import threading
 import time
@@ -79,6 +80,8 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
         ) as speak, patch.object(
             mcp_handler, "_prepare_proactive_audit", AsyncMock(return_value=False)
         ), patch.object(
+            mcp_handler, "claim_proactive_event", AsyncMock(return_value=True)
+        ), patch.object(
             mcp_handler, "_schedule_delivery_audit", side_effect=_discard_delivery_audit
         ) as audit:
             await mcp_handler._handle_schedule_follow_up_notification(self.conn, params)
@@ -86,6 +89,51 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
         speak.assert_awaited_once()
         self.assertEqual("刚才提醒的喝水完成了吗？", speak.await_args.args[1])
         audit.assert_called_once()
+
+    async def test_critical_health_manager_claim_has_one_cross_connection_winner(self):
+        params = {
+            **_event_fields(
+                topic="health_critical", priority="critical",
+                reason="device health", requires_response=False,
+            ),
+            "version": 1,
+            "kind": "audio_decode_failed",
+            "severity": "critical",
+            "occurred_at": 1_786_170_600,
+            "recovered": False,
+            "details": {"error_code": "17"},
+        }
+        connections = [SimpleNamespace(
+            device_id="AA:BB",
+            headers={"device-id": "AA:BB"},
+            proactive_preferences=safe_local_preferences(),
+        ) for _ in range(2)]
+        claim_lock = asyncio.Lock()
+        claimed = False
+
+        async def atomic_claim(_event_id, _mac_address):
+            nonlocal claimed
+            async with claim_lock:
+                if claimed:
+                    return False
+                claimed = True
+                return True
+
+        speak = AsyncMock(return_value="sid")
+        with patch.object(
+            mcp_handler, "_prepare_proactive_audit", AsyncMock(return_value=False)
+        ), patch.object(
+            mcp_handler, "claim_proactive_event", side_effect=atomic_claim
+        ), patch.object(
+            mcp_handler, "_speak_proactive_notification", speak
+        ), patch.object(
+            mcp_handler, "_schedule_delivery_audit", side_effect=_discard_delivery_audit
+        ):
+            await asyncio.gather(*(
+                mcp_handler._handle_device_health_notification(conn, params)
+                for conn in connections
+            ))
+        speak.assert_awaited_once()
 
     async def test_critical_health_bypasses_conservative_policy(self):
         self.conn.proactive_preferences = {
@@ -111,6 +159,8 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
             mcp_handler, "_speak_proactive_notification", AsyncMock(return_value="sid")
         ) as speak, patch.object(
             mcp_handler, "_prepare_proactive_audit", AsyncMock(return_value=False)
+        ), patch.object(
+            mcp_handler, "claim_proactive_event", AsyncMock(return_value=True)
         ), patch.object(
             mcp_handler, "_schedule_delivery_audit", side_effect=_discard_delivery_audit
         ):
@@ -680,6 +730,115 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*conn._proactive_audit_tasks)
         self.assertEqual("failed", status.await_args.args[2])
 
+    async def test_xunfei_monitor_rejects_server_error_and_disconnect(self):
+        module = importlib.import_module("core.providers.tts.xunfei_stream")
+
+        class FakeWebSocket:
+            def __init__(self, response):
+                self.response = response
+
+            async def recv(self):
+                if isinstance(self.response, list):
+                    response = self.response.pop(0)
+                    if isinstance(response, BaseException):
+                        raise response
+                    return response
+                if isinstance(self.response, BaseException):
+                    raise self.response
+                return self.response
+
+            async def close(self):
+                return None
+
+        def provider_for(response):
+            provider = module.TTSProvider.__new__(module.TTSProvider)
+            provider.conn = SimpleNamespace(
+                stop_event=SimpleNamespace(is_set=lambda: False),
+                client_abort=False,
+                sentence_id="sid",
+            )
+            provider.ws = FakeWebSocket(response)
+            provider.activate_session = True
+            provider._monitor_task = asyncio.current_task()
+            provider._sentence_text_map = {}
+            return provider
+
+        error_provider = provider_for(json.dumps({
+            "header": {"code": 101, "message": "synthesis failed"}
+        }))
+        with self.assertRaisesRegex(RuntimeError, "101"):
+            await error_provider._start_monitor_tts_response("sid")
+        self.assertIn("sid", error_provider._sentence_completion_failures)
+
+        class FakeClosed(Exception):
+            pass
+
+        disconnected = provider_for(FakeClosed("closed"))
+        with patch.object(module.websockets, "ConnectionClosed", FakeClosed):
+            with self.assertRaisesRegex(RuntimeError, "WebSocket连接已关闭"):
+                await disconnected._start_monitor_tts_response("sid")
+        self.assertIn("sid", disconnected._sentence_completion_failures)
+
+        damaged = provider_for([
+            json.dumps({
+                "header": {"code": 0},
+                "payload": {"audio": {"status": 1, "audio": "a"}},
+            }),
+            json.dumps({
+                "header": {"code": 0},
+                "payload": {"audio": {"status": 2, "audio": ""}},
+            }),
+        ])
+        damaged.opus_encoder = Mock()
+        damaged.handle_opus = Mock()
+        with self.assertRaisesRegex(RuntimeError, "处理TTS音频数据失败"):
+            await damaged._start_monitor_tts_response("sid")
+        self.assertIn("sid", damaged._sentence_completion_failures)
+
+    async def test_xunfei_cancel_old_monitor_does_not_fail_new_sentence(self):
+        module = importlib.import_module("core.providers.tts.xunfei_stream")
+        waiting = asyncio.Event()
+
+        class BlockingWebSocket:
+            async def recv(self):
+                waiting.set()
+                await asyncio.Event().wait()
+
+            async def close(self):
+                return None
+
+        provider = module.TTSProvider.__new__(module.TTSProvider)
+        provider.conn = SimpleNamespace(
+            stop_event=SimpleNamespace(is_set=lambda: False),
+            client_abort=False,
+            sentence_id="old-sid",
+        )
+        provider.ws = BlockingWebSocket()
+        provider.activate_session = True
+        provider._monitor_task = None
+        task = asyncio.create_task(
+            provider._start_monitor_tts_response("old-sid")
+        )
+        provider.conn.sentence_id = "new-sid"
+        await waiting.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertNotIn(
+            "new-sid", getattr(provider, "_sentence_completion_failures", set())
+        )
+
+    async def test_xunfei_missing_socket_cannot_finish_as_success(self):
+        module = importlib.import_module("core.providers.tts.xunfei_stream")
+        provider = module.TTSProvider.__new__(module.TTSProvider)
+        provider.ws = None
+        provider.activate_session = True
+        provider._monitor_task = None
+        provider.conn = SimpleNamespace()
+        with patch.object(provider, "close", AsyncMock()):
+            with self.assertRaisesRegex(RuntimeError, "WebSocket连接不存在"):
+                await provider.finish_session("sid")
+
     def test_all_tts_thread_overrides_forward_completion_contract(self):
         provider_files = (
             "alibl_stream.py",
@@ -992,6 +1151,9 @@ class ManageApiProactiveClientTest(unittest.IsolatedAsyncioTestCase):
             await manage_api_client.update_proactive_event_status(
                 "x", "AA:BB", "delivered"
             )
+            client._execute_async_request.return_value = True
+            self.assertTrue(await manage_api_client.claim_proactive_event("x", "AA:BB"))
+            client._execute_async_request.return_value = {"habit_key": "x"}
             await manage_api_client.observe_proactive_habit({"habit_key": "x"})
             client._execute_async_request.return_value = []
             await manage_api_client.get_proactive_habit_candidates("AA:BB")
@@ -1001,7 +1163,9 @@ class ManageApiProactiveClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("POST", calls[1].args[0])
         self.assertEqual("PUT", calls[2].args[0])
         self.assertEqual("POST", calls[3].args[0])
-        self.assertEqual("GET", calls[4].args[0])
+        self.assertIn("/claim", calls[3].args[1])
+        self.assertEqual("POST", calls[4].args[0])
+        self.assertEqual("GET", calls[5].args[0])
         for call in calls:
             self.assertEqual(0.5, call.kwargs["timeout"])
             self.assertEqual(1, call.kwargs["_max_retries"])

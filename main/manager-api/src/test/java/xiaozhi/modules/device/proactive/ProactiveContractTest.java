@@ -119,5 +119,12 @@ class ProactiveContractTest {
         Method insertIfAbsent = ProactiveEventDao.class.getMethod("insertIfAbsent", ProactiveEventEntity.class);
         String insertSql = insertIfAbsent.getAnnotation(Insert.class).value()[0];
         assertTrue(insertSql.contains("ON DUPLICATE KEY UPDATE id = id"));
+
+        Method claim = ProactiveEventDao.class.getMethod("claimPending", String.class,
+                String.class, java.util.Date.class);
+        String claimSql = claim.getAnnotation(Update.class).value()[0];
+        assertTrue(claimSql.contains("delivery_status = 'CLAIMED'"));
+        assertTrue(claimSql.contains("delivery_status = 'PENDING'"));
+        assertTrue(claimSql.contains("device_id = #{deviceId} AND event_id = #{eventId}"));
     }
 }

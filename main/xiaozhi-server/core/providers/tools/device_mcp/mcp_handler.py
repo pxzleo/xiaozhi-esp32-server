@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from config.manage_api_client import (
+    claim_proactive_event,
     create_proactive_event,
     update_proactive_event_status,
     update_proactive_preference,
@@ -890,10 +891,23 @@ async def _handle_device_health_notification(conn, params, notification_state=No
     if await _prepare_proactive_audit(audit):
         logger.bind(tag=TAG).info("忽略manager已投递的设备健康通知")
         return
+    bypass_policy = recovered or severity == "critical"
+    if bypass_policy:
+        try:
+            claimed = await claim_proactive_event(
+                audit["event_id"], audit["mac_address"]
+            )
+        except Exception as error:
+            logger.bind(tag=TAG).error(
+                f"关键设备健康事件领取失败: {type(error).__name__}"
+            )
+            return
+        if not claimed:
+            logger.bind(tag=TAG).info("设备健康事件已由其他连接领取")
+            return
     if not _claim_notification_event(conn, event["event_id"]):
         logger.bind(tag=TAG).info("忽略重复的设备健康通知")
         return
-    bypass_policy = recovered or severity == "critical"
     allowed = bypass_policy or claim_proactive_opportunity(
         conn,
         f"health:{kind}",

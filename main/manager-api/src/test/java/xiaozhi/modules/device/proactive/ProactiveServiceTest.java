@@ -17,6 +17,8 @@ import static org.mockito.Mockito.when;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,6 +29,7 @@ import xiaozhi.common.exception.RenException;
 import xiaozhi.modules.device.dao.DeviceDao;
 import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventStatusUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.EventClaim;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventUpsert;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitObserve;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceUpdate;
@@ -241,6 +244,29 @@ class ProactiveServiceTest {
 
         verify(eventDao).updateStatus(eq("device-1"), eq("event-1"), eq("DELIVERED"),
                 eq("ACKNOWLEDGED"), any());
+    }
+
+    @Test
+    void concurrentEventClaimHasExactlyOneServiceWinner() throws Exception {
+        EventClaim claim = new EventClaim();
+        claim.setMacAddress(device.getMacAddress());
+        AtomicInteger updates = new AtomicInteger();
+        when(eventDao.claimPending(eq("device-1"), eq("event-1"), any()))
+                .thenAnswer(ignored -> updates.getAndIncrement() == 0 ? 1 : 0);
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var results = executor.invokeAll(List.of(
+                    () -> service.claimEvent("event-1", claim),
+                    () -> service.claimEvent("event-1", claim)));
+            long winners = results.stream().filter(result -> {
+                try {
+                    return Boolean.TRUE.equals(result.get());
+                } catch (Exception exception) {
+                    throw new RuntimeException(exception);
+                }
+            }).count();
+            assertEquals(1, winners);
+        }
     }
 
     @Test

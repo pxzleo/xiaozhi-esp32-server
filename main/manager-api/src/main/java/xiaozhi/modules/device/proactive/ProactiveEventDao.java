@@ -49,6 +49,16 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
     int updateStatus(@Param("deviceId") String deviceId, @Param("eventId") String eventId,
             @Param("status") String status, @Param("outcome") String outcome, @Param("now") Date now);
 
+    @Update("""
+            UPDATE ai_device_proactive_event
+            SET delivery_status = 'CLAIMED', updated_at = #{now}
+            WHERE device_id = #{deviceId} AND event_id = #{eventId}
+              AND delivery_status = 'PENDING'
+              AND (expires_at IS NULL OR expires_at > #{now})
+            """)
+    int claimPending(@Param("deviceId") String deviceId, @Param("eventId") String eventId,
+            @Param("now") Date now);
+
     @Select("""
             <script>
             SELECT e.* FROM ai_device_proactive_event e

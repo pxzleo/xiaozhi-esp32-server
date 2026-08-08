@@ -44,6 +44,10 @@ def schedule_server_suggestion_audit(
         try:
             await create_proactive_event(event)
             delivery_result = delivered() if callable(delivered) else delivered
+            if delivery_result is None:
+                # 当前调用路径没有可靠的播放完成句柄，只保留 pending 审计，
+                # 禁止把“尚未知晓”伪装成 delivered 或 failed。
+                return True
             delivery_succeeded = (
                 await delivery_result
                 if hasattr(delivery_result, "__await__")

@@ -29,6 +29,7 @@ import xiaozhi.common.page.PageData;
 import xiaozhi.modules.device.dao.DeviceDao;
 import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventStatusUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.EventClaim;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventUpsert;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitObserve;
@@ -154,6 +155,12 @@ public class ProactiveService {
         }
         ProactiveEventEntity event = eventDao.selectByDeviceAndEventId(device.getId(), eventId);
         return toEvent(event);
+    }
+
+    @Transactional
+    public boolean claimEvent(String eventId, EventClaim request) {
+        DeviceEntity device = resolveByMac(request.getMacAddress());
+        return eventDao.claimPending(device.getId(), eventId, new Date()) == 1;
     }
 
     @Transactional

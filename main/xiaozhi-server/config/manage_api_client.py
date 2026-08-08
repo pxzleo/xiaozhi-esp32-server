@@ -237,6 +237,18 @@ async def update_proactive_event_status(
     )
 
 
+async def claim_proactive_event(event_id: str, mac_address: str) -> bool:
+    """原子领取待投递事件；仅一个并发连接可成功。"""
+    claimed = await _execute_proactive_request(
+        "POST",
+        f"/config/proactive/events/{quote(event_id, safe='')}/claim",
+        json={"mac_address": mac_address},
+    )
+    if not isinstance(claimed, bool):
+        raise ManageApiError("manager-api主动事件领取响应无效")
+    return claimed
+
+
 async def observe_proactive_habit(observation: Dict) -> Dict:
     """提交一次受控的习惯证据。"""
     return await _execute_proactive_request(

@@ -2463,8 +2463,8 @@ def _music_failure_response(conn, message):
             "music service failures",
             reference_id="music_service_fault",
             # 此文本随普通工具结果进入后续TTS，当前调用点没有播放完成句柄；
-            # 明确记为failed，禁止仅凭生成了响应文本写delivered。
-            delivered=False,
+            # 仅保留pending，禁止把未知投递结果伪装成delivered或failed。
+            delivered=None,
         )
         return f"{message}。音乐服务已经连续失败，要不要我帮你检查登录状态？"
     return message

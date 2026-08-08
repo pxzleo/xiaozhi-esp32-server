@@ -261,8 +261,7 @@ class TTSProvider(TTSProviderBase):
         """发送文本到TTS服务进行合成"""
         try:
             if self.ws is None:
-                logger.bind(tag=TAG).warning(f"WebSocket连接不存在，终止发送文本")
-                return
+                raise RuntimeError("WebSocket连接不存在")
 
             filtered_text = MarkdownCleaner.clean_markdown(text)
 
@@ -304,7 +303,9 @@ class TTSProvider(TTSProviderBase):
             # 启动监听任务
             if self._monitor_task is None or self._monitor_task.done():
                 logger.bind(tag=TAG).debug("启动监听任务...")
-                self._monitor_task = asyncio.create_task(self._start_monitor_tts_response())
+                self._monitor_task = asyncio.create_task(
+                    self._start_monitor_tts_response(session_id)
+                )
 
             # 发送会话启动请求
             start_request = self._build_base_request(status=0)
@@ -320,19 +321,19 @@ class TTSProvider(TTSProviderBase):
     async def finish_session(self, session_id):
         logger.bind(tag=TAG).debug(f"关闭会话～～{session_id}")
         try:
-            if self.ws:
-                # 发送会话结束请求
-                stop_request = self._build_base_request(status=2)
-                await self.ws.send(json.dumps(stop_request))
-                logger.bind(tag=TAG).debug("会话结束请求已发送")
+            if self.ws is None:
+                raise RuntimeError("WebSocket连接不存在")
+            # 发送会话结束请求
+            stop_request = self._build_base_request(status=2)
+            await self.ws.send(json.dumps(stop_request))
+            logger.bind(tag=TAG).debug("会话结束请求已发送")
 
-                if self._monitor_task:
-                    try:
-                        await self._monitor_task
-                    except Exception as e:
-                        logger.bind(tag=TAG).error(f"等待监听任务完成时发生错误: {str(e)}")
-                    finally:
-                        self._monitor_task = None
+            monitor_task = self._monitor_task
+            if monitor_task:
+                try:
+                    await monitor_task
+                finally:
+                    self._monitor_task = None
         except Exception as e:
             logger.bind(tag=TAG).error(f"关闭会话失败: {str(e)}")
             await self.close()
@@ -359,7 +360,7 @@ class TTSProvider(TTSProviderBase):
                 pass
             self.ws = None
 
-    async def _start_monitor_tts_response(self):
+    async def _start_monitor_tts_response(self, monitor_sentence_id):
         """监听TTS响应"""
         try:
             while not self.conn.stop_event.is_set():
@@ -369,7 +370,7 @@ class TTSProvider(TTSProviderBase):
                     # 检查客户端是否中止
                     if self.conn.client_abort:
                         logger.bind(tag=TAG).info("收到打断信息，终止监听TTS响应")
-                        break
+                        raise RuntimeError("TTS会话被客户端中止")
 
                     try:
                         data = json.loads(msg)
@@ -404,31 +405,31 @@ class TTSProvider(TTSProviderBase):
                                         )
                                         self.clear_tts_text(self.conn.sentence_id)
                                     try:
-                                        audio_bytes = base64.b64decode(audio_data)
+                                        audio_bytes = base64.b64decode(
+                                            audio_data, validate=True
+                                        )
                                         self.opus_encoder.encode_pcm_to_opus_stream(
                                             audio_bytes, False, self.handle_opus
                                         )
 
                                     except Exception as e:
-                                        logger.bind(tag=TAG).error(f"处理音频数据失败: {e}")
+                                        raise RuntimeError("处理TTS音频数据失败") from e
 
                         else:
                             message = header.get("message", "未知错误")
-                            logger.bind(tag=TAG).error(f"TTS合成错误: {code} - {message}")
-                            break
+                            raise RuntimeError(f"TTS合成错误: {code} - {message}")
 
                     except json.JSONDecodeError:
                         logger.bind(tag=TAG).warning("收到无效的JSON消息")
 
-                except websockets.ConnectionClosed:
-                    logger.bind(tag=TAG).warning("WebSocket连接已关闭")
-                    break
+                except websockets.ConnectionClosed as error:
+                    raise RuntimeError("WebSocket连接已关闭") from error
 
                 except Exception as e:
                     logger.bind(tag=TAG).error(
                         f"处理TTS响应时出错: {e}\n{traceback.format_exc()}"
                     )
-                    break
+                    raise
 
             # 链接不可复用
             if self.ws:
@@ -437,6 +438,17 @@ class TTSProvider(TTSProviderBase):
                 except:
                     pass
                 self.ws = None
+        except asyncio.CancelledError:
+            # close() 主动取消旧会话监听属于正常资源回收，不能污染新轮次。
+            raise
+        except Exception:
+            failures = getattr(self, "_sentence_completion_failures", None)
+            if failures is None:
+                failures = set()
+                self._sentence_completion_failures = failures
+            if monitor_sentence_id:
+                failures.add(monitor_sentence_id)
+            raise
         # 监听任务退出时清理引用
         finally:
             self.activate_session = False

@@ -47,7 +47,7 @@ public final class ProactiveEnums {
         @JsonCreator public static EventType fromWire(String value) { return parseWire(EventType.class, value); }
     }
     public enum DeliveryStatus implements WireEnum {
-        PENDING, DELIVERED, FAILED, EXPIRED, DISMISSED;
+        PENDING, CLAIMED, DELIVERED, FAILED, EXPIRED, DISMISSED;
         @JsonCreator public static DeliveryStatus fromWire(String value) { return parseWire(DeliveryStatus.class, value); }
     }
     public enum Outcome implements WireEnum {
