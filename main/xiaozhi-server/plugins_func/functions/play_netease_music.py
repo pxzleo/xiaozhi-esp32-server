@@ -25,6 +25,10 @@ TAG = __name__
 TOPLIST_ID = "3778678"
 DEFAULT_API_BASE_URL = "http://127.0.0.1:3000"
 DEFAULT_MAX_TRACKS = 20
+CATEGORY_PLAYLIST_LIMIT = 5
+NEW_ALBUM_LIMIT = 10
+ALBUM_TRACK_MAX_ATTEMPTS = 3
+ALBUM_TRACK_RETRY_DELAYS = (0.2, 0.5)
 DEFAULT_CACHE_SIZE_MB = 512
 DEFAULT_CACHE_TTL_HOURS = 24
 DEFAULT_MAX_FILE_SIZE_MB = 40
@@ -43,6 +47,34 @@ SUPPORTED_QUALITY_LEVELS = {
     "hires",
 }
 PUBLIC_FREE_FEE_TYPES = {0, 8}
+CATEGORY_ALIASES = {
+    "布鲁斯": "蓝调",
+    "嘻哈": "说唱",
+    "hiphop": "说唱",
+    "hip-hop": "说唱",
+    "r&b": "R&B/Soul",
+    "节奏布鲁斯": "R&B/Soul",
+}
+NEW_RELEASE_REGIONS = {
+    "": (0, "ALL", "全部"),
+    "全部": (0, "ALL", "全部"),
+    "华语": (7, "ZH", "华语"),
+    "欧美": (96, "EA", "欧美"),
+    "日本": (8, "JP", "日本"),
+    "日语": (8, "JP", "日本"),
+    "韩国": (16, "KR", "韩国"),
+    "韩语": (16, "KR", "韩国"),
+}
+FALLBACK_QUEUE_ACTIONS = {
+    "random",
+    "category",
+    "chart",
+    "new_songs",
+    "new_albums",
+    "album",
+    "similar",
+    "intelligence",
+}
 _CACHE_LOCKS = {}
 _CACHE_PROTECTED_UNTIL = {}
 _CACHE_ACTIVE_REFERENCES = {}
@@ -110,6 +142,14 @@ class NeteaseMusicError(RuntimeError):
     """网易云音乐调用失败。"""
 
 
+class NeteaseMusicHttpError(NeteaseMusicError):
+    """网易云音乐 HTTP 调用失败。"""
+
+    def __init__(self, message, status_code):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class NeteaseAuthenticationRequiredError(NeteaseMusicError):
     """当前操作需要网易云音乐登录。"""
 
@@ -134,6 +174,8 @@ class NeteasePlaybackState:
     prefetch_task: object = None
     source_exhausted: bool = False
     lyrics_loader: object = None
+    source_playlist_id: str = ""
+    intelligence_eligible: bool = False
 
 
 play_netease_music_function_desc = {
@@ -142,10 +184,16 @@ play_netease_music_function_desc = {
         "name": "play_netease_music",
         "description": (
             "通过网易云音乐播放歌曲。支持按歌名播放、播放当前登录账号的歌单、"
-            "按歌手连续播放、我的收藏、每日推荐和私人FM，以及上一首、下一首、"
+            "按歌手连续播放、我的收藏、每日推荐、私人FM、分类或场景、榜单、"
+            "新歌、新碟、专辑、相似歌曲和智能续播，以及上一首、下一首、"
             "跳到指定序号、暂停、继续和停止。"
             "用户说‘播放某位歌手的歌’时必须使用artist，不要使用song。"
             "用户说‘播放我的收藏’、‘播放收藏’或‘播放我喜欢的音乐’时必须使用favorites。"
+            "用户说‘播放民谣/摇滚/布鲁斯’或‘播放适合学习/运动/治愈的歌’时使用category。"
+            "用户说播放榜单但没有说明具体榜单时，必须先追问榜单名称，不能自行猜测。"
+            "同名专辑无法确定时必须追问歌手，用户已提供歌手时将歌手和专辑名一起填写。"
+            "用户说‘播放类似的歌’时使用similar；只有当前正在播放登录账号的歌单或收藏时，"
+            "用户说‘智能续播’才使用intelligence。"
             "用户说‘播放第几首’或‘跳到第几首’时必须使用jump，并填写position。"
             "用户说‘随机播放’、‘随便放首歌’、‘下一首’、‘上一首’、‘暂停’、"
             "‘继续’或‘停止播放’时必须调用本工具。不得在未调用工具或未收到成功结果时"
@@ -165,6 +213,13 @@ play_netease_music_function_desc = {
                         "daily",
                         "personal_fm",
                         "random",
+                        "category",
+                        "chart",
+                        "new_songs",
+                        "new_albums",
+                        "album",
+                        "similar",
+                        "intelligence",
                         "next",
                         "previous",
                         "jump",
@@ -177,6 +232,10 @@ play_netease_music_function_desc = {
                         "favorites播放账号的‘我喜欢的音乐’；"
                         "playlist播放用户歌单；"
                         "daily播放每日推荐；personal_fm播放私人FM；random随机播放；"
+                        "category按音乐分类或场景建立队列；chart播放指定榜单；"
+                        "new_songs播放新歌；new_albums播放新碟；album播放指定专辑；"
+                        "similar播放与当前歌曲相似的歌曲；"
+                        "intelligence仅基于当前登录账号的歌单或收藏智能续播；"
                         "next下一首；previous上一首；jump跳到队列指定序号；"
                         "pause暂停；resume继续；stop停止。"
                     ),
@@ -184,8 +243,11 @@ play_netease_music_function_desc = {
                 "name": {
                     "type": "string",
                     "description": (
-                        "歌曲名、歌手名或歌单名。action为song、artist或playlist时填写；"
-                        "action为favorites时填写空字符串；"
+                        "歌曲名、歌手名、歌单名、分类/场景、榜单名或专辑名。"
+                        "action为song、artist、playlist、category或chart时填写对应名称；"
+                        "action为album时优先填写‘歌手名 专辑名’，只有专辑名也必须照实填写；"
+                        "new_songs和new_albums可填写全部、华语、欧美、日本、韩国，"
+                        "未指定地区时填写空字符串；favorites、similar和intelligence填写空字符串；"
                         "用户没有提供名称时填写空字符串。"
                     ),
                 },
@@ -220,6 +282,133 @@ def _normalize_music_action(action, name):
     }:
         return "favorites"
     return action
+
+
+def _normalize_category_name(name):
+    category = str(name or "").strip()
+    return CATEGORY_ALIASES.get(
+        category.casefold(), CATEGORY_ALIASES.get(category, category)
+    )
+
+
+def _new_release_region(name):
+    region = str(name or "").strip()
+    normalized = NEW_RELEASE_REGIONS.get(region)
+    if normalized is None:
+        raise NeteaseMusicError("新歌或新碟地区仅支持全部、华语、欧美、日本、韩国")
+    return normalized
+
+
+def _normalize_song(song):
+    if not isinstance(song, dict):
+        return None
+    normalized = dict(song)
+    if not normalized.get("ar") and normalized.get("artists"):
+        normalized["ar"] = normalized["artists"]
+    if not normalized.get("al"):
+        album = normalized.get("albumData") or normalized.get("album")
+        if isinstance(album, dict):
+            normalized["al"] = album
+    if normalized.get("fee") is None:
+        privilege = normalized.get("privilege")
+        if isinstance(privilege, dict):
+            normalized["fee"] = privilege.get("fee")
+    try:
+        _safe_song_id(normalized.get("id"))
+    except NeteaseMusicError:
+        return None
+    return normalized
+
+
+def _normalize_songs(songs):
+    normalized = []
+    for song in songs or []:
+        item = _normalize_song(song)
+        if item is not None:
+            normalized.append(item)
+    return normalized
+
+
+def _deduplicate_songs(songs):
+    unique = []
+    seen_ids = set()
+    for song in songs:
+        song_id = str(song.get("id") or "")
+        if not song_id or song_id in seen_ids:
+            continue
+        seen_ids.add(song_id)
+        unique.append(song)
+    return unique
+
+
+def _with_source_playlist(songs, playlist_id, intelligence_eligible=False):
+    source_id = _safe_song_id(playlist_id)
+    tagged = []
+    for song in songs:
+        item = dict(song)
+        item["_netease_source_playlist_id"] = source_id
+        item["_netease_intelligence_eligible"] = bool(intelligence_eligible)
+        tagged.append(item)
+    return tagged
+
+
+def _playlist_belongs_to_profile(playlist, profile):
+    if not isinstance(playlist, dict) or not isinstance(profile, dict):
+        return False
+    creator = playlist.get("creator")
+    creator_user_id = creator.get("userId") if isinstance(creator, dict) else None
+    if creator_user_id is None:
+        creator_user_id = playlist.get("userId")
+    profile_user_id = profile.get("userId")
+    return (
+        creator_user_id is not None
+        and profile_user_id is not None
+        and str(creator_user_id) == str(profile_user_id)
+    )
+
+
+def _normalize_chart_name(name):
+    chart_name = str(name or "").strip()
+    return re.sub(r"^(?:网易云音乐|网易云|云音乐)\s*", "", chart_name).strip()
+
+
+def _best_chart_match(query, charts):
+    normalized_query = _normalize_chart_name(query).casefold()
+    if not normalized_query:
+        return None
+    for chart in charts:
+        if str(chart.get("name") or "").strip().casefold() == normalized_query:
+            return chart
+    return _best_named_item(
+        normalized_query,
+        charts,
+        lambda item: _normalize_chart_name(item.get("name")),
+    )
+
+
+async def _gather_ordered_with_limit(items, loader, concurrency=3):
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def load(item):
+        async with semaphore:
+            return await loader(item)
+
+    tasks = [asyncio.create_task(load(item)) for item in items]
+
+    async def cancel_pending():
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    try:
+        return await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        await cancel_pending()
+        raise
+    except Exception:
+        await cancel_pending()
+        raise
 
 
 def _normalize_base_url(value):
@@ -377,6 +566,73 @@ def _best_song_match(query, songs):
     ) or exact_name
 
 
+def _album_artist_names(album):
+    artists = album.get("artists") or []
+    primary_artist = album.get("artist")
+    if isinstance(primary_artist, dict):
+        artists = [primary_artist, *artists]
+    names = []
+    for artist in artists:
+        name = str(artist.get("name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _album_track_count(album):
+    for key in ("size", "songCount"):
+        try:
+            count = int(album.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            return count
+    return 0
+
+
+def _best_album_match(query, albums):
+    normalized_query = str(query or "").strip().casefold()
+    if not normalized_query:
+        return None
+
+    candidates = [album for album in albums if isinstance(album, dict)]
+    artist_matches = [
+        album
+        for album in candidates
+        if any(
+            artist.casefold() in normalized_query
+            for artist in _album_artist_names(album)
+        )
+    ]
+    if artist_matches:
+        return max(
+            artist_matches,
+            key=lambda album: (
+                str(album.get("name") or "").strip().casefold()
+                in normalized_query,
+                difflib.SequenceMatcher(
+                    None,
+                    normalized_query,
+                    str(album.get("name") or "").strip().casefold(),
+                ).ratio(),
+                _album_track_count(album),
+            ),
+        )
+
+    exact_matches = [
+        album
+        for album in candidates
+        if str(album.get("name") or "").strip().casefold() == normalized_query
+    ]
+    if len(exact_matches) > 1:
+        raise NeteaseMusicError(
+            f"找到多个名为《{str(query).strip()}》的专辑，请补充歌手名称"
+        )
+    if exact_matches:
+        return exact_matches[0]
+    return _best_named_item(query, candidates, lambda item: item.get("name"))
+
+
 def _songs_by_artist(artist_name, songs):
     normalized_artist = str(artist_name or "").strip().casefold()
     if not normalized_artist:
@@ -415,7 +671,7 @@ class NeteaseMusicClient:
     def is_authenticated(self):
         return bool(self.cookie)
 
-    async def _request(self, path, params=None):
+    async def _request(self, path, params=None, authentication_error_codes=None):
         request_params = dict(params or {})
         request_params["timestamp"] = int(time.time() * 1000)
         if self.cookie:
@@ -441,6 +697,11 @@ class NeteaseMusicClient:
                 response.raise_for_status()
         except httpx.TimeoutException as exc:
             raise NeteaseMusicError("网易云音乐服务响应超时") from exc
+        except httpx.HTTPStatusError as exc:
+            raise NeteaseMusicHttpError(
+                f"网易云音乐服务请求失败: {exc}",
+                exc.response.status_code,
+            ) from exc
         except httpx.HTTPError as exc:
             raise NeteaseMusicError(f"网易云音乐服务请求失败: {exc}") from exc
 
@@ -454,7 +715,12 @@ class NeteaseMusicClient:
         code = payload.get("code")
         if code not in (None, 200):
             message = payload.get("message") or payload.get("msg") or f"错误码 {code}"
-            if code in {301, 302, 400, 401}:
+            auth_codes = (
+                {301, 302, 401}
+                if authentication_error_codes is None
+                else set(authentication_error_codes)
+            )
+            if code in auth_codes:
                 raise NeteaseAuthenticationRequiredError(f"网易云音乐登录已失效: {message}")
             raise NeteaseMusicError(f"网易云音乐服务返回错误: {message}")
         return payload
@@ -476,14 +742,90 @@ class NeteaseMusicClient:
             "/cloudsearch",
             {"keywords": keywords, "type": 1, "limit": limit},
         )
-        return payload.get("result", {}).get("songs") or []
+        return _normalize_songs(payload.get("result", {}).get("songs"))
+
+    async def search_albums(self, keywords, limit=20):
+        payload = await self._request(
+            "/cloudsearch",
+            {"keywords": keywords, "type": 10, "limit": limit},
+        )
+        return payload.get("result", {}).get("albums") or []
 
     async def playlist_tracks(self, playlist_id, limit=1000):
         payload = await self._request(
             "/playlist/track/all",
             {"id": playlist_id, "limit": limit, "offset": 0},
         )
-        return payload.get("songs") or []
+        return _normalize_songs(payload.get("songs"))
+
+    async def playlist_categories(self):
+        payload = await self._request("/playlist/catlist")
+        return [
+            str(item.get("name") or "").strip()
+            for item in payload.get("sub") or []
+            if str(item.get("name") or "").strip()
+        ]
+
+    async def top_playlists(self, category, limit=CATEGORY_PLAYLIST_LIMIT):
+        payload = await self._request(
+            "/top/playlist",
+            {"cat": category, "order": "hot", "limit": limit, "offset": 0},
+        )
+        return payload.get("playlists") or []
+
+    async def toplists(self):
+        payload = await self._request("/toplist")
+        return payload.get("list") or []
+
+    async def new_songs(self, region_type):
+        payload = await self._request("/top/song", {"type": region_type})
+        return _normalize_songs(payload.get("data"))
+
+    async def new_albums(self, area, limit=NEW_ALBUM_LIMIT):
+        payload = await self._request(
+            "/album/new",
+            {"area": area, "limit": limit, "offset": 0},
+        )
+        return payload.get("albums") or payload.get("monthData") or []
+
+    async def album_tracks(self, album_id):
+        safe_album_id = _safe_song_id(album_id)
+        for attempt in range(ALBUM_TRACK_MAX_ATTEMPTS):
+            try:
+                payload = await self._request("/album", {"id": safe_album_id})
+                return _normalize_songs(payload.get("songs"))
+            except NeteaseMusicHttpError as exc:
+                if exc.status_code != 405 or attempt + 1 >= ALBUM_TRACK_MAX_ATTEMPTS:
+                    raise
+                await asyncio.sleep(ALBUM_TRACK_RETRY_DELAYS[attempt])
+        raise NeteaseMusicError("网易云音乐专辑详情重试状态异常")
+
+    async def similar_songs(self, song_id, limit=50):
+        payload = await self._request(
+            "/simi/song",
+            {"id": _safe_song_id(song_id), "limit": limit, "offset": 0},
+        )
+        return _normalize_songs(payload.get("songs"))
+
+    async def intelligence_songs(self, song_id, playlist_id, count=50):
+        payload = await self._request(
+            "/playmode/intelligence/list",
+            {
+                "id": _safe_song_id(song_id),
+                "pid": _safe_song_id(playlist_id),
+                "sid": _safe_song_id(song_id),
+                "count": count,
+            },
+            authentication_error_codes={301, 302, 401},
+        )
+        songs = []
+        for item in payload.get("data") or []:
+            if not isinstance(item, dict):
+                continue
+            song = item.get("songInfo") or item.get("song") or item
+            if isinstance(song, dict):
+                songs.append(song)
+        return _normalize_songs(songs)
 
     async def toplist_tracks(self):
         return await self.playlist_tracks(TOPLIST_ID, limit=200)
@@ -852,9 +1194,24 @@ async def _invalidate_device_credential(conn, credential_version):
         conn.logger.bind(tag=TAG).warning("设备网易云凭证失效回报失败")
 
 
-async def _select_tracks(client, action, name, max_tracks):
+def _anonymous_tracks(client, tracks):
     if client.is_authenticated:
-        await client.account_profile()
+        return list(tracks)
+    return [song for song in tracks if _is_public_free_song(song)]
+
+
+async def _select_tracks(
+    client,
+    action,
+    name,
+    max_tracks,
+    current_song_id=None,
+    source_playlist_id=None,
+    intelligence_eligible=False,
+):
+    profile = None
+    if client.is_authenticated:
+        profile = await client.account_profile()
 
     action = _normalize_music_action(action, name)
 
@@ -904,7 +1261,11 @@ async def _select_tracks(client, action, name, max_tracks):
         playlist = _best_named_item(name, playlists, lambda item: item.get("name"))
         if not playlist:
             raise NeteaseMusicUnavailableError(f"当前账号中没有找到歌单《{name}》")
-        tracks = await client.playlist_tracks(playlist.get("id"))
+        tracks = _with_source_playlist(
+            await client.playlist_tracks(playlist.get("id")),
+            playlist.get("id"),
+            intelligence_eligible=_playlist_belongs_to_profile(playlist, profile),
+        )
         if not tracks:
             raise NeteaseMusicUnavailableError(f"歌单《{playlist.get('name')}》中没有歌曲")
         return tracks[:max_tracks], f"正在播放歌单，《{playlist.get('name')}》"
@@ -925,6 +1286,7 @@ async def _select_tracks(client, action, name, max_tracks):
                     playlist
                     for playlist in playlists
                     if "喜欢的音乐" in str(playlist.get("name") or "")
+                    and _playlist_belongs_to_profile(playlist, profile)
                 ),
                 None,
             )
@@ -932,7 +1294,11 @@ async def _select_tracks(client, action, name, max_tracks):
             raise NeteaseMusicUnavailableError(
                 "当前账号中没有找到‘我喜欢的音乐’歌单"
             )
-        tracks = await client.playlist_tracks(favorites.get("id"))
+        tracks = _with_source_playlist(
+            await client.playlist_tracks(favorites.get("id")),
+            favorites.get("id"),
+            intelligence_eligible=True,
+        )
         if max_tracks is not None:
             tracks = tracks[:max_tracks]
         if not tracks:
@@ -962,11 +1328,166 @@ async def _select_tracks(client, action, name, max_tracks):
         )
         if not client.is_authenticated:
             tracks = [song for song in tracks if _is_public_free_song(song)]
+            tracks = _with_source_playlist(tracks, TOPLIST_ID)
         if not tracks:
             raise NeteaseMusicUnavailableError("当前没有可随机播放的歌曲")
         tracks = list(tracks)
         random.shuffle(tracks)
         return tracks, "正在随机播放"
+
+    if action == "category":
+        requested_category = str(name or "").strip()
+        if not requested_category:
+            raise NeteaseMusicError("请告诉我想播放的音乐类型或场景")
+        category = _normalize_category_name(requested_category)
+        categories = await client.playlist_categories()
+        matched_category = next(
+            (
+                item
+                for item in categories
+                if item.casefold() == category.casefold()
+            ),
+            None,
+        )
+        if not matched_category:
+            raise NeteaseMusicUnavailableError(
+                f"暂不支持音乐分类或场景《{requested_category}》"
+            )
+        playlists = await client.top_playlists(
+            matched_category, limit=CATEGORY_PLAYLIST_LIMIT
+        )
+        if not playlists:
+            raise NeteaseMusicUnavailableError(
+                f"分类《{matched_category}》暂时没有可播放歌单"
+            )
+        candidate_limit = max((max_tracks or DEFAULT_MAX_TRACKS) * 3, 20)
+        per_playlist_limit = max(
+            10, (candidate_limit + len(playlists) - 1) // len(playlists)
+        )
+        async def load_category_playlist(playlist):
+            playlist_id = playlist.get("id")
+            playlist_tracks = await client.playlist_tracks(
+                playlist_id, limit=per_playlist_limit
+            )
+            return _with_source_playlist(
+                playlist_tracks[:per_playlist_limit], playlist_id
+            )
+
+        playlist_track_groups = await _gather_ordered_with_limit(
+            playlists, load_category_playlist
+        )
+        tracks = [
+            song
+            for playlist_tracks in playlist_track_groups
+            for song in playlist_tracks
+        ]
+        tracks = _anonymous_tracks(client, _deduplicate_songs(tracks))
+        if not tracks:
+            raise NeteaseMusicUnavailableError(
+                f"分类《{matched_category}》暂时没有当前账号可播放的歌曲"
+            )
+        return tracks, f"正在播放{matched_category}音乐"
+
+    if action == "chart":
+        chart_name = str(name or "").strip()
+        if not chart_name:
+            raise NeteaseMusicError("请告诉我想播放哪个榜单")
+        chart = _best_chart_match(chart_name, await client.toplists())
+        if not chart:
+            raise NeteaseMusicUnavailableError(f"没有找到榜单《{chart_name}》")
+        chart_id = chart.get("id")
+        tracks = _with_source_playlist(
+            await client.playlist_tracks(chart_id), chart_id
+        )
+        tracks = _anonymous_tracks(client, tracks)
+        if not tracks:
+            raise NeteaseMusicUnavailableError(
+                f"榜单《{chart.get('name')}》暂时没有当前账号可播放的歌曲"
+            )
+        return tracks, f"正在播放{chart.get('name')}"
+
+    if action == "new_songs":
+        song_region, _album_region, region_label = _new_release_region(name)
+        tracks = _anonymous_tracks(client, await client.new_songs(song_region))
+        if not tracks:
+            raise NeteaseMusicUnavailableError(
+                f"{region_label}新歌暂时没有当前账号可播放的歌曲"
+            )
+        return tracks, f"正在播放{region_label}新歌"
+
+    if action == "new_albums":
+        _song_region, album_region, region_label = _new_release_region(name)
+        albums = await client.new_albums(album_region, limit=NEW_ALBUM_LIMIT)
+        if not albums:
+            raise NeteaseMusicUnavailableError(f"{region_label}新碟暂时没有返回内容")
+        candidate_limit = max((max_tracks or DEFAULT_MAX_TRACKS) * 3, 20)
+        tracks = []
+        for album in albums:
+            tracks.extend(await client.album_tracks(album.get("id")))
+            if len(tracks) >= candidate_limit:
+                break
+        tracks = _anonymous_tracks(client, _deduplicate_songs(tracks))
+        if not tracks:
+            raise NeteaseMusicUnavailableError(
+                f"{region_label}新碟暂时没有当前账号可播放的歌曲"
+            )
+        return tracks, f"正在播放{region_label}新碟"
+
+    if action == "album":
+        album_name = str(name or "").strip()
+        if not album_name:
+            raise NeteaseMusicError("请告诉我想播放的专辑名称")
+        album = _best_album_match(
+            album_name,
+            await client.search_albums(album_name),
+        )
+        if not album:
+            raise NeteaseMusicUnavailableError(f"没有找到专辑《{album_name}》")
+        tracks = _anonymous_tracks(
+            client, await client.album_tracks(album.get("id"))
+        )
+        if not tracks:
+            raise NeteaseMusicUnavailableError(
+                f"专辑《{album.get('name')}》暂时没有当前账号可播放的歌曲"
+            )
+        return tracks, f"正在播放专辑《{album.get('name')}》"
+
+    if action == "similar":
+        if not current_song_id:
+            raise NeteaseMusicError("当前没有正在播放的歌曲，无法查找相似歌曲")
+        tracks = await client.similar_songs(current_song_id)
+        tracks = [
+            song for song in tracks if str(song.get("id")) != str(current_song_id)
+        ]
+        tracks = _anonymous_tracks(client, tracks)
+        if not tracks:
+            raise NeteaseMusicUnavailableError("暂时没有找到当前歌曲的可播放相似歌曲")
+        return tracks, "正在播放与当前歌曲相似的歌曲"
+
+    if action == "intelligence":
+        if not client.is_authenticated:
+            raise NeteaseMusicError("智能续播需要先让当前设备登录网易云音乐")
+        if not current_song_id:
+            raise NeteaseMusicError("当前没有正在播放的歌曲，无法智能续播")
+        if not source_playlist_id or not intelligence_eligible:
+            raise NeteaseMusicError(
+                "请先播放当前登录账号的歌单或收藏中支持的歌曲"
+            )
+        tracks = await client.intelligence_songs(
+            current_song_id,
+            source_playlist_id,
+            count=max((max_tracks or DEFAULT_MAX_TRACKS) * 3, 20),
+        )
+        tracks = [
+            song for song in tracks if str(song.get("id")) != str(current_song_id)
+        ]
+        tracks = _anonymous_tracks(client, tracks)
+        if not tracks:
+            raise NeteaseMusicUnavailableError("智能续播暂时没有返回可播放歌曲")
+        tracks = _with_source_playlist(
+            tracks, source_playlist_id, intelligence_eligible=True
+        )
+        return tracks, "正在智能续播"
 
     raise NeteaseMusicError(f"不支持的网易云音乐播放类型: {action}")
 
@@ -1058,6 +1579,9 @@ async def _prepare_playback(
     max_tracks,
     timeout_seconds,
     rolling=False,
+    current_song_id=None,
+    source_playlist_id=None,
+    intelligence_eligible=False,
 ):
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
@@ -1068,6 +1592,9 @@ async def _prepare_playback(
                 action,
                 name,
                 None if rolling else max_tracks,
+                current_song_id,
+                source_playlist_id,
+                intelligence_eligible,
             ),
             timeout=timeout_seconds,
         )
@@ -1076,7 +1603,7 @@ async def _prepare_playback(
             f"网易云音乐播放准备超过 {timeout_seconds} 秒，请稍后重试"
         ) from exc
 
-    if action == "random":
+    if action in FALLBACK_QUEUE_ACTIONS:
         resolved, skipped = await _resolve_audio_files_to_limit(
             client,
             cache,
@@ -1084,10 +1611,11 @@ async def _prepare_playback(
             max_tracks,
             deadline,
         )
-        prompt = (
-            f"随机播放 {len(resolved)} 首，"
-            f"先播《{_spoken_song_title(resolved[0][0])}》"
-        )
+        if action == "random":
+            prompt = (
+                f"随机播放 {len(resolved)} 首，"
+                f"先播《{_spoken_song_title(resolved[0][0])}》"
+            )
         pending_tracks = []
         return prompt, resolved, skipped, pending_tracks
 
@@ -1143,6 +1671,7 @@ def _cancel_playback_task(state):
 
 
 def interrupt_netease_playback(conn):
+    _begin_playback_request(conn)
     state = getattr(conn, "_netease_playback", None)
     if not state:
         return
@@ -1154,6 +1683,7 @@ def interrupt_netease_playback(conn):
 
 
 def close_netease_playback(conn):
+    _begin_playback_request(conn)
     state = getattr(conn, "_netease_playback", None)
     if not state:
         return
@@ -1324,12 +1854,22 @@ def _start_playback(
     index=0,
     load_more=None,
     lyrics_loader=None,
+    source_playlist_id="",
+    intelligence_eligible=False,
 ):
     previous = getattr(conn, "_netease_playback", None)
     if previous:
         _clear_audio_queues(conn)
         _cancel_playback_task(previous)
         _release_playback_state(previous, release_queue_references=True)
+    if not source_playlist_id and resolved:
+        source_playlist_id = str(
+            resolved[0][0].get("_netease_source_playlist_id") or ""
+        )
+    if resolved and not intelligence_eligible:
+        intelligence_eligible = (
+            resolved[0][0].get("_netease_intelligence_eligible") is True
+        )
     state = NeteasePlaybackState(
         resolved=list(resolved),
         index=index,
@@ -1337,6 +1877,8 @@ def _start_playback(
         load_more=load_more,
         source_exhausted=load_more is None,
         lyrics_loader=lyrics_loader,
+        source_playlist_id=source_playlist_id,
+        intelligence_eligible=intelligence_eligible,
     )
     _protect_playback_state(state)
     conn._netease_playback = state
@@ -1357,7 +1899,33 @@ def _restart_saved_playback(conn, state, prompt):
     )
 
 
-async def _control_playback(conn, action, position=0):
+def _begin_playback_request(conn):
+    generation = getattr(conn, "_netease_playback_request_generation", 0)
+    if not isinstance(generation, int) or isinstance(generation, bool):
+        generation = 0
+    generation += 1
+    conn._netease_playback_request_generation = generation
+    return generation
+
+
+def _playback_request_lock(conn):
+    lock = getattr(conn, "_netease_playback_request_lock", None)
+    if not isinstance(lock, asyncio.Lock):
+        lock = asyncio.Lock()
+        conn._netease_playback_request_lock = lock
+    return lock
+
+
+def _playback_request_is_current(conn, generation):
+    return getattr(conn, "_netease_playback_request_generation", None) == generation
+
+
+def _superseded_playback_response(conn):
+    conn.logger.bind(tag=TAG).info("网易云音乐播放准备已被更新请求替代")
+    return ActionResponse(action=Action.NONE, result="播放请求已更新", response="")
+
+
+async def _control_playback(conn, action, position=0, request_generation=None):
     state = getattr(conn, "_netease_playback", None)
     if not state or not state.resolved:
         return ActionResponse(
@@ -1374,6 +1942,8 @@ async def _control_playback(conn, action, position=0):
         await send_music_lyrics_event(
             conn, {"version": 1, "action": "clear", "reason": "paused"}
         )
+        if not _playback_request_is_current(conn, request_generation):
+            return _superseded_playback_response(conn)
         return ActionResponse(
             action=Action.RESPONSE,
             result="已暂停播放",
@@ -1389,6 +1959,8 @@ async def _control_playback(conn, action, position=0):
         await send_music_lyrics_event(
             conn, {"version": 1, "action": "clear", "reason": "stopped"}
         )
+        if not _playback_request_is_current(conn, request_generation):
+            return _superseded_playback_response(conn)
         return ActionResponse(
             action=Action.RESPONSE,
             result="已停止播放",
@@ -1400,6 +1972,8 @@ async def _control_playback(conn, action, position=0):
             prefetch_task = _schedule_prefetch(state)
             if prefetch_task:
                 await prefetch_task
+                if not _playback_request_is_current(conn, request_generation):
+                    return _superseded_playback_response(conn)
         if state.index + 1 >= len(state.resolved):
             return ActionResponse(
                 action=Action.RESPONSE,
@@ -1431,6 +2005,8 @@ async def _control_playback(conn, action, position=0):
             if not prefetch_task:
                 break
             await prefetch_task
+            if not _playback_request_is_current(conn, request_generation):
+                return _superseded_playback_response(conn)
         if target_index >= len(state.resolved):
             prompt = f"当前队列只有 {len(state.resolved)} 首"
             return ActionResponse(
@@ -1482,9 +2058,18 @@ async def play_netease_music(
     position: int = 0,
 ):
     config = None
+    request_generation = _begin_playback_request(conn)
     try:
         if action in {"next", "previous", "jump", "pause", "resume", "stop"}:
-            return await _control_playback(conn, action, position=position)
+            async with _playback_request_lock(conn):
+                if not _playback_request_is_current(conn, request_generation):
+                    return _superseded_playback_response(conn)
+                return await _control_playback(
+                    conn,
+                    action,
+                    position=position,
+                    request_generation=request_generation,
+                )
 
         config = await _device_plugin_config(conn)
         action = _normalize_music_action(action, name)
@@ -1499,6 +2084,27 @@ async def play_netease_music(
             5,
             25,
         )
+        playback_state = getattr(conn, "_netease_playback", None)
+        current_song_id = None
+        source_playlist_id = None
+        intelligence_eligible = False
+        playback_tracks = getattr(playback_state, "resolved", None)
+        playback_index = getattr(playback_state, "index", None)
+        if (
+            isinstance(playback_tracks, list)
+            and playback_tracks
+            and isinstance(playback_index, int)
+            and 0 <= playback_index < len(playback_tracks)
+        ):
+            current_song = playback_tracks[playback_index][0]
+            current_song_id = current_song.get("id")
+            intelligence_eligible = (
+                current_song.get("_netease_intelligence_eligible") is True
+            )
+            if intelligence_eligible:
+                source_playlist_id = current_song.get(
+                    "_netease_source_playlist_id"
+                )
         rolling = action == "favorites"
         prompt, resolved, skipped, pending_tracks = await _prepare_playback(
             client,
@@ -1508,26 +2114,32 @@ async def play_netease_music(
             max_tracks,
             prepare_timeout,
             rolling=rolling,
+            current_song_id=current_song_id,
+            source_playlist_id=source_playlist_id,
+            intelligence_eligible=intelligence_eligible,
         )
-        if skipped and action != "random":
-            prompt += f"，其中 {len(skipped)} 首未能加入播放队列"
-        cache.protect_for_playback(path for _song, path in resolved)
-        load_more = None
-        if pending_tracks:
-            load_more = _build_rolling_loader(
-                client,
-                cache,
-                pending_tracks,
-                max_tracks,
-                prepare_timeout,
+        async with _playback_request_lock(conn):
+            if not _playback_request_is_current(conn, request_generation):
+                return _superseded_playback_response(conn)
+            if skipped and action not in FALLBACK_QUEUE_ACTIONS:
+                prompt += f"，其中 {len(skipped)} 首未能加入播放队列"
+            cache.protect_for_playback(path for _song, path in resolved)
+            load_more = None
+            if pending_tracks:
+                load_more = _build_rolling_loader(
+                    client,
+                    cache,
+                    pending_tracks,
+                    max_tracks,
+                    prepare_timeout,
+                )
+            _start_playback(
+                conn,
+                prompt,
+                resolved,
+                load_more=load_more,
+                lyrics_loader=client.lyrics,
             )
-        _start_playback(
-            conn,
-            prompt,
-            resolved,
-            load_more=load_more,
-            lyrics_loader=client.lyrics,
-        )
         if skipped:
             conn.logger.bind(tag=TAG).warning(
                 f"网易云播放队列跳过 {len(skipped)} 首不可播放歌曲: {'; '.join(skipped)}"
@@ -1538,15 +2150,23 @@ async def play_netease_music(
             response=prompt,
         )
     except NeteaseAuthenticationRequiredError:
+        if not _playback_request_is_current(conn, request_generation):
+            return _superseded_playback_response(conn)
         if isinstance(config, dict):
             await _invalidate_device_credential(conn, config.get("_credential_version"))
+        if not _playback_request_is_current(conn, request_generation):
+            return _superseded_playback_response(conn)
         message = "网易云音乐登录已失效，请让当前设备重新扫码登录"
         conn.logger.bind(tag=TAG).warning("设备网易云凭证已失效，已请求撤销")
         return ActionResponse(action=Action.RESPONSE, result=message, response=message)
     except NeteaseMusicUnavailableError as exc:
+        if not _playback_request_is_current(conn, request_generation):
+            return _superseded_playback_response(conn)
         conn.logger.bind(tag=TAG).warning(f"网易云音乐不可播放: {exc}")
         return ActionResponse(action=Action.RESPONSE, result=str(exc), response=str(exc))
     except NeteaseMusicError as exc:
+        if not _playback_request_is_current(conn, request_generation):
+            return _superseded_playback_response(conn)
         conn.logger.bind(tag=TAG).warning(f"网易云音乐播放请求无效: {exc}")
         return ActionResponse(
             action=Action.RESPONSE,

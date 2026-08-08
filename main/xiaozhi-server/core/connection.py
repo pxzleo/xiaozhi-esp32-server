@@ -805,6 +805,48 @@ class ConnectionHandler:
                     '{"action":"next","name":""}',
                     "正在播放下一首",
                 ),
+                (
+                    "播放民谣",
+                    "fewshot_music_category_001",
+                    '{"action":"category","name":"民谣"}',
+                    "正在播放民谣音乐",
+                ),
+                (
+                    "播放热歌榜",
+                    "fewshot_music_chart_001",
+                    '{"action":"chart","name":"热歌榜"}',
+                    "正在播放热歌榜",
+                ),
+                (
+                    "播放华语新歌",
+                    "fewshot_music_new_songs_001",
+                    '{"action":"new_songs","name":"华语"}',
+                    "正在播放华语新歌",
+                ),
+                (
+                    "播放华语新碟",
+                    "fewshot_music_new_albums_001",
+                    '{"action":"new_albums","name":"华语"}',
+                    "正在播放华语新碟",
+                ),
+                (
+                    "播放周杰伦的专辑七里香",
+                    "fewshot_music_album_001",
+                    '{"action":"album","name":"周杰伦 七里香"}',
+                    "正在播放专辑七里香",
+                ),
+                (
+                    "播放类似的歌",
+                    "fewshot_music_similar_001",
+                    '{"action":"similar","name":""}',
+                    "正在播放与当前歌曲相似的歌曲",
+                ),
+                (
+                    "智能续播",
+                    "fewshot_music_intelligence_001",
+                    '{"action":"intelligence","name":""}',
+                    "正在从当前登录账号的歌单智能续播",
+                ),
             )
             for user_text, tool_call_id, arguments, result in music_examples:
                 self.dialogue.put(

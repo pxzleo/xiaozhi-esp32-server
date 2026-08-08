@@ -136,7 +136,7 @@ class ChatTurnIsolationTest(unittest.TestCase):
         ]
         self.assertNotIn("我来处理一下", "".join(spoken_text))
 
-    def test_music_fewshot_routes_random_and_next_to_real_tool(self):
+    def test_music_fewshot_routes_playback_requests_to_real_tool(self):
         conn = ConnectionHandler.__new__(ConnectionHandler)
         conn.intent_type = "function_call"
         conn.func_handler = Mock()
@@ -152,7 +152,18 @@ class ChatTurnIsolationTest(unittest.TestCase):
         examples = {
             message.content: conn.dialogue.messages[index + 1].tool_calls[0]
             for index, message in enumerate(conn.dialogue.messages[:-1])
-            if message.role == "user" and message.content in {"随机播放", "下一首"}
+            if message.role == "user"
+            and message.content
+            in {
+                "随机播放",
+                "下一首",
+                "播放民谣",
+                "播放热歌榜",
+                "播放华语新碟",
+                "播放周杰伦的专辑七里香",
+                "播放类似的歌",
+                "智能续播",
+            }
         }
         self.assertEqual(
             examples["随机播放"]["function"],
@@ -167,6 +178,30 @@ class ChatTurnIsolationTest(unittest.TestCase):
                 "arguments": '{"action":"next","name":""}',
                 "name": "play_netease_music",
             },
+        )
+        self.assertEqual(
+            examples["播放民谣"]["function"]["arguments"],
+            '{"action":"category","name":"民谣"}',
+        )
+        self.assertEqual(
+            examples["播放热歌榜"]["function"]["arguments"],
+            '{"action":"chart","name":"热歌榜"}',
+        )
+        self.assertEqual(
+            examples["播放类似的歌"]["function"]["arguments"],
+            '{"action":"similar","name":""}',
+        )
+        self.assertEqual(
+            examples["智能续播"]["function"]["arguments"],
+            '{"action":"intelligence","name":""}',
+        )
+        self.assertEqual(
+            examples["播放华语新碟"]["function"]["arguments"],
+            '{"action":"new_albums","name":"华语"}',
+        )
+        self.assertEqual(
+            examples["播放周杰伦的专辑七里香"]["function"]["arguments"],
+            '{"action":"album","name":"周杰伦 七里香"}',
         )
 
     def test_abort_cancels_active_llm_response(self):

@@ -2,7 +2,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from plugins_func.functions import play_netease_music as netease
 from core.handle.intentHandler import handles_own_audio_response
@@ -30,7 +30,7 @@ class _SelectionClient:
     async def user_playlists(self):
         if not self.is_authenticated:
             raise netease.NeteaseAuthenticationRequiredError("需要登录")
-        return [{"id": 8, "name": "我的民谣"}]
+        return [{"id": 8, "name": "我的民谣", "creator": {"userId": 7}}]
 
     async def playlist_tracks(self, _playlist_id):
         return [{"id": index, "name": f"歌曲{index}", "fee": 0} for index in range(5)]
@@ -107,6 +107,23 @@ class NeteaseMusicSelectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(properties["position"]["type"], "integer")
         self.assertEqual(properties["position"]["minimum"], 1)
 
+    def test_tool_schema_exposes_high_value_music_actions(self):
+        actions = netease.play_netease_music_function_desc["function"]["parameters"][
+            "properties"
+        ]["action"]["enum"]
+
+        self.assertTrue(
+            {
+                "category",
+                "chart",
+                "new_songs",
+                "new_albums",
+                "album",
+                "similar",
+                "intelligence",
+            }.issubset(actions)
+        )
+
     def test_tool_schema_requires_random_playback_to_call_tool(self):
         description = netease.play_netease_music_function_desc["function"][
             "description"
@@ -116,6 +133,8 @@ class NeteaseMusicSelectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("必须调用本工具", description)
         self.assertIn("不得在未调用工具", description)
         self.assertIn("声称已经播放", description)
+        self.assertIn("播放榜单但没有说明具体榜单时，必须先追问", description)
+        self.assertIn("同名专辑无法确定时必须追问歌手", description)
 
 
 class NeteaseDeviceCredentialTest(unittest.IsolatedAsyncioTestCase):
@@ -324,13 +343,43 @@ class NeteaseDeviceCredentialTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(tracks), 3)
         self.assertIn("我的民谣", prompt)
+        self.assertTrue(all(track["_netease_intelligence_eligible"] for track in tracks))
+
+    async def test_subscribed_playlist_is_not_eligible_for_intelligence(self):
+        client = _SelectionClient(authenticated=True)
+        client.user_playlists = AsyncMock(
+            return_value=[
+                {
+                    "id": 9,
+                    "name": "收藏的他人歌单",
+                    "creator": {"userId": 99},
+                    "subscribed": True,
+                }
+            ]
+        )
+
+        tracks, _prompt = await netease._select_tracks(
+            client, "playlist", "收藏的他人歌单", 3
+        )
+
+        self.assertFalse(any(track["_netease_intelligence_eligible"] for track in tracks))
 
     async def test_favorites_uses_account_liked_music_playlist(self):
         client = _SelectionClient(authenticated=True)
         client.user_playlists = AsyncMock(
             return_value=[
-                {"id": 7, "name": "其他歌单", "specialType": 0},
-                {"id": 8, "name": "用户的喜欢的音乐", "specialType": 5},
+                {
+                    "id": 7,
+                    "name": "其他歌单",
+                    "specialType": 0,
+                    "creator": {"userId": 7},
+                },
+                {
+                    "id": 8,
+                    "name": "用户的喜欢的音乐",
+                    "specialType": 5,
+                    "creator": {"userId": 7},
+                },
             ]
         )
         client.playlist_tracks = AsyncMock(
@@ -347,7 +396,27 @@ class NeteaseDeviceCredentialTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([track["id"] for track in tracks], [1, 2])
         self.assertIn("我的收藏", prompt)
+        self.assertTrue(all(track["_netease_intelligence_eligible"] for track in tracks))
         client.playlist_tracks.assert_awaited_once_with(8)
+
+    async def test_subscribed_playlist_named_liked_music_is_not_used_as_favorites(self):
+        client = _SelectionClient(authenticated=True)
+        client.user_playlists = AsyncMock(
+            return_value=[
+                {
+                    "id": 9,
+                    "name": "他人的喜欢的音乐",
+                    "specialType": 0,
+                    "creator": {"userId": 99},
+                    "subscribed": True,
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            netease.NeteaseMusicUnavailableError, "我喜欢的音乐"
+        ):
+            await netease._select_tracks(client, "favorites", "", 20)
 
     async def test_my_favorites_playlist_alias_uses_favorites_queue(self):
         client = _SelectionClient(authenticated=True)
@@ -394,6 +463,289 @@ class NeteaseDeviceCredentialTest(unittest.IsolatedAsyncioTestCase):
         shuffle.assert_called_once()
         self.assertEqual([track["id"] for track in tracks], [1, 2, 3, 4, 5])
         self.assertEqual(prompt, "正在随机播放")
+
+    async def test_category_alias_collects_multiple_playlists_and_deduplicates(self):
+        client = Mock()
+        client.is_authenticated = False
+        client.playlist_categories = AsyncMock(return_value=["民谣", "蓝调", "学习"])
+        client.top_playlists = AsyncMock(
+            return_value=[{"id": 101, "name": "蓝调一"}, {"id": 102, "name": "蓝调二"}]
+        )
+        client.playlist_tracks = AsyncMock(
+            side_effect=[
+                [{"id": 1, "name": "一", "fee": 0}, {"id": 2, "name": "二", "fee": 0}],
+                [{"id": 2, "name": "二", "fee": 0}, {"id": 3, "name": "三", "fee": 8}],
+            ]
+        )
+
+        tracks, prompt = await netease._select_tracks(
+            client, "category", "布鲁斯", 20
+        )
+
+        self.assertEqual([track["id"] for track in tracks], [1, 2, 3])
+        self.assertEqual(
+            [track["_netease_source_playlist_id"] for track in tracks],
+            ["101", "101", "102"],
+        )
+        self.assertFalse(
+            any(track["_netease_intelligence_eligible"] for track in tracks)
+        )
+        client.top_playlists.assert_awaited_once_with("蓝调", limit=5)
+        self.assertEqual(client.playlist_tracks.await_count, 2)
+        self.assertIn("蓝调", prompt)
+
+    async def test_chart_requires_a_name_and_tags_source_playlist(self):
+        client = Mock()
+        client.is_authenticated = False
+        client.toplists = AsyncMock(
+            return_value=[
+                {"id": 88, "name": "音乐合伙人热歌榜"},
+                {"id": 3778678, "name": "热歌榜"},
+            ]
+        )
+        client.playlist_tracks = AsyncMock(
+            return_value=[{"id": 1, "name": "热歌", "fee": 0}]
+        )
+
+        with self.assertRaisesRegex(netease.NeteaseMusicError, "哪个榜单"):
+            await netease._select_tracks(client, "chart", "", 20)
+        tracks, prompt = await netease._select_tracks(
+            client, "chart", "云音乐热歌榜", 20
+        )
+
+        self.assertEqual(tracks[0]["_netease_source_playlist_id"], "3778678")
+        self.assertFalse(tracks[0]["_netease_intelligence_eligible"])
+        client.playlist_tracks.assert_awaited_once_with(3778678)
+        self.assertIn("热歌榜", prompt)
+
+    async def test_new_albums_aggregate_tracks_from_multiple_albums(self):
+        client = Mock()
+        client.is_authenticated = False
+        client.new_albums = AsyncMock(
+            return_value=[{"id": 7, "name": "新碟一"}, {"id": 8, "name": "新碟二"}]
+        )
+        client.album_tracks = AsyncMock(
+            side_effect=[
+                [{"id": 1, "name": "一", "fee": 0}],
+                [{"id": 2, "name": "二", "fee": 8}],
+            ]
+        )
+
+        tracks, prompt = await netease._select_tracks(
+            client, "new_albums", "华语", 20
+        )
+
+        self.assertEqual([track["id"] for track in tracks], [1, 2])
+        client.new_albums.assert_awaited_once_with("ZH", limit=10)
+        self.assertEqual(client.album_tracks.await_count, 2)
+        self.assertIn("华语新碟", prompt)
+
+    async def test_new_album_details_are_sequential_and_stop_at_candidate_limit(self):
+        client = Mock()
+        client.is_authenticated = False
+        client.new_albums = AsyncMock(
+            return_value=[
+                {"id": 1, "name": "新碟一"},
+                {"id": 2, "name": "新碟二"},
+                {"id": 3, "name": "不应请求的新碟"},
+            ]
+        )
+        active = 0
+        max_active = 0
+        requested_album_ids = []
+
+        async def album_tracks(album_id):
+            nonlocal active, max_active
+            requested_album_ids.append(album_id)
+            active += 1
+            max_active = max(max_active, active)
+            try:
+                await asyncio.sleep(0.001)
+                return [
+                    {
+                        "id": album_id * 100 + index,
+                        "name": f"歌曲{album_id}-{index}",
+                        "fee": 0,
+                    }
+                    for index in range(30)
+                ]
+            finally:
+                active -= 1
+
+        client.album_tracks = album_tracks
+
+        tracks, _prompt = await netease._select_tracks(
+            client, "new_albums", "全部", 20
+        )
+
+        self.assertEqual(max_active, 1)
+        self.assertEqual(requested_album_ids, [1, 2])
+        self.assertEqual(len(tracks), 60)
+
+    async def test_new_album_stops_when_first_album_reaches_candidate_limit(self):
+        client = Mock()
+        client.is_authenticated = False
+        client.new_albums = AsyncMock(
+            return_value=[
+                {"id": 1, "name": "足够的新碟"},
+                {"id": 2, "name": "不应请求的新碟"},
+            ]
+        )
+        client.album_tracks = AsyncMock(
+            side_effect=[
+                [
+                    {"id": index, "name": f"歌曲{index}", "fee": 0}
+                    for index in range(1, 61)
+                ],
+                netease.NeteaseMusicHttpError("不应请求", 405),
+            ]
+        )
+
+        tracks, _prompt = await netease._select_tracks(
+            client, "new_albums", "全部", 20
+        )
+
+        self.assertEqual(len(tracks), 60)
+        client.album_tracks.assert_awaited_once_with(1)
+
+    async def test_album_with_artist_chooses_original_from_same_name_results(self):
+        client = Mock()
+        client.is_authenticated = False
+        client.search_albums = AsyncMock(
+            return_value=[
+                {
+                    "id": 274164190,
+                    "name": "七里香",
+                    "size": 1,
+                    "publishTime": 1749052800000,
+                    "artist": {"name": "Xai小爱"},
+                    "artists": [{"name": "Xai小爱"}],
+                },
+                {
+                    "id": 18903,
+                    "name": "七里香",
+                    "size": 10,
+                    "publishTime": 1092931200000,
+                    "artist": {"name": "周杰伦"},
+                    "artists": [{"name": "周杰伦"}],
+                },
+                {
+                    "id": 99999,
+                    "name": "七里香",
+                    "size": 1,
+                    "publishTime": 1700000000000,
+                    "artist": {"name": "周杰伦"},
+                    "artists": [{"name": "周杰伦"}],
+                },
+            ]
+        )
+        client.album_tracks = AsyncMock(
+            return_value=[{"id": 1, "name": "我的地盘", "fee": 0}]
+        )
+
+        tracks, prompt = await netease._select_tracks(
+            client, "album", "周杰伦 七里香", 20
+        )
+
+        self.assertEqual([track["id"] for track in tracks], [1])
+        client.album_tracks.assert_awaited_once_with(18903)
+        self.assertIn("七里香", prompt)
+
+    async def test_same_name_album_without_artist_requests_artist(self):
+        client = Mock()
+        client.is_authenticated = False
+        client.search_albums = AsyncMock(
+            return_value=[
+                {
+                    "id": 274164190,
+                    "name": "七里香",
+                    "size": 1,
+                    "artist": {"name": "Xai小爱"},
+                },
+                {
+                    "id": 18903,
+                    "name": "七里香",
+                    "size": 10,
+                    "artist": {"name": "周杰伦"},
+                },
+            ]
+        )
+
+        with self.assertRaisesRegex(netease.NeteaseMusicError, "请补充歌手"):
+            await netease._select_tracks(client, "album", "七里香", 20)
+
+    async def test_similar_and_intelligence_require_current_source_state(self):
+        client = Mock()
+        client.is_authenticated = False
+
+        with self.assertRaisesRegex(netease.NeteaseMusicError, "当前没有"):
+            await netease._select_tracks(client, "similar", "", 20)
+        with self.assertRaisesRegex(netease.NeteaseMusicError, "需要先让当前设备登录"):
+            await netease._select_tracks(
+                client, "intelligence", "", 20, current_song_id=1
+            )
+
+        logged_in_client = Mock()
+        logged_in_client.is_authenticated = True
+        logged_in_client.account_profile = AsyncMock(return_value={"userId": 7})
+        with self.assertRaisesRegex(
+            netease.NeteaseMusicError, "当前登录账号的歌单或收藏"
+        ):
+            await netease._select_tracks(
+                logged_in_client,
+                "intelligence",
+                "",
+                20,
+                current_song_id=1,
+                source_playlist_id=3778678,
+                intelligence_eligible=False,
+            )
+
+    async def test_intelligence_uses_current_song_and_playlist_source(self):
+        client = Mock()
+        client.is_authenticated = True
+        client.account_profile = AsyncMock(return_value={"userId": 7})
+        client.intelligence_songs = AsyncMock(
+            side_effect=[
+                [
+                    {"id": 1, "name": "当前歌曲", "fee": 0},
+                    {"id": 2, "name": "续播歌曲", "fee": 8},
+                ],
+                [{"id": 3, "name": "再次续播", "fee": 0}],
+            ]
+        )
+
+        tracks, prompt = await netease._select_tracks(
+            client,
+            "intelligence",
+            "",
+            20,
+            current_song_id=1,
+            source_playlist_id=99,
+            intelligence_eligible=True,
+        )
+
+        self.assertEqual([track["id"] for track in tracks], [2])
+        self.assertEqual(tracks[0]["_netease_source_playlist_id"], "99")
+        second_tracks, _ = await netease._select_tracks(
+            client,
+            "intelligence",
+            "",
+            20,
+            current_song_id=tracks[0]["id"],
+            source_playlist_id=tracks[0]["_netease_source_playlist_id"],
+            intelligence_eligible=tracks[0]["_netease_intelligence_eligible"],
+        )
+        self.assertEqual([track["id"] for track in second_tracks], [3])
+        self.assertEqual(second_tracks[0]["_netease_source_playlist_id"], "99")
+        self.assertEqual(
+            client.intelligence_songs.await_args_list,
+            [
+                call(1, 99, count=60),
+                call(2, "99", count=60),
+            ],
+        )
+        self.assertIn("智能续播", prompt)
 
     async def test_user_input_error_is_spoken_verbatim(self):
         conn = Mock()
@@ -455,6 +807,302 @@ class NeteaseDeviceCredentialTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.response, "随机播放 20 首，先播《歌曲0》")
         self.assertNotIn("未能加入", response.response)
 
+    async def test_newer_playback_request_supersedes_slower_older_request(self):
+        conn = Mock()
+        conn.logger.bind.return_value = conn.logger
+        conn._netease_playback = None
+        conn._netease_playback_request_generation = 0
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def prepare(_client, _cache, _action, name, *_args, **_kwargs):
+            if name == "旧请求":
+                first_started.set()
+                await release_first.wait()
+            song_id = 1 if name == "旧请求" else 2
+            return (
+                f"播放{name}",
+                [({"id": song_id, "name": name}, Path(f"/cache/{song_id}.mp3"))],
+                [],
+                [],
+            )
+
+        cache = Mock()
+        with (
+            patch.object(
+                netease,
+                "_device_plugin_config",
+                AsyncMock(return_value={"max_tracks": 20}),
+            ),
+            patch.object(netease, "NeteaseMusicClient"),
+            patch.object(netease, "NeteaseMusicCache", return_value=cache),
+            patch.object(netease, "_prepare_playback", side_effect=prepare),
+            patch.object(netease, "_start_playback") as start_playback,
+        ):
+            older = asyncio.create_task(
+                netease.play_netease_music(conn, action="song", name="旧请求")
+            )
+            await first_started.wait()
+            newer = await netease.play_netease_music(
+                conn, action="song", name="新请求"
+            )
+            release_first.set()
+            superseded = await older
+
+        self.assertEqual(newer.action, netease.Action.RECORD)
+        self.assertEqual(superseded.action, netease.Action.NONE)
+        start_playback.assert_called_once()
+        self.assertEqual(start_playback.call_args.args[2][0][0]["id"], 2)
+
+    async def test_newer_request_supersedes_pause_waiting_for_lyrics_clear(self):
+        conn = Mock()
+        conn.logger.bind.return_value = conn.logger
+        conn.clear_queues = Mock()
+        conn._netease_playback_request_generation = 0
+        conn._netease_playback = netease.NeteasePlaybackState(
+            resolved=[({"id": 1, "name": "旧歌曲"}, Path("/cache/1.mp3"))],
+            status="playing",
+        )
+        clear_started = asyncio.Event()
+        release_clear = asyncio.Event()
+
+        async def delayed_clear(*_args, **_kwargs):
+            clear_started.set()
+            await release_clear.wait()
+
+        prepared = (
+            "播放新请求",
+            [({"id": 2, "name": "新歌曲"}, Path("/cache/2.mp3"))],
+            [],
+            [],
+        )
+        with (
+            patch.object(netease, "send_music_lyrics_event", side_effect=delayed_clear),
+            patch.object(
+                netease,
+                "_device_plugin_config",
+                AsyncMock(return_value={"max_tracks": 20}),
+            ),
+            patch.object(netease, "NeteaseMusicClient"),
+            patch.object(netease, "NeteaseMusicCache"),
+            patch.object(netease, "_prepare_playback", AsyncMock(return_value=prepared)),
+            patch.object(netease, "_start_playback"),
+        ):
+            pausing = asyncio.create_task(
+                netease.play_netease_music(conn, action="pause", name="")
+            )
+            await clear_started.wait()
+            newer = asyncio.create_task(
+                netease.play_netease_music(conn, action="song", name="新请求")
+            )
+            while conn._netease_playback_request_generation < 2:
+                await asyncio.sleep(0)
+            release_clear.set()
+            superseded = await pausing
+            await newer
+
+        self.assertEqual(superseded.action, netease.Action.NONE)
+
+    async def test_newer_request_prevents_waiting_next_from_restarting_old_state(self):
+        conn = Mock()
+        conn.logger.bind.return_value = conn.logger
+        conn._netease_playback_request_generation = 0
+        old_state = netease.NeteasePlaybackState(
+            resolved=[
+                ({"id": 1, "name": "旧歌曲一"}, Path("/cache/1.mp3")),
+                ({"id": 2, "name": "旧歌曲二"}, Path("/cache/2.mp3")),
+            ],
+            index=0,
+            status="playing",
+        )
+        conn._netease_playback = old_state
+        prefetch_started = asyncio.Event()
+        release_prefetch = asyncio.Event()
+
+        async def wait_for_prefetch():
+            prefetch_started.set()
+            await release_prefetch.wait()
+
+        prepared = (
+            "播放新请求",
+            [({"id": 3, "name": "新歌曲"}, Path("/cache/3.mp3"))],
+            [],
+            [],
+        )
+        with (
+            patch.object(
+                netease, "_schedule_prefetch", return_value=asyncio.create_task(wait_for_prefetch())
+            ),
+            patch.object(netease, "_restart_saved_playback") as restart,
+            patch.object(
+                netease,
+                "_device_plugin_config",
+                AsyncMock(return_value={"max_tracks": 20}),
+            ),
+            patch.object(netease, "NeteaseMusicClient"),
+            patch.object(netease, "NeteaseMusicCache"),
+            patch.object(netease, "_prepare_playback", AsyncMock(return_value=prepared)),
+            patch.object(netease, "_start_playback"),
+        ):
+            advancing = asyncio.create_task(
+                netease.play_netease_music(conn, action="next", name="")
+            )
+            await prefetch_started.wait()
+            newer = asyncio.create_task(
+                netease.play_netease_music(conn, action="song", name="新请求")
+            )
+            while conn._netease_playback_request_generation < 2:
+                await asyncio.sleep(0)
+            release_prefetch.set()
+            superseded = await advancing
+            await newer
+
+        self.assertEqual(superseded.action, netease.Action.NONE)
+        restart.assert_not_called()
+
+    async def test_newer_request_suppresses_old_authentication_failure_response(self):
+        conn = Mock()
+        conn.logger.bind.return_value = conn.logger
+        conn._netease_playback = None
+        conn._netease_playback_request_generation = 0
+        invalidate_started = asyncio.Event()
+        release_invalidate = asyncio.Event()
+
+        async def invalidate(*_args):
+            invalidate_started.set()
+            await release_invalidate.wait()
+
+        async def prepare(_client, _cache, _action, name, *_args, **_kwargs):
+            if name == "旧请求":
+                raise netease.NeteaseAuthenticationRequiredError("登录失效")
+            return (
+                "播放新请求",
+                [({"id": 2, "name": "新歌曲"}, Path("/cache/2.mp3"))],
+                [],
+                [],
+            )
+
+        with (
+            patch.object(
+                netease,
+                "_device_plugin_config",
+                AsyncMock(
+                    return_value={
+                        "max_tracks": 20,
+                        "cookie": "MUSIC_U=valid",
+                        "_credential_version": 9,
+                    }
+                ),
+            ),
+            patch.object(netease, "NeteaseMusicClient"),
+            patch.object(netease, "NeteaseMusicCache"),
+            patch.object(netease, "_prepare_playback", side_effect=prepare),
+            patch.object(netease, "_invalidate_device_credential", side_effect=invalidate),
+            patch.object(netease, "_start_playback"),
+        ):
+            older = asyncio.create_task(
+                netease.play_netease_music(conn, action="song", name="旧请求")
+            )
+            await invalidate_started.wait()
+            await netease.play_netease_music(conn, action="song", name="新请求")
+            release_invalidate.set()
+            superseded = await older
+
+        self.assertEqual(superseded.action, netease.Action.NONE)
+
+    async def test_interrupt_invalidates_playback_still_being_prepared(self):
+        await self._assert_pending_preparation_is_invalidated(
+            netease.interrupt_netease_playback
+        )
+
+    async def test_close_invalidates_playback_still_being_prepared(self):
+        await self._assert_pending_preparation_is_invalidated(
+            netease.close_netease_playback
+        )
+
+    async def _assert_pending_preparation_is_invalidated(self, invalidate):
+        conn = Mock()
+        conn.logger.bind.return_value = conn.logger
+        conn._netease_playback = None
+        conn._netease_playback_request_generation = 0
+        prepare_started = asyncio.Event()
+        release_prepare = asyncio.Event()
+
+        async def prepare(*_args, **_kwargs):
+            prepare_started.set()
+            await release_prepare.wait()
+            return (
+                "播放旧请求",
+                [({"id": 1, "name": "旧歌曲"}, Path("/cache/1.mp3"))],
+                [],
+                [],
+            )
+
+        cache = Mock()
+        with (
+            patch.object(
+                netease,
+                "_device_plugin_config",
+                AsyncMock(return_value={"max_tracks": 20}),
+            ),
+            patch.object(netease, "NeteaseMusicClient"),
+            patch.object(netease, "NeteaseMusicCache", return_value=cache),
+            patch.object(netease, "_prepare_playback", side_effect=prepare),
+            patch.object(netease, "_start_playback") as start_playback,
+        ):
+            pending = asyncio.create_task(
+                netease.play_netease_music(conn, action="song", name="旧请求")
+            )
+            await prepare_started.wait()
+            invalidate(conn)
+            release_prepare.set()
+            superseded = await pending
+
+        self.assertEqual(superseded.action, netease.Action.NONE)
+        cache.protect_for_playback.assert_not_called()
+        start_playback.assert_not_called()
+
+    async def test_public_playlist_source_is_not_passed_to_intelligence(self):
+        conn = Mock()
+        conn.logger.bind.return_value = conn.logger
+        conn._netease_playback = netease.NeteasePlaybackState(
+            resolved=[
+                (
+                    {
+                        "id": 1,
+                        "name": "公开榜单歌曲",
+                        "_netease_source_playlist_id": "3778678",
+                        "_netease_intelligence_eligible": False,
+                    },
+                    Path("/cache/1.mp3"),
+                )
+            ],
+            source_playlist_id="3778678",
+            intelligence_eligible=False,
+        )
+        prepare = AsyncMock(
+            side_effect=netease.NeteaseMusicError(
+                "请先播放当前登录账号的歌单或收藏中支持的歌曲"
+            )
+        )
+        with (
+            patch.object(
+                netease,
+                "_device_plugin_config",
+                AsyncMock(return_value={"cookie": "MUSIC_U=valid"}),
+            ),
+            patch.object(netease, "NeteaseMusicClient"),
+            patch.object(netease, "NeteaseMusicCache"),
+            patch.object(netease, "_prepare_playback", prepare),
+        ):
+            response = await netease.play_netease_music(
+                conn, action="intelligence", name=""
+            )
+
+        self.assertIn("当前登录账号的歌单或收藏", response.response)
+        self.assertIsNone(prepare.await_args.kwargs["source_playlist_id"])
+        self.assertFalse(prepare.await_args.kwargs["intelligence_eligible"])
+
 
 class NeteaseMusicSecurityTest(unittest.TestCase):
     def test_cookie_is_redacted_inside_serialized_plugin_params(self):
@@ -502,12 +1150,195 @@ class NeteaseMusicClientTest(unittest.IsolatedAsyncioTestCase):
             request_url,
             "http://localhost:3000/cloudsearch?keywords=%E9%99%88%E5%A5%95%E8%BF%85&timestamp=1234567",
         )
+        http_client.post.assert_awaited_once()
+        http_client.get.assert_not_awaited()
+
+    async def test_request_preserves_http_status_code(self):
+        client = netease.NeteaseMusicClient(
+            {"api_base_url": "http://localhost:3000"}
+        )
+        request = netease.httpx.Request("POST", "http://localhost:3000/album")
+        response = netease.httpx.Response(405, request=request)
+        http_error = netease.httpx.HTTPStatusError(
+            "method not allowed", request=request, response=response
+        )
+        http_response = Mock()
+        http_response.raise_for_status.side_effect = http_error
+        http_client = AsyncMock()
+        http_client.__aenter__.return_value = http_client
+        http_client.post.return_value = http_response
+
+        with patch.object(netease.httpx, "AsyncClient", return_value=http_client):
+            with self.assertRaises(netease.NeteaseMusicHttpError) as raised:
+                await client._request("/album", {"id": 1})
+
+        self.assertEqual(raised.exception.status_code, 405)
+
+    async def test_business_code_400_is_not_treated_as_expired_login(self):
+        client = netease.NeteaseMusicClient(
+            {"api_base_url": "http://localhost:3000", "cookie": "MUSIC_U=valid"}
+        )
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"code": 400, "message": "参数错误"}
+        http_client = AsyncMock()
+        http_client.__aenter__.return_value = http_client
+        http_client.post.return_value = response
+
+        with patch.object(netease.httpx, "AsyncClient", return_value=http_client):
+            with self.assertRaises(netease.NeteaseMusicError) as raised:
+                await client._request("/top/playlist", {"cat": "不存在"})
+
+        self.assertNotIsInstance(
+            raised.exception, netease.NeteaseAuthenticationRequiredError
+        )
+
+    async def test_album_details_retry_two_405_errors_then_succeed(self):
+        client = netease.NeteaseMusicClient(
+            {"api_base_url": "http://localhost:3000"}
+        )
+        error = netease.NeteaseMusicHttpError("暂时不可用", 405)
+        client._request = AsyncMock(
+            side_effect=[
+                error,
+                error,
+                {"songs": [{"id": 1, "name": "专辑歌曲", "fee": 0}]},
+            ]
+        )
+
+        with patch.object(netease.asyncio, "sleep", AsyncMock()) as sleep:
+            tracks = await client.album_tracks(18903)
+
+        self.assertEqual([track["id"] for track in tracks], [1])
+        self.assertEqual(client._request.await_count, 3)
+        self.assertEqual(
+            sleep.await_args_list,
+            [call(0.2), call(0.5)],
+        )
+
+    async def test_album_details_persistent_405_raises_after_limit(self):
+        client = netease.NeteaseMusicClient(
+            {"api_base_url": "http://localhost:3000"}
+        )
+        client._request = AsyncMock(
+            side_effect=netease.NeteaseMusicHttpError("持续不可用", 405)
+        )
+
+        with patch.object(netease.asyncio, "sleep", AsyncMock()) as sleep:
+            with self.assertRaisesRegex(
+                netease.NeteaseMusicHttpError, "持续不可用"
+            ) as raised:
+                await client.album_tracks(18903)
+
+        self.assertEqual(raised.exception.status_code, 405)
+        self.assertEqual(client._request.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+
+    async def test_album_details_500_is_not_retried(self):
+        client = netease.NeteaseMusicClient(
+            {"api_base_url": "http://localhost:3000"}
+        )
+        client._request = AsyncMock(
+            side_effect=netease.NeteaseMusicHttpError("服务错误", 500)
+        )
+
+        with patch.object(netease.asyncio, "sleep", AsyncMock()) as sleep:
+            with self.assertRaises(netease.NeteaseMusicHttpError):
+                await client.album_tracks(18903)
+
+        self.assertEqual(client._request.await_count, 1)
+        sleep.assert_not_awaited()
+
+    async def test_album_details_retry_does_not_swallow_cancellation(self):
+        client = netease.NeteaseMusicClient(
+            {"api_base_url": "http://localhost:3000"}
+        )
+        client._request = AsyncMock(
+            side_effect=netease.NeteaseMusicHttpError("暂时不可用", 405)
+        )
+
+        with patch.object(
+            netease.asyncio,
+            "sleep",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await client.album_tracks(18903)
+
+        self.assertEqual(client._request.await_count, 1)
 
     async def test_anonymous_account_rejects_login_only_features(self):
         client = netease.NeteaseMusicClient({"api_base_url": "http://localhost:3000"})
 
         with self.assertRaises(netease.NeteaseAuthenticationRequiredError):
             await client.account_profile()
+
+    async def test_old_song_payload_is_normalized_for_new_song_and_similar_apis(self):
+        client = netease.NeteaseMusicClient({"api_base_url": "http://localhost:3000"})
+        client._request = AsyncMock(
+            side_effect=[
+                {
+                    "data": [
+                        {
+                            "id": 1,
+                            "name": "新歌",
+                            "artists": [{"name": "歌手"}],
+                            "albumData": {"name": "新碟"},
+                            "privilege": {"fee": 8},
+                        }
+                    ]
+                },
+                {
+                    "songs": [
+                        {
+                            "id": 2,
+                            "name": "相似歌曲",
+                            "artists": [{"name": "歌手二"}],
+                            "album": {"name": "专辑"},
+                            "fee": 0,
+                        }
+                    ]
+                },
+            ]
+        )
+
+        new_songs = await client.new_songs(0)
+        similar = await client.similar_songs(1)
+
+        self.assertEqual(new_songs[0]["ar"][0]["name"], "歌手")
+        self.assertEqual(new_songs[0]["al"]["name"], "新碟")
+        self.assertEqual(new_songs[0]["fee"], 8)
+        self.assertEqual(similar[0]["ar"][0]["name"], "歌手二")
+
+    async def test_new_album_and_intelligence_response_shapes_are_parsed(self):
+        client = netease.NeteaseMusicClient({"api_base_url": "http://localhost:3000"})
+        client._request = AsyncMock(
+            side_effect=[
+                {"monthData": [{"id": 7, "name": "月度新碟"}]},
+                {
+                    "data": [
+                        {
+                            "songInfo": {
+                                "id": 2,
+                                "name": "智能歌曲",
+                                "artists": [{"name": "歌手"}],
+                                "fee": 0,
+                            }
+                        }
+                    ]
+                },
+            ]
+        )
+
+        albums = await client.new_albums("ALL")
+        songs = await client.intelligence_songs(1, 99, count=20)
+
+        self.assertEqual(albums[0]["id"], 7)
+        self.assertEqual(songs[0]["ar"][0]["name"], "歌手")
+        request = client._request.await_args
+        self.assertEqual(request.args[0], "/playmode/intelligence/list")
+        self.assertEqual(request.args[1]["pid"], "99")
+        self.assertNotIn(400, request.kwargs["authentication_error_codes"])
 
     async def test_anonymous_vip_song_is_rejected_before_request(self):
         client = netease.NeteaseMusicClient({"api_base_url": "http://localhost:3000"})
@@ -566,6 +1397,39 @@ class NeteaseMusicClientTest(unittest.IsolatedAsyncioTestCase):
 
 
 class NeteaseMusicPreparationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_bounded_catalog_gather_preserves_order_and_concurrency(self):
+        active = 0
+        max_active = 0
+
+        async def loader(item):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            try:
+                await asyncio.sleep((6 - item) * 0.001)
+                return item * 10
+            finally:
+                active -= 1
+
+        results = await netease._gather_ordered_with_limit(
+            [1, 2, 3, 4, 5], loader, concurrency=3
+        )
+
+        self.assertEqual(results, [10, 20, 30, 40, 50])
+        self.assertEqual(max_active, 3)
+
+    async def test_bounded_catalog_gather_propagates_loader_failure(self):
+        async def loader(item):
+            if item == 2:
+                raise netease.NeteaseMusicError("歌单详情失败")
+            await asyncio.sleep(0.1)
+            return item
+
+        with self.assertRaisesRegex(netease.NeteaseMusicError, "歌单详情失败"):
+            await netease._gather_ordered_with_limit(
+                [1, 2, 3], loader, concurrency=2
+            )
+
     async def test_random_replaces_unplayable_candidate_before_reaching_limit(self):
         class Client:
             async def playable_url(self, song):
@@ -595,6 +1459,36 @@ class NeteaseMusicPreparationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending, [])
         self.assertEqual(len(skipped), 1)
         self.assertIn("2 首", prompt)
+
+    async def test_category_replaces_unplayable_candidate_without_changing_prompt(self):
+        class Client:
+            async def playable_url(self, song):
+                if song["id"] == 2:
+                    raise netease.NeteaseMusicUnavailableError("不可播放")
+                return f"https://m801.music.126.net/{song['id']}.mp3"
+
+        class Cache:
+            async def download(self, song, _url):
+                return Path(f"/cache/{song['id']}.mp3")
+
+        tracks = [
+            {"id": 1, "name": "第一首"},
+            {"id": 2, "name": "失效歌曲"},
+            {"id": 3, "name": "候补歌曲"},
+        ]
+        with patch.object(
+            netease,
+            "_select_tracks",
+            new=AsyncMock(return_value=(tracks, "正在播放民谣音乐")),
+        ):
+            prompt, resolved, skipped, pending = await netease._prepare_playback(
+                Client(), Cache(), "category", "民谣", 2, 1
+            )
+
+        self.assertEqual([song["id"] for song, _path in resolved], [1, 3])
+        self.assertEqual(prompt, "正在播放民谣音乐")
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(pending, [])
 
     async def test_preparation_timeout_keeps_ready_tracks_and_cancels_slow_ones(self):
         class Client:
@@ -958,6 +1852,8 @@ class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
                         "id": 1,
                         "name": "测试歌曲",
                         "ar": [{"name": "测试歌手"}],
+                        "_netease_source_playlist_id": "99",
+                        "_netease_intelligence_eligible": True,
                     },
                     Path("/cache/1.mp3"),
                 )
@@ -978,6 +1874,8 @@ class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["track"]["artists"], ["测试歌手"])
         self.assertEqual(event["lines"][0], {"start_ms": 1000, "text": "第一句"})
         self.assertTrue(event["playback_id"])
+        self.assertEqual(state.source_playlist_id, "99")
+        self.assertTrue(state.intelligence_eligible)
         lyrics_loader.assert_awaited_once_with(1)
         netease.close_netease_playback(connection)
 
