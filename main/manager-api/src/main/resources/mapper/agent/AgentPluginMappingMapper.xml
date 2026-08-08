@@ -44,5 +44,17 @@
         WHERE m.agent_id = #{agentId}
     </select>
 
+    <select id="selectProactiveMonitorPluginsByAgentId" resultMap="AgentPluginWithCodeMap">
+        SELECT m.id AS id,
+               m.agent_id AS agentId,
+               m.plugin_id AS pluginId,
+               m.param_info AS paramInfo,
+               p.provider_code AS providerCode
+        FROM ai_agent_plugin_mapping m
+        INNER JOIN ai_model_provider p ON p.id = m.plugin_id
+        WHERE m.agent_id = #{agentId}
+          AND p.provider_code IN ('get_weather', 'get_news_from_newsnow')
+    </select>
+
 
 </mapper>

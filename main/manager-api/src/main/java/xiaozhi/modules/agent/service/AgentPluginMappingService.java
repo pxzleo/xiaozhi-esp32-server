@@ -20,6 +20,9 @@ public interface AgentPluginMappingService extends IRepository<AgentPluginMappin
      */
     List<AgentPluginMapping> agentPluginParamsByAgentId(String agentId);
 
+    /** 只读取主动外界监测所需的天气与NewsNow插件参数。 */
+    List<AgentPluginMapping> proactiveMonitorPluginParamsByAgentId(String agentId);
+
     /**
      * 根据智能体id删除插件参数
      *

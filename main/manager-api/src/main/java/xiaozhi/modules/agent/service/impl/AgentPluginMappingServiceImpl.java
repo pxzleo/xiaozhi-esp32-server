@@ -98,6 +98,11 @@ public class AgentPluginMappingServiceImpl extends CrudRepository<AgentPluginMap
     }
 
     @Override
+    public List<AgentPluginMapping> proactiveMonitorPluginParamsByAgentId(String agentId) {
+        return agentPluginMappingMapper.selectProactiveMonitorPluginsByAgentId(agentId);
+    }
+
+    @Override
     public void deleteByAgentId(String agentId) {
         UpdateWrapper<AgentPluginMapping> updateWrapper = new UpdateWrapper<>();
         updateWrapper.eq("agent_id", agentId);

@@ -22,8 +22,10 @@ import xiaozhi.modules.device.proactive.ProactiveDTOs.NewsMonitorConfig;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.WeatherMonitorConfig;
 import xiaozhi.modules.device.proactive.ProactiveEnums.EventType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.NewsCategory;
+import xiaozhi.modules.device.proactive.ProactiveEnums.NewsSeverity;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 import xiaozhi.modules.device.proactive.ProactiveEnums.WeatherHazardType;
+import xiaozhi.modules.device.proactive.ProactiveEnums.WeatherWarningSeverity;
 import xiaozhi.modules.security.config.ShiroConfig;
 
 class ProactiveMonitorContractTest {
@@ -39,7 +41,7 @@ class ProactiveMonitorContractTest {
     void strictMonitorJsonRejectsUnknownFields() {
         String json = """
                 {"weather":{"enabled":true,"interval_minutes":30,"config":{
-                "source":"agent_plugin","hazard_types":[],"official_min_severity":"warning",
+                "source":"agent_plugin","hazard_types":[],"minimum_warning_severity":"moderate",
                 "precip_probability":70,"wind_speed_kmh":62,"high_temp_c":35,"low_temp_c":0,
                 "temp_drop_24h_c":8,"forecast_hours":6,"cooldown_minutes":720,"unknown":1}},
                 "news":{"enabled":true,"interval_minutes":10,"config":{"source_mode":"agent_plugin",
@@ -60,10 +62,13 @@ class ProactiveMonitorContractTest {
                 "international_conflict", "major_economy", "major_technology"),
                 Arrays.stream(NewsCategory.values()).map(NewsCategory::wireValue)
                         .collect(java.util.stream.Collectors.toSet()));
+        assertEquals(Set.of("low", "medium", "high", "critical"),
+                Arrays.stream(NewsSeverity.values()).map(NewsSeverity::wireValue)
+                        .collect(java.util.stream.Collectors.toSet()));
         String valid = """
                 {"weather":{"enabled":true,"interval_minutes":30,"config":{
                 "source":"agent_plugin","hazard_types":["rainstorm","temperature_drop"],
-                "official_min_severity":"warning","precip_probability":70,"wind_speed_kmh":62,
+                "minimum_warning_severity":"moderate","precip_probability":70,"wind_speed_kmh":62,
                 "high_temp_c":35,"low_temp_c":0,"temp_drop_24h_c":8,"forecast_hours":6,
                 "cooldown_minutes":720}},"news":{"enabled":true,"interval_minutes":10,"config":{
                 "source_mode":"agent_plugin","sources":[],"categories":["public_safety","major_technology"],
@@ -77,6 +82,34 @@ class ProactiveMonitorContractTest {
                 valid.replace("rainstorm", "typhoon"), MonitorsUpdate.class));
         assertThrows(Exception.class, () -> mapper.readValue(
                 valid.replace("public_safety", "celebrity_gossip"), MonitorsUpdate.class));
+    }
+
+    @Test
+    void weatherWarningSeverityUsesStrictQWeatherOfficialValues() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        assertEquals(WeatherWarningSeverity.MODERATE,
+                new WeatherMonitorConfig().getMinimumWarningSeverity());
+        assertEquals(Set.of("minor", "moderate", "severe", "extreme"),
+                Arrays.stream(WeatherWarningSeverity.values())
+                        .map(WeatherWarningSeverity::wireValue)
+                        .collect(java.util.stream.Collectors.toSet()));
+        assertEquals(WeatherWarningSeverity.SEVERE, mapper.readValue(
+                "{\"minimum_warning_severity\":\"severe\"}", WeatherMonitorConfig.class)
+                .getMinimumWarningSeverity());
+        String serialized = mapper.writeValueAsString(new WeatherMonitorConfig());
+        assertTrue(serialized.contains("\"minimum_warning_severity\":\"moderate\""));
+        assertFalse(serialized.contains("official_min_severity"));
+        assertThrows(Exception.class, () -> mapper.readValue(
+                "{\"minimum_warning_severity\":\"warning\"}", WeatherMonitorConfig.class));
+        assertThrows(Exception.class, () -> mapper.readValue(
+                "{\"official_min_severity\":\"warning\"}", WeatherMonitorConfig.class));
+        WeatherMonitorConfig nullSeverity = mapper.readValue(
+                "{\"minimum_warning_severity\":null}", WeatherMonitorConfig.class);
+        try (var factory = jakarta.validation.Validation.buildDefaultValidatorFactory()) {
+            assertTrue(factory.getValidator().validate(nullSeverity).stream()
+                    .anyMatch(violation -> "minimumWarningSeverity"
+                            .equals(violation.getPropertyPath().toString())));
+        }
     }
 
     @Test
@@ -98,7 +131,7 @@ class ProactiveMonitorContractTest {
     void explicitNullWeatherNumbersAreRejectedInsteadOfBecomingZero() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         String base = """
-                {"source":"agent_plugin","hazard_types":[],"official_min_severity":"warning",
+                {"source":"agent_plugin","hazard_types":[],"minimum_warning_severity":"moderate",
                 "precip_probability":70,"wind_speed_kmh":62,"high_temp_c":35,"low_temp_c":0,
                 "temp_drop_24h_c":8,"forecast_hours":6,"cooldown_minutes":720}
                 """;
@@ -124,6 +157,16 @@ class ProactiveMonitorContractTest {
         assertTrue(sql.contains("JSON_OBJECT(), NOW(), 0"));
         assertTrue(sql.contains("SELECT 'WEATHER' monitor_type UNION ALL SELECT 'NEWS'"));
         assertTrue(sql.contains("'proactive.classifier.model_id'"));
+        String severityMigration = Files.readString(Path.of("src/main/resources/db/changelog/202608082300.sql"));
+        assertTrue(severityMigration.contains("JSON_REMOVE(config, '$.official_min_severity')"));
+        assertTrue(severityMigration.contains("'$.minimum_warning_severity'"));
+        assertTrue(severityMigration.contains("WHEN 'advisory' THEN 'minor'"));
+        assertTrue(severityMigration.contains("WHEN 'watch' THEN 'moderate'"));
+        assertTrue(severityMigration.contains("WHEN 'warning' THEN 'severe'"));
+        assertTrue(severityMigration.contains("WHEN 'emergency' THEN 'extreme'"));
+        assertTrue(severityMigration.contains("ELSE 'moderate'"));
+        String master = Files.readString(Path.of("src/main/resources/db/changelog/db.changelog-master.yaml"));
+        assertTrue(master.contains("classpath:db/changelog/202608082300.sql"));
     }
 
     @Test
@@ -179,6 +222,31 @@ class ProactiveMonitorContractTest {
         assertTrue(sql.contains("claimed_at < #{claimCutoff}"));
         assertFalse(java.util.Arrays.stream(ProactiveDTOs.PendingEnvelope.class.getRecordComponents())
                 .anyMatch(component -> component.getName().equals("payload") || component.getName().equals("reason")));
+    }
+
+    @Test
+    void monitorTaskExposesOnlyResolvedWorkerInputsInsteadOfPluginCredentials() {
+        Set<String> fields = Arrays.stream(ProactiveDTOs.MonitorTask.class.getRecordComponents())
+                .map(java.lang.reflect.RecordComponent::getName)
+                .collect(java.util.stream.Collectors.toSet());
+        assertTrue(fields.containsAll(Set.of("weatherLocation", "weatherLocationError",
+                "newsSources", "newsSourcesError")));
+        assertFalse(fields.contains("apiKey"));
+        assertFalse(fields.contains("provider"));
+        assertFalse(fields.contains("pluginConfig"));
+    }
+
+    @Test
+    void proactivePluginQueryOnlyLoadsWeatherAndNewsNowMappings() throws Exception {
+        String mapper = Files.readString(
+                Path.of("src/main/resources/mapper/agent/AgentPluginMappingMapper.xml"));
+        String marker = "<select id=\"selectProactiveMonitorPluginsByAgentId\"";
+        String query = mapper.substring(mapper.indexOf(marker), mapper.indexOf("</select>",
+                mapper.indexOf(marker)));
+        assertTrue(query.contains("p.provider_code IN ('get_weather', 'get_news_from_newsnow')"));
+        assertTrue(query.contains("m.param_info AS paramInfo"));
+        assertFalse(query.contains("ai_knowledge_base"));
+        assertFalse(query.contains("api_key"));
     }
 
     @Test

@@ -30,6 +30,7 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 import xiaozhi.modules.device.proactive.ProactiveEnums.MonitorType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.NewsCategory;
 import xiaozhi.modules.device.proactive.ProactiveEnums.WeatherHazardType;
+import xiaozhi.modules.device.proactive.ProactiveEnums.WeatherWarningSeverity;
 
 public final class ProactiveDTOs {
     private ProactiveDTOs() {}
@@ -90,9 +91,8 @@ public final class ProactiveDTOs {
         private String source = "agent_plugin";
         @JsonProperty("hazard_types") @NotNull @Size(max = 16)
         private List<@NotNull WeatherHazardType> hazardTypes = List.of();
-        @JsonProperty("official_min_severity") @NotBlank
-        @Pattern(regexp = "advisory|watch|warning|emergency")
-        private String officialMinSeverity = "warning";
+        @JsonProperty("minimum_warning_severity") @NotNull
+        private WeatherWarningSeverity minimumWarningSeverity = WeatherWarningSeverity.MODERATE;
         @JsonProperty("precip_probability") @NotNull @Min(0) @Max(100)
         private Integer precipProbability = 70;
         @JsonProperty("wind_speed_kmh") @NotNull @Min(0) @Max(300)
@@ -182,6 +182,10 @@ public final class ProactiveDTOs {
             @JsonProperty("monitor_type") MonitorType monitorType,
             @JsonProperty("interval_minutes") int intervalMinutes,
             Map<String, Object> config, Map<String, Object> state,
+            @JsonProperty("weather_location") String weatherLocation,
+            @JsonProperty("weather_location_error") String weatherLocationError,
+            @JsonProperty("news_sources") List<String> newsSources,
+            @JsonProperty("news_sources_error") String newsSourcesError,
             @JsonProperty("lease_owner") String leaseOwner,
             @JsonProperty("lease_token") String leaseToken,
             @JsonProperty("lease_until") Date leaseUntil) {}

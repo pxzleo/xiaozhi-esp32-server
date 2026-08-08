@@ -76,4 +76,16 @@ public final class ProactiveEnums {
             return parseWire(NewsCategory.class, value);
         }
     }
+    public enum WeatherWarningSeverity implements WireEnum {
+        MINOR, MODERATE, SEVERE, EXTREME;
+        @JsonCreator public static WeatherWarningSeverity fromWire(String value) {
+            return parseWire(WeatherWarningSeverity.class, value);
+        }
+    }
+    public enum NewsSeverity implements WireEnum {
+        LOW, MEDIUM, HIGH, CRITICAL;
+        @JsonCreator public static NewsSeverity fromWire(String value) {
+            return parseWire(NewsSeverity.class, value);
+        }
+    }
 }

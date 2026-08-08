@@ -63,6 +63,13 @@ class DeviceProactiveControllerTest {
                 .content(request.replace("\"typhoon\"", "\"rainstorm\"")
                         .replace("\"categories\":[]", "\"categories\":[\"celebrity_gossip\"]")))
                 .andExpect(status().isBadRequest());
+        mockMvc.perform(put("/device/proactive/monitors/device-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(request.replace("\"typhoon\"", "\"rainstorm\"")
+                        .replace("\"hazard_types\":[\"rainstorm\"]",
+                                "\"hazard_types\":[\"rainstorm\"],"
+                                        + "\"minimum_warning_severity\":\"warning\"")))
+                .andExpect(status().isBadRequest());
         verifyNoInteractions(monitorService);
     }
 }
