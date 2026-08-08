@@ -232,6 +232,10 @@ class ConnectionHandler:
         self.incoming_call = None
         self.proactive_preferences = safe_local_preferences()
         self._proactive_preference_revision = 0
+        self._proactive_audit_tasks = set()
+        self._proactive_background_tasks = set()
+        self._proactive_habit_tasks = set()
+        self._proactive_delivery_futures = set()
 
     async def handle_connection(self, ws: websockets.ServerConnection):
         try:
@@ -252,7 +256,11 @@ class ConnectionHandler:
             )
 
             self.device_id = self.headers.get("device-id", None)
-            asyncio.create_task(self._load_proactive_preferences())
+            preference_task = asyncio.create_task(self._load_proactive_preferences())
+            self._proactive_background_tasks.add(preference_task)
+            preference_task.add_done_callback(
+                self._proactive_background_tasks.discard
+            )
 
             # 认证通过,继续处理
             self.websocket = ws
@@ -1873,8 +1881,40 @@ class ConnectionHandler:
         async with self._close_lock:
             if getattr(self, "_closed", False):
                 return
+            await self._finish_and_cancel_proactive_tasks()
             if await self._close_resources(ws):
                 self._closed = True
+
+    async def _finish_and_cancel_proactive_tasks(self):
+        """连接关闭时先给审计短暂时间写入failed，再取消所有主动后台任务。"""
+        current = asyncio.current_task()
+        for delivery_future in tuple(
+            getattr(self, "_proactive_delivery_futures", set())
+        ):
+            if not delivery_future.done():
+                delivery_future.set_result(False)
+        audit_tasks = {
+            task
+            for task in getattr(self, "_proactive_audit_tasks", set())
+            if task is not current and not task.done()
+        }
+        if audit_tasks:
+            _done, pending = await asyncio.wait(audit_tasks, timeout=2.5)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        other_tasks = set()
+        for name in ("_proactive_background_tasks", "_proactive_habit_tasks"):
+            other_tasks.update(
+                task
+                for task in getattr(self, name, set())
+                if task is not current and not task.done()
+            )
+        for task in other_tasks:
+            task.cancel()
+        if other_tasks:
+            await asyncio.gather(*other_tasks, return_exceptions=True)
 
     async def _close_resources(self, ws=None):
         try:

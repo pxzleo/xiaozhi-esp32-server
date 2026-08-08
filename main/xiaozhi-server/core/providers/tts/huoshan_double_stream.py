@@ -274,10 +274,12 @@ class TTSProvider(TTSProviderBase):
     def tts_text_priority_thread(self):
         """火山引擎双流式TTS的文本处理线程"""
         while not self.conn.stop_event.is_set():
+            message = None
             try:
                 message = self.tts_text_queue.get(timeout=1)
 
                 if self.conn.client_abort:
+                    self._mark_sentence_completion_failed(message)
                     try:
                         logger.bind(tag=TAG).info("收到打断信息，终止TTS文本处理线程")
                         if self.enable_ws_reuse:
@@ -297,13 +299,16 @@ class TTSProvider(TTSProviderBase):
 
                 # 过滤旧消息：检查sentence_id是否匹配
                 if message.sentence_id != self.conn.sentence_id:
+                    self._mark_sentence_completion_failed(message)
                     continue
 
                 logger.bind(tag=TAG).debug(
                     f"收到TTS任务｜{message.sentence_type.name} ｜ {message.content_type.name} | 会话ID: {message.sentence_id}"
                 )
+                self._defer_remote_sentence_completion(message)
 
                 if message.sentence_type == SentenceType.FIRST:
+                    self._reset_sentence_completion(message.sentence_id)
                     # 重置流式处理状态
                     self.reset_stream_state()
                     # 初始化参数
@@ -321,6 +326,7 @@ class TTSProvider(TTSProviderBase):
                         self.before_stop_play_files.clear()
                         logger.bind(tag=TAG).debug("TTS会话启动成功")
                     except Exception as e:
+                        self._mark_sentence_completion_failed(message)
                         logger.bind(tag=TAG).error(f"启动TTS会话失败: {str(e)}")
                         continue
 
@@ -336,6 +342,7 @@ class TTSProvider(TTSProviderBase):
                             )
                             future.result(timeout=self.tts_timeout)
                         except Exception as e:
+                            self._mark_sentence_completion_failed(message)
                             logger.bind(tag=TAG).error(f"发送TTS文本失败: {str(e)}")
                             continue
 
@@ -361,12 +368,14 @@ class TTSProvider(TTSProviderBase):
                         )
                         future.result(timeout=self.tts_timeout)
                     except Exception as e:
+                        self._mark_sentence_completion_failed(message)
                         logger.bind(tag=TAG).error(f"结束TTS会话失败: {str(e)}")
                         continue
-
             except queue.Empty:
                 continue
             except Exception as e:
+                if message is not None:
+                    self._mark_sentence_completion_failed(message)
                 logger.bind(tag=TAG).error(
                     f"处理TTS文本失败: {str(e)}, 类型: {type(e).__name__}, 堆栈: {traceback.format_exc()}"
                 )
@@ -377,7 +386,7 @@ class TTSProvider(TTSProviderBase):
         try:
             # 建立新连接
             if self.ws is None:
-                logger.bind(tag=TAG).warning(f"WebSocket连接不存在，终止发送文本")
+                raise RuntimeError("WebSocket连接不存在")
                 return
 
             #  过滤Markdown
@@ -438,6 +447,8 @@ class TTSProvider(TTSProviderBase):
     async def finish_session(self, session_id):
         logger.bind(tag=TAG).debug(f"关闭会话～～{session_id}")
         try:
+            if not self.ws:
+                raise RuntimeError("WebSocket连接不存在")
             if self.ws:
                 header = Header(
                     message_type=FULL_CLIENT_REQUEST,
@@ -517,6 +528,18 @@ class TTSProvider(TTSProviderBase):
                     if res.optional.event == EVENT_SessionCanceled:
                         logger.bind(tag=TAG).debug(f"释放服务端资源成功～～")
                         self.activate_session = False
+                        self._complete_remote_sentence(
+                            res.optional.sessionId,
+                            succeeded=False,
+                            all_pending=True,
+                        )
+                    elif res.optional.event == EVENT_SessionFailed:
+                        self.activate_session = False
+                        self._complete_remote_sentence(
+                            res.optional.sessionId,
+                            succeeded=False,
+                            all_pending=True,
+                        )
                     elif not self.resource_type and res.optional.event == EVENT_TTSSentenceStart:
                         json_data = json.loads(res.payload.decode("utf-8"))
                         self.tts_text = json_data.get("text", "")
@@ -542,17 +565,27 @@ class TTSProvider(TTSProviderBase):
                         self.wav_to_opus_data_audio_raw_stream(res.payload, callback=self.handle_opus)
                     elif not self.resource_type and res.optional.event == EVENT_TTSSentenceEnd:
                         logger.bind(tag=TAG).info(f"句子语音生成成功：{self.tts_text}")
+                        self._complete_remote_sentence(res.optional.sessionId)
                     elif res.optional.event == EVENT_SessionFinished:
                         logger.bind(tag=TAG).debug(f"会话结束～～")
                         self.activate_session = False
                         self._process_before_stop_play_files()
+                        self._complete_remote_sentence(
+                            res.optional.sessionId, all_pending=True
+                        )
                         # 非复用模式下，会话结束后发送 FinishConnection
                         if not self.enable_ws_reuse:
                             await self.finish_connection()
                 except websockets.ConnectionClosed:
+                    self._complete_remote_sentence(
+                        succeeded=False, all_pending=True
+                    )
                     logger.bind(tag=TAG).warning("WebSocket连接已关闭")
                     break
                 except Exception as e:
+                    self._complete_remote_sentence(
+                        succeeded=False, all_pending=True
+                    )
                     logger.bind(tag=TAG).error(
                         f"Error in _start_monitor_tts_response: {e}"
                     )

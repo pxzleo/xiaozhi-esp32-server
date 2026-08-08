@@ -1864,13 +1864,24 @@ class _Connection:
 
 
 class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
-    def test_playback_end_proactively_offers_similar_music(self):
+    async def test_playback_end_proactively_offers_similar_music(self):
         connection = _Connection()
         connection.headers = {"device-id": "music-end-device"}
+        connection.device_id = "music-end-device"
+        connection.abort_generation = 0
+        connection.client_abort = False
+        captured = {}
+
+        def capture_audit(*_args, **kwargs):
+            captured["delivery"] = kwargs["delivered"]
+
         with patch.object(
             netease,
             "claim_proactive_opportunity",
             return_value=True,
+        ), patch(
+            "core.providers.tools.device_mcp.proactive_audit.schedule_server_suggestion_audit",
+            side_effect=capture_audit,
         ):
             suggestion = netease._enqueue_playback_end(connection)
 
@@ -1878,6 +1889,10 @@ class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
         messages = connection.tts.tts_text_queue.items
         self.assertEqual(messages[-2].content_detail, suggestion)
         self.assertEqual(messages[-1].sentence_type, netease.SentenceType.LAST)
+        self.assertFalse(captured["delivery"].done())
+        messages[-1].completion_event.set_result(True)
+        await asyncio.gather(*connection._proactive_audit_tasks)
+        self.assertTrue(captured["delivery"].result())
 
     def test_second_music_failure_adds_actionable_suggestion(self):
         connection = _Connection()
@@ -1885,7 +1900,9 @@ class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
             netease,
             "claim_proactive_opportunity",
             return_value=True,
-        ) as claim:
+        ) as claim, patch(
+            "core.providers.tools.device_mcp.proactive_audit.schedule_server_suggestion_audit"
+        ) as audit:
             self.assertEqual(
                 "第一次失败",
                 netease._music_failure_response(connection, "第一次失败"),
@@ -1894,7 +1911,16 @@ class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("连续失败", response)
         self.assertIn("检查登录状态", response)
+        self.assertIs(audit.call_args.kwargs["delivered"], False)
         claim.assert_called_once()
+
+    async def test_late_night_audit_fails_when_playback_is_cancelled(self):
+        delivery = asyncio.get_running_loop().create_future()
+        state = netease.NeteasePlaybackState(
+            resolved=[], active_suggestion_delivery=delivery
+        )
+        netease._cancel_playback_task(state)
+        self.assertFalse(delivery.result())
 
     def test_user_input_error_does_not_count_as_service_failure(self):
         error = netease.NeteaseMusicError("请告诉我想播放的歌曲名称")

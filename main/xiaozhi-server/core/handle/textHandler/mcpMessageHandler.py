@@ -45,10 +45,17 @@ class McpTextMessageHandler(TextMessageHandler):
                     conn.sentence_id,
                     getattr(conn, "abort_generation", 0),
                 )
-            asyncio.create_task(
+            task = asyncio.create_task(
                 _handle_mcp_message_background(
                     conn,
                     payload,
                     notification_state,
                 )
             )
+            if notification_state is not None:
+                tasks = getattr(conn, "_proactive_background_tasks", None)
+                if tasks is None:
+                    tasks = set()
+                    conn._proactive_background_tasks = tasks
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)

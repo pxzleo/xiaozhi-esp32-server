@@ -55,7 +55,11 @@
 
 建连 GET 偏好的成功或失败结果都必须校验当前连接的偏好修改代次；设备工具已在此期间成功修改偏好时，过期 GET 既不得覆盖新值，也不得因请求失败把新值重置为本地默认。
 
-新主动事件按 `pending → delivered/failed` 异步审计。审计失败不阻断 critical 播报，后台日志只记录异常类型，不记录 payload、`label` 或 `details`。
+新主动事件按 `pending → delivered/failed` 异步审计。`delivered` 只能在音频发送且设备播放完成信号返回后写入；合成、发送、断连、用户打断、句子被替换或等待超时都写入 `failed`。事件创建或初始状态更新失败时，审计任务显式返回失败，后续 outcome 不得越过失败任务继续回写。审计失败不阻断 critical 播报，后台日志只记录异常类型，不记录 payload、`label` 或 `details`。
+
+所有 TTS provider 都必须转发消息自身携带的 completion，包括工具提示使用的 `MIDDLE` 文本段；abort、旧句子、合成或发送异常必须完成为失败且同一 completion 只完成一次。日程完成邀请、天气行动句、习惯建议、深夜音乐建议和队列结束建议都在播报前创建审计生命周期并绑定真实 completion。音乐服务连续失败建议因当前普通工具结果链没有独立播放完成句柄，只能明确审计为 `failed`，不得提前写 `delivered`。
+
+统一事件必须满足 `expires_at` 晚于服务端当前 Unix 秒；已过期事件在审计和播报前拒绝。同连接事件 ID 使用容量 256 的 FIFO 去重集合，达到上限时只逐出最早项，不得整表清空；跨连接则在播报前利用 manager-api 幂等创建结果，已为 `delivered` 的事件不得重播。主动 manager-api 请求采用 0.5 秒短超时并最多重试一次。偏好、习惯、通知处理和审计任务均归属当前连接，关闭时等待审计写入失败终态并取消其余任务，任务不得继续访问旧连接。
 
 `notifications/device/health` 严格接受 `version=1` 与统一字段 `event_id/topic/priority/reason/created_at/expires_at/dedupe_key/requires_response`。`event_id` 和 `dedupe_key` 长度为 1–96，时间是 Unix 秒整数。`kind` 仅允许 `network_flapping/time_unsynchronized/ota_update_available/audio_decode_failed`；`severity` 仅允许 `info/warning/critical`，并映射 `priority=normal/high/critical`。未恢复的 critical 使用 `topic=health_critical`，其他使用 `topic=health`；故障/恢复的 reason 固定为 `device health`/`device health recovered`，`requires_response=false`。
 
@@ -65,4 +69,6 @@
 
 习惯候选必须先用稳定审计字段幂等写入并读取已有投递状态；已为 `delivered` 时直接跳过，不得消耗当日预算。只有确认尚未投递后才能原子领取建议机会。
 
-`self.proactive.*` 由设备权威执行；成功结果的 `data` 立即更新当前连接并后台 PUT manager-api，失败重试一次且不改变设备成功播报。`self.schedule.complete_recent/follow_up/dismiss_follow_up` 成功后分别更新当前 follow-up outcome 为 `completed/acknowledged/dismissed`。
+`self.proactive.*` 由设备权威执行；成功结果的 `data` 立即更新当前连接并后台 PUT manager-api，失败重试一次且不改变设备成功播报。`self.schedule.complete_recent/follow_up/dismiss_follow_up` 成功后分别更新当前 follow-up outcome 为 `completed/acknowledged/dismissed`；成功结果 `data.source_id` 必须为正整数且与当前 follow-up 的 `source_id` 完全一致，否则拒绝回写。
+
+每日简报的雨天建议先识别“没有雨、无雨、不下雨、不会下雨、未下雨、雨已停”等否定语义；命中否定时，即使文本包含“雨”字也不得追加带伞建议。

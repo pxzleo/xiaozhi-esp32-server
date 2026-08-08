@@ -35,6 +35,22 @@ TAG = __name__
 logger = setup_logging()
 
 
+def _complete_playback_event(conn, completion_event, succeeded):
+    """从音频工作线程安全地完成播放通知。"""
+    if isinstance(completion_event, asyncio.Future):
+        def complete_future():
+            if not completion_event.done() and not completion_event.cancelled():
+                completion_event.set_result(succeeded is True)
+
+        conn.loop.call_soon_threadsafe(complete_future)
+        return
+    set_result = getattr(completion_event, "set_result", None)
+    if callable(set_result):
+        set_result(succeeded)
+    else:
+        completion_event.set()
+
+
 class TTSProviderBase(ABC):
     def __init__(self, config, delete_audio_file):
         self.interface_type = InterfaceType.NON_STREAM
@@ -50,6 +66,9 @@ class TTSProviderBase(ABC):
         self.report_on_last = False
         # sentence_id 到文本的映射，用于流式TTS获取正确的字幕文本
         self._sentence_text_map = {}
+        self._remote_completion_lock = threading.Lock()
+        self._remote_sentence_completions = []
+        self._remote_session_completions = []
         # 加载替换词，用于一次性正则替换
         raw_words = config.get("correct_words", [])
         self.correct_words = {}
@@ -295,7 +314,15 @@ class TTSProviderBase(ABC):
                 sentence_id = str(uuid.uuid4().hex)
                 conn.sentence_id = sentence_id
         # 对于单句的文本，进行分段处理
-        segments = re.split(r"([。！？!?；;\n])", content_detail)
+        raw_segments = re.split(r"([。！？!?；;\n])", content_detail)
+        segments = []
+        for segment in raw_segments:
+            if not segment:
+                continue
+            if re.fullmatch(r"[。！？!?；;\n]", segment) and segments:
+                segments[-1] += segment
+            else:
+                segments.append(segment)
         for index, seg in enumerate(segments):
             self.tts_text_queue.put(
                 TTSMessageDTO(
@@ -365,6 +392,121 @@ class TTSProviderBase(ABC):
         if sentence_id in self._sentence_text_map:
             del self._sentence_text_map[sentence_id]
 
+    def _reset_sentence_completion(self, sentence_id):
+        failures = getattr(self, "_sentence_completion_failures", None)
+        if failures is None:
+            failures = set()
+            self._sentence_completion_failures = failures
+        failures.discard(sentence_id)
+
+    def _mark_sentence_completion_failed(self, message):
+        failures = getattr(self, "_sentence_completion_failures", None)
+        if failures is None:
+            failures = set()
+            self._sentence_completion_failures = failures
+        failures.add(message.sentence_id)
+        remote_lock = getattr(self, "_remote_completion_lock", None)
+        if remote_lock is not None:
+            with remote_lock:
+                pending_groups = (
+                    getattr(self, "_remote_sentence_completions", []),
+                    getattr(self, "_remote_session_completions", []),
+                )
+                for pending in pending_groups:
+                    for index in range(len(pending) - 1, -1, -1):
+                        if pending[index][2] is message:
+                            pending.pop(index)
+                            break
+        if message.completion_event:
+            _complete_playback_event(self.conn, message.completion_event, False)
+
+    def _forward_sentence_completion(self, message):
+        if not message.completion_event:
+            return
+        failures = getattr(self, "_sentence_completion_failures", set())
+        if message.sentence_id in failures:
+            _complete_playback_event(self.conn, message.completion_event, False)
+            return
+        self.tts_audio_queue.put(
+            (
+                SentenceType.MIDDLE,
+                [],
+                None,
+                message.sentence_id,
+                message.completion_event,
+            )
+        )
+
+    def _defer_remote_sentence_completion(self, message):
+        is_text_segment = (
+            message.content_type == ContentType.TEXT
+            and bool(message.content_detail)
+        )
+        is_sentence_slot = is_text_segment or (
+            message.sentence_type == SentenceType.MIDDLE
+            and message.completion_event is not None
+        )
+        is_session_completion = (
+            message.sentence_type == SentenceType.LAST
+            and message.completion_event is not None
+        )
+        if not is_sentence_slot and not is_session_completion:
+            return
+        lock = getattr(self, "_remote_completion_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._remote_completion_lock = lock
+            self._remote_sentence_completions = []
+            self._remote_session_completions = []
+        with lock:
+            item = (message.sentence_id, message.completion_event, message)
+            if is_sentence_slot:
+                # 每个实际发送的文本段都占一个 FIFO 槽，避免前一段的迟到
+                # SentenceEnd 误消费后一段的 completion。
+                self._remote_sentence_completions.append(item)
+            if is_session_completion:
+                # LAST 不对应文本段，只能由远端会话结束事件完成。
+                self._remote_session_completions.append(item)
+
+    def _complete_remote_sentence(
+        self, sentence_id=None, succeeded=True, all_pending=False
+    ):
+        lock = getattr(self, "_remote_completion_lock", None)
+        if lock is None:
+            return
+        selected = []
+        with lock:
+            pending_groups = [self._remote_sentence_completions]
+            if all_pending:
+                pending_groups.append(self._remote_session_completions)
+            for pending in pending_groups:
+                for item in tuple(pending):
+                    if sentence_id is None or item[0] == sentence_id:
+                        selected.append(item)
+                        pending.remove(item)
+                        if not all_pending:
+                            break
+                if selected and not all_pending:
+                    break
+        for pending_sentence_id, completion_event, _message in selected:
+            if completion_event is None:
+                continue
+            sentence_failed = pending_sentence_id in getattr(
+                self, "_sentence_completion_failures", set()
+            )
+            if succeeded and not sentence_failed:
+                self.tts_audio_queue.put(
+                    (
+                        SentenceType.MIDDLE,
+                        [],
+                        None,
+                        pending_sentence_id,
+                        completion_event,
+                    )
+                )
+            else:
+                _complete_playback_event(self.conn, completion_event, False)
+
     def _restore_original_text(self, text):
         if not self._reverse_words_pattern or not text:
             return text
@@ -376,15 +518,19 @@ class TTSProviderBase(ABC):
     # 流式处理方式请在子类中重写
     def tts_text_priority_thread(self):
         while not self.conn.stop_event.is_set():
+            message = None
             try:
                 message = self.tts_text_queue.get(timeout=1)
                 if self.conn.client_abort:
                     logger.bind(tag=TAG).info("收到打断信息，终止TTS文本处理线程")
+                    self._mark_sentence_completion_failed(message)
                     continue
                 # 过滤旧消息：检查sentence_id是否匹配
                 if message.sentence_id != self.conn.sentence_id:
+                    self._mark_sentence_completion_failed(message)
                     continue
                 if message.sentence_type == SentenceType.FIRST:
+                    self._reset_sentence_completion(message.sentence_id)
                     self.current_sentence_id = message.sentence_id
                     self.tts_stop_request = False
                     self.processed_chars = 0
@@ -412,19 +558,13 @@ class TTSProviderBase(ABC):
                         (message.sentence_type, [], message.content_detail, message.sentence_id)
                     )
                 if message.completion_event:
-                    self.tts_audio_queue.put(
-                        (
-                            SentenceType.MIDDLE,
-                            [],
-                            None,
-                            message.sentence_id,
-                            message.completion_event,
-                        )
-                    )
+                    self._forward_sentence_completion(message)
 
             except queue.Empty:
                 continue
             except Exception as e:
+                if message is not None:
+                    self._mark_sentence_completion_failed(message)
                 logger.bind(tag=TAG).error(
                     f"处理TTS文本失败: {str(e)}, 类型: {type(e).__name__}, 堆栈: {traceback.format_exc()}"
                 )
@@ -436,6 +576,7 @@ class TTSProviderBase(ABC):
         enqueue_audio = []
         while not self.conn.stop_event.is_set():
             text = None
+            completion_event = None
             try:
                 try:
                     item = self.tts_audio_queue.get(timeout=0.1)
@@ -461,6 +602,8 @@ class TTSProviderBase(ABC):
 
                 if self.conn.client_abort:
                     logger.bind(tag=TAG).debug("收到打断信号，跳过当前音频数据")
+                    if completion_event:
+                        _complete_playback_event(self.conn, completion_event, False)
                     enqueue_text, enqueue_audio = None, []
                     continue
 
@@ -494,20 +637,27 @@ class TTSProviderBase(ABC):
                 future.result()
 
                 if completion_event:
+                    completion_succeeded = False
                     try:
                         completion_future = asyncio.run_coroutine_threadsafe(
                             _wait_for_audio_completion(self.conn),
                             self.conn.loop,
                         )
                         completion_future.result()
+                        completion_succeeded = True
                     finally:
-                        completion_event.set()
+                        _complete_playback_event(
+                            self.conn, completion_event, completion_succeeded
+                        )
+                        completion_event = None
 
                 # 记录输出和报告
                 if self.conn.max_output_size > 0 and text:
                     add_device_output(self.conn.headers.get("device-id"), len(text))
 
             except Exception as e:
+                if completion_event:
+                    _complete_playback_event(self.conn, completion_event, False)
                 logger.bind(tag=TAG).error(f"audio_play_priority_thread: {text} {e}")
 
     def _enqueue_playback_event(self, message):

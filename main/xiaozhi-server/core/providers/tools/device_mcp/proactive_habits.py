@@ -9,7 +9,6 @@ from config.manage_api_client import (
     create_proactive_event,
     get_proactive_habit_candidates,
     observe_proactive_habit,
-    update_proactive_event_status,
 )
 from core.providers.tools.device_mcp.proactive_policy import claim_proactive_opportunity
 
@@ -168,16 +167,45 @@ async def _suggest_habit(
         conn, event_id, cooldown_seconds=365 * 24 * 3600, policy_topic="habit"
     ):
         return False
-    from core.providers.tools.device_mcp.mcp_handler import _speak_proactive_notification
+    from core.providers.tools.device_mcp.mcp_handler import (
+        ProactiveDeliveryCompletion,
+        _new_delivery_lifecycle,
+        _resolve_delivery_lifecycle,
+        _speak_proactive_notification,
+        _wait_for_proactive_delivery,
+    )
 
     claims.add(event_id)
-    sentence_id = await _speak_proactive_notification(
-        conn, _SUGGESTION_TEXT[habit_group], "习惯建议", notification_state
+    delivery_future, audit_task = _new_delivery_lifecycle(conn, event)
+    completion = ProactiveDeliveryCompletion()
+    abort_generation = (
+        notification_state[1]
+        if notification_state is not None
+        else getattr(conn, "abort_generation", 0)
     )
-    await update_proactive_event_status(
-        event_id,
-        mac_address,
-        "delivered" if sentence_id else "failed",
-        "none" if sentence_id else "failed",
-    )
-    return sentence_id is not None
+    try:
+        sentence_id = await _speak_proactive_notification(
+            conn,
+            _SUGGESTION_TEXT[habit_group],
+            "习惯建议",
+            notification_state,
+            completion_event=completion,
+        )
+    except BaseException:
+        if not delivery_future.done():
+            delivery_future.set_result(False)
+        raise
+    if sentence_id is None:
+        if not delivery_future.done():
+            delivery_future.set_result(False)
+    else:
+        _resolve_delivery_lifecycle(
+            conn,
+            delivery_future,
+            _wait_for_proactive_delivery(
+                conn, completion, sentence_id, abort_generation
+            ),
+        )
+    delivered = await delivery_future
+    await audit_task
+    return delivered is True

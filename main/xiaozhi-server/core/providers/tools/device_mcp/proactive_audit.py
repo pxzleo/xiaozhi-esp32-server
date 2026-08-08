@@ -12,7 +12,7 @@ logger = setup_logging()
 
 
 def schedule_server_suggestion_audit(
-    conn, topic, reason, *, reference_id, requires_response=True, delivered=True
+    conn, topic, reason, *, reference_id, delivered, requires_response=True
 ):
     mac_address = getattr(conn, "device_id", None)
     if not isinstance(mac_address, str) or not mac_address:
@@ -40,16 +40,32 @@ def schedule_server_suggestion_audit(
     }
 
     async def audit():
+        delivery_result = None
         try:
             await create_proactive_event(event)
+            delivery_result = delivered() if callable(delivered) else delivered
+            delivery_succeeded = (
+                await delivery_result
+                if hasattr(delivery_result, "__await__")
+                else delivery_result is True
+            )
             await update_proactive_event_status(
                 event_id,
                 mac_address,
-                "delivered" if delivered else "failed",
-                "none" if delivered else "failed",
+                "delivered" if delivery_succeeded else "failed",
+                "none" if delivery_succeeded else "failed",
             )
+            return True
         except Exception as error:
+            if isinstance(delivery_result, asyncio.Future):
+                if not delivery_result.done():
+                    delivery_result.set_result(False)
+            else:
+                close = getattr(delivery_result, "close", None)
+                if callable(close):
+                    close()
             logger.bind(tag=TAG).error(f"主动建议审计失败: {type(error).__name__}")
+            return False
 
     task = asyncio.create_task(audit())
     tasks = getattr(conn, "_proactive_audit_tasks", None)

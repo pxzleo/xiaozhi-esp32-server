@@ -1,6 +1,11 @@
 import asyncio
+import importlib
+import queue
+import threading
+import time
 import unittest
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -16,22 +21,39 @@ from core.providers.tools.device_mcp.proactive_policy import (
     reset_proactive_policy_for_test,
     safe_local_preferences,
 )
+from core.providers.tts.base import _complete_playback_event
 from plugins_func.functions.play_netease_music import _late_night_music_suggestion
 
 
 def _event_fields(**overrides):
+    now = int(time.time())
     data = {
         "event_id": "event-1",
         "topic": "follow_up",
         "priority": "normal",
         "reason": "schedule follow up",
-        "created_at": 1_786_170_600,
-        "expires_at": 1_786_174_200,
+        "created_at": now - 10,
+        "expires_at": now + 3600,
         "dedupe_key": "dedupe-1",
         "requires_response": True,
     }
     data.update(overrides)
     return data
+
+
+def _discard_delivery_audit(_conn, _audit, delivery_result):
+    if hasattr(delivery_result, "close"):
+        delivery_result.close()
+
+
+async def _completed_speech(conn, _text, _name, _state=None, **kwargs):
+    conn.sentence_id = "sid"
+    conn.abort_generation = getattr(conn, "abort_generation", 0)
+    conn.client_abort = False
+    completion = kwargs.get("completion_event")
+    if completion is not None:
+        completion.set_result(True)
+    return "sid"
 
 
 class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
@@ -54,7 +76,11 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
         }
         with patch.object(
             mcp_handler, "_speak_proactive_notification", AsyncMock(return_value="sid")
-        ) as speak, patch.object(mcp_handler, "_schedule_delivery_audit") as audit:
+        ) as speak, patch.object(
+            mcp_handler, "_prepare_proactive_audit", AsyncMock(return_value=False)
+        ), patch.object(
+            mcp_handler, "_schedule_delivery_audit", side_effect=_discard_delivery_audit
+        ) as audit:
             await mcp_handler._handle_schedule_follow_up_notification(self.conn, params)
             await mcp_handler._handle_schedule_follow_up_notification(self.conn, params)
         speak.assert_awaited_once()
@@ -83,7 +109,11 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
         }
         with patch.object(
             mcp_handler, "_speak_proactive_notification", AsyncMock(return_value="sid")
-        ) as speak, patch.object(mcp_handler, "_schedule_delivery_audit"):
+        ) as speak, patch.object(
+            mcp_handler, "_prepare_proactive_audit", AsyncMock(return_value=False)
+        ), patch.object(
+            mcp_handler, "_schedule_delivery_audit", side_effect=_discard_delivery_audit
+        ):
             await mcp_handler._handle_device_health_notification(self.conn, params)
         speak.assert_awaited_once()
 
@@ -131,7 +161,11 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
         }
         with patch.object(
             mcp_handler, "_speak_proactive_notification", AsyncMock(return_value="sid")
-        ), patch.object(mcp_handler, "_schedule_delivery_audit"):
+        ), patch.object(
+            mcp_handler, "_prepare_proactive_audit", AsyncMock(return_value=False)
+        ), patch.object(
+            mcp_handler, "_schedule_delivery_audit", side_effect=_discard_delivery_audit
+        ):
             await mcp_handler._handle_schedule_follow_up_notification(self.conn, params)
         self.assertLessEqual(len(self.conn._current_followup_audit_event_id), 64)
         self.assertNotEqual(params["event_id"], self.conn._current_followup_audit_event_id)
@@ -161,13 +195,17 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_schedule_completion_updates_follow_up_outcome(self):
         self.conn._current_followup_audit_event_id = "event-1"
+        self.conn._current_followup_source_id = 7
+        self.conn._current_followup_audit_task = asyncio.create_task(
+            asyncio.sleep(0, result=True)
+        )
         with patch.object(
             mcp_handler, "update_proactive_event_status", AsyncMock()
         ) as update:
             mcp_handler.handle_successful_device_tool_result(
                 self.conn,
                 "self.schedule.complete_recent",
-                {"action": "RESPONSE", "data": {}},
+                {"action": "RESPONSE", "data": {"source_id": 7}},
             )
             await asyncio.gather(*self.conn._proactive_background_tasks)
         update.assert_awaited_once_with(
@@ -176,13 +214,17 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_schedule_dismiss_uses_real_tool_name(self):
         self.conn._current_followup_audit_event_id = "event-1"
+        self.conn._current_followup_source_id = 7
+        self.conn._current_followup_audit_task = asyncio.create_task(
+            asyncio.sleep(0, result=True)
+        )
         with patch.object(
             mcp_handler, "update_proactive_event_status", AsyncMock()
         ) as update:
             mcp_handler.handle_successful_device_tool_result(
                 self.conn,
                 "self.schedule.dismiss_follow_up",
-                {"action": "RESPONSE", "data": {}},
+                {"action": "RESPONSE", "data": {"source_id": 7}},
             )
             await asyncio.gather(*self.conn._proactive_background_tasks)
         update.assert_awaited_once_with(
@@ -270,24 +312,675 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             mcp_handler, "update_proactive_event_status", side_effect=update_status
         ):
-            audit_task = mcp_handler._schedule_delivery_audit(
+            audit = mcp_handler._build_proactive_audit(
                 self.conn,
                 event,
                 {"title": "完成跟进", "reference_id": "7", "source": "device"},
-                True,
             )
+            audit_task = mcp_handler._schedule_delivery_audit(self.conn, audit, True)
             self.conn._current_followup_audit_event_id = "event-1"
+            self.conn._current_followup_source_id = 7
             self.conn._current_followup_audit_task = audit_task
             mcp_handler.handle_successful_device_tool_result(
                 self.conn,
                 "self.schedule.complete_recent",
-                {"action": "RESPONSE", "data": {}},
+                {"action": "RESPONSE", "data": {"source_id": 7}},
             )
             await asyncio.gather(*self.conn._proactive_background_tasks)
         self.assertEqual(
             ["created", ("delivered", "none"), ("delivered", "completed")],
             calls,
         )
+
+    async def test_delivery_audit_waits_for_real_tts_completion(self):
+        completion = mcp_handler.ProactiveDeliveryCompletion()
+        self.conn.sentence_id = "sid"
+        self.conn.abort_generation = 3
+        self.conn.client_abort = False
+        audit = mcp_handler._build_proactive_audit(
+            self.conn,
+            _event_fields(),
+            {"title": "完成跟进", "reference_id": "7", "source": "device"},
+        )
+        status = AsyncMock()
+        with patch.object(
+            mcp_handler,
+            "create_proactive_event",
+            AsyncMock(return_value={"delivery_status": "pending"}),
+        ), patch.object(mcp_handler, "update_proactive_event_status", status):
+            task = mcp_handler._schedule_delivery_audit(
+                self.conn,
+                audit,
+                mcp_handler._wait_for_proactive_delivery(
+                    self.conn, completion, "sid", 3
+                ),
+            )
+            await asyncio.sleep(0)
+            status.assert_not_awaited()
+            completion.set_result(True)
+            self.assertTrue(await task)
+        status.assert_awaited_once_with("event-1", "AA:BB", "delivered", "none")
+
+    async def test_abort_before_tts_completion_is_failed(self):
+        completion = mcp_handler.ProactiveDeliveryCompletion()
+        self.conn.sentence_id = "sid"
+        self.conn.abort_generation = 3
+        self.conn.client_abort = True
+        delivered = await mcp_handler._wait_for_proactive_delivery(
+            self.conn, completion, "sid", 3
+        )
+        self.assertFalse(delivered)
+
+    async def test_failed_completion_is_not_delivered(self):
+        completion = mcp_handler.ProactiveDeliveryCompletion()
+        completion.set_result(False)
+        self.conn.sentence_id = "sid"
+        self.conn.abort_generation = 3
+        self.conn.client_abort = False
+        delivered = await mcp_handler._wait_for_proactive_delivery(
+            self.conn, completion, "sid", 3
+        )
+        self.assertFalse(delivered)
+
+    async def test_expired_follow_up_is_rejected_before_audit_or_speech(self):
+        params = {
+            **_event_fields(expires_at=int(time.time()) - 1),
+            "version": 1,
+            "follow_up": True,
+            "source_id": 7,
+            "label": "喝水",
+            "speak": True,
+        }
+        with patch.object(
+            mcp_handler, "_prepare_proactive_audit", AsyncMock()
+        ) as prepare, patch.object(
+            mcp_handler, "_speak_proactive_notification", AsyncMock()
+        ) as speak:
+            await mcp_handler._handle_schedule_follow_up_notification(self.conn, params)
+        prepare.assert_not_awaited()
+        speak.assert_not_awaited()
+
+    def test_notification_dedupe_uses_bounded_fifo_eviction(self):
+        for index in range(mcp_handler.MAX_SEEN_NOTIFICATION_EVENTS + 1):
+            self.assertTrue(mcp_handler._claim_notification_event(self.conn, f"e-{index}"))
+        self.assertFalse(mcp_handler._claim_notification_event(self.conn, "e-1"))
+        self.assertTrue(mcp_handler._claim_notification_event(self.conn, "e-0"))
+        self.assertLessEqual(
+            len(self.conn._proactive_notification_events),
+            mcp_handler.MAX_SEEN_NOTIFICATION_EVENTS,
+        )
+
+    async def test_manager_delivered_event_blocks_cross_connection_replay(self):
+        params = {
+            **_event_fields(),
+            "version": 1,
+            "follow_up": True,
+            "source_id": 7,
+            "label": "喝水",
+            "speak": True,
+        }
+        with patch.object(
+            mcp_handler, "_prepare_proactive_audit", AsyncMock(return_value=True)
+        ), patch.object(
+            mcp_handler, "_speak_proactive_notification", AsyncMock()
+        ) as speak:
+            await mcp_handler._handle_schedule_follow_up_notification(self.conn, params)
+        speak.assert_not_awaited()
+
+    async def test_follow_up_outcome_rejects_mismatched_source_id(self):
+        self.conn._current_followup_audit_event_id = "event-1"
+        self.conn._current_followup_source_id = 7
+        self.conn._current_followup_audit_task = asyncio.create_task(
+            asyncio.sleep(0, result=True)
+        )
+        with patch.object(
+            mcp_handler, "update_proactive_event_status", AsyncMock()
+        ) as update:
+            mcp_handler.handle_successful_device_tool_result(
+                self.conn,
+                "self.schedule.complete_recent",
+                {"action": "RESPONSE", "data": {"source_id": 8}},
+            )
+            await self.conn._current_followup_audit_task
+        update.assert_not_awaited()
+
+    async def test_follow_up_outcome_stops_when_initial_audit_failed(self):
+        audit = mcp_handler._build_proactive_audit(
+            self.conn,
+            _event_fields(),
+            {"title": "完成跟进", "reference_id": "7", "source": "device"},
+        )
+        with patch.object(
+            mcp_handler,
+            "create_proactive_event",
+            AsyncMock(side_effect=RuntimeError("offline")),
+        ), patch.object(
+            mcp_handler, "update_proactive_event_status", AsyncMock()
+        ) as update:
+            self.conn._current_followup_audit_event_id = "event-1"
+            self.conn._current_followup_source_id = 7
+            self.conn._current_followup_audit_task = (
+                mcp_handler._schedule_delivery_audit(self.conn, audit, True)
+            )
+            mcp_handler.handle_successful_device_tool_result(
+                self.conn,
+                "self.schedule.complete_recent",
+                {"action": "RESPONSE", "data": {"source_id": 7}},
+            )
+            await asyncio.gather(*self.conn._proactive_background_tasks)
+        update.assert_not_awaited()
+
+    async def test_follow_up_outcome_stops_when_delivery_status_audit_failed(self):
+        audit = mcp_handler._build_proactive_audit(
+            self.conn,
+            _event_fields(),
+            {"title": "完成跟进", "reference_id": "7", "source": "device"},
+        )
+        update = AsyncMock(side_effect=RuntimeError("status offline"))
+        with patch.object(
+            mcp_handler,
+            "create_proactive_event",
+            AsyncMock(return_value={"delivery_status": "pending"}),
+        ), patch.object(mcp_handler, "update_proactive_event_status", update):
+            self.conn._current_followup_audit_event_id = "event-1"
+            self.conn._current_followup_source_id = 7
+            self.conn._current_followup_audit_task = (
+                mcp_handler._schedule_delivery_audit(self.conn, audit, True)
+            )
+            mcp_handler.handle_successful_device_tool_result(
+                self.conn,
+                "self.schedule.complete_recent",
+                {"action": "RESPONSE", "data": {"source_id": 7}},
+            )
+            await asyncio.gather(*self.conn._proactive_background_tasks)
+        self.assertEqual(1, update.await_count)
+
+    async def test_connection_cleanup_cancels_background_tasks(self):
+        started = asyncio.Event()
+
+        async def pending():
+            started.set()
+            await asyncio.Event().wait()
+
+        background = asyncio.create_task(pending())
+        habit = asyncio.create_task(pending())
+        audit = asyncio.create_task(asyncio.sleep(0, result=False))
+        await started.wait()
+        conn = SimpleNamespace(
+            _proactive_audit_tasks={audit},
+            _proactive_background_tasks={background},
+            _proactive_habit_tasks={habit},
+        )
+        await ConnectionHandler._finish_and_cancel_proactive_tasks(conn)
+        self.assertTrue(background.cancelled())
+        self.assertTrue(habit.cancelled())
+        self.assertTrue(audit.done())
+
+    async def test_connection_close_marks_waiting_delivery_failed(self):
+        completion = mcp_handler.ProactiveDeliveryCompletion()
+        closed = asyncio.Event()
+        conn = SimpleNamespace(
+            device_id="AA:BB",
+            sentence_id="sid",
+            abort_generation=1,
+            client_abort=False,
+            connection_closed_event=closed,
+            _proactive_audit_tasks=set(),
+            _proactive_background_tasks=set(),
+            _proactive_habit_tasks=set(),
+        )
+        audit = mcp_handler._build_proactive_audit(
+            conn,
+            _event_fields(),
+            {"title": "完成跟进", "reference_id": "7", "source": "device"},
+        )
+        status = AsyncMock()
+        with patch.object(
+            mcp_handler,
+            "create_proactive_event",
+            AsyncMock(return_value={"delivery_status": "pending"}),
+        ), patch.object(mcp_handler, "update_proactive_event_status", status):
+            mcp_handler._schedule_delivery_audit(
+                conn,
+                audit,
+                mcp_handler._wait_for_proactive_delivery(conn, completion, "sid", 1),
+            )
+            closed.set()
+            await ConnectionHandler._finish_and_cancel_proactive_tasks(conn)
+        status.assert_awaited_once_with("event-1", "AA:BB", "failed", "failed")
+        completion.set_result(True)
+
+    async def test_close_during_speech_after_prepare_writes_failed(self):
+        started = asyncio.Event()
+
+        async def blocked_speech(*_args, **_kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        conn = SimpleNamespace(
+            device_id="AA:BB",
+            headers={"device-id": "AA:BB"},
+            proactive_preferences=safe_local_preferences(),
+            sentence_id="old",
+            abort_generation=1,
+            client_abort=False,
+            connection_closed_event=asyncio.Event(),
+            _proactive_audit_tasks=set(),
+            _proactive_background_tasks=set(),
+            _proactive_habit_tasks=set(),
+            _proactive_delivery_futures=set(),
+        )
+        params = {
+            **_event_fields(),
+            "version": 1,
+            "follow_up": True,
+            "source_id": 7,
+            "label": "喝水",
+            "speak": True,
+        }
+        status = AsyncMock()
+        with patch.object(
+            mcp_handler,
+            "create_proactive_event",
+            AsyncMock(return_value={"delivery_status": "pending"}),
+        ) as create, patch.object(
+            mcp_handler, "update_proactive_event_status", status
+        ), patch.object(
+            mcp_handler, "_speak_proactive_notification", side_effect=blocked_speech
+        ):
+            notification = asyncio.create_task(
+                mcp_handler._handle_schedule_follow_up_notification(conn, params)
+            )
+            conn._proactive_background_tasks.add(notification)
+            await started.wait()
+            conn.connection_closed_event.set()
+            await ConnectionHandler._finish_and_cancel_proactive_tasks(conn)
+        self.assertTrue(notification.cancelled())
+        self.assertEqual(2, create.await_count)
+        status.assert_awaited_once_with("event-1", "AA:BB", "failed", "failed")
+
+    async def test_reminder_invitation_speech_error_is_audited_failed(self):
+        conn = SimpleNamespace(
+            device_id="AA:BB",
+            headers={"device-id": "AA:BB"},
+            proactive_preferences=safe_local_preferences(),
+            sentence_id="old",
+            abort_generation=0,
+            client_abort=False,
+        )
+        params = {
+            "version": 1,
+            "id": 7,
+            "kind": "reminder",
+            "label": "喝水",
+            "triggered_at": "2026-08-10T08:00:00",
+            "speak": True,
+        }
+        status = AsyncMock()
+        with patch.object(
+            mcp_handler, "claim_proactive_opportunity", return_value=True
+        ), patch.object(
+            mcp_handler,
+            "_speak_proactive_notification",
+            AsyncMock(side_effect=RuntimeError("tts failed")),
+        ), patch(
+            "core.providers.tools.device_mcp.proactive_audit.create_proactive_event",
+            AsyncMock(return_value={"delivery_status": "pending"}),
+        ), patch(
+            "core.providers.tools.device_mcp.proactive_audit.update_proactive_event_status",
+            status,
+        ):
+            with self.assertRaises(RuntimeError):
+                await mcp_handler._handle_schedule_triggered_notification(conn, params)
+            await asyncio.gather(*conn._proactive_audit_tasks)
+        self.assertEqual("failed", status.await_args.args[2])
+
+    async def test_weather_suggestion_cancel_is_audited_failed(self):
+        conn = SimpleNamespace(
+            device_id="AA:BB",
+            headers={"device-id": "AA:BB"},
+            proactive_preferences=safe_local_preferences(),
+            sentence_id="old",
+            abort_generation=0,
+            client_abort=False,
+        )
+        params = {
+            "version": 1,
+            "id": 17,
+            "event_id": "17-20260810T080000",
+            "triggered_at": "2026-08-10T08:00:00",
+            "workflow": "daily_briefing",
+            "sections": ["weather"],
+            "location": "广州",
+            "speak": True,
+        }
+
+        async def briefing(_conn, _sections, _location, suggestion_topics=None):
+            suggestion_topics.append("weather")
+            return "天气简报。记得带伞。"
+
+        status = AsyncMock()
+        with patch.object(
+            mcp_handler, "build_daily_briefing", side_effect=briefing
+        ), patch.object(
+            mcp_handler, "capture_netease_briefing_resume", return_value=None
+        ), patch.object(
+            mcp_handler,
+            "_speak_proactive_notification",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ), patch(
+            "core.providers.tools.device_mcp.proactive_audit.create_proactive_event",
+            AsyncMock(return_value={"delivery_status": "pending"}),
+        ), patch(
+            "core.providers.tools.device_mcp.proactive_audit.update_proactive_event_status",
+            status,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await mcp_handler._handle_assistant_triggered_notification(conn, params)
+            await asyncio.gather(*conn._proactive_audit_tasks)
+        self.assertEqual("failed", status.await_args.args[2])
+
+    def test_all_tts_thread_overrides_forward_completion_contract(self):
+        provider_files = (
+            "alibl_stream.py",
+            "aliyun_stream.py",
+            "huoshan_double_stream.py",
+            "index_stream.py",
+            "minimax_httpstream.py",
+            "xunfei_stream.py",
+        )
+        root = Path(__file__).parents[1] / "core/providers/tts"
+        for filename in provider_files:
+            source = (root / filename).read_text(encoding="utf-8")
+            self.assertTrue(
+                "_forward_sentence_completion(message)" in source
+                or "_defer_remote_sentence_completion(message)" in source,
+                filename,
+            )
+            self.assertIn("_mark_sentence_completion_failed(message)", source, filename)
+
+    def test_all_tts_thread_overrides_forward_middle_completion(self):
+        module_names = (
+            "alibl_stream",
+            "aliyun_stream",
+            "huoshan_double_stream",
+            "index_stream",
+            "minimax_httpstream",
+            "xunfei_stream",
+        )
+
+        class StopAfterOne:
+            def __init__(self):
+                self.calls = 0
+
+            def is_set(self):
+                self.calls += 1
+                return self.calls > 1
+
+        for module_name in module_names:
+            provider_class = importlib.import_module(
+                f"core.providers.tts.{module_name}"
+            ).TTSProvider
+            provider = provider_class.__new__(provider_class)
+            provider.conn = SimpleNamespace(
+                stop_event=StopAfterOne(), client_abort=False, sentence_id="sid"
+            )
+            provider.tts_text_queue = queue.Queue()
+            provider.tts_audio_queue = queue.Queue()
+            provider.text_seq = 0
+            completion = threading.Event()
+            provider.tts_text_queue.put(
+                mcp_handler.TTSMessageDTO(
+                    sentence_id="sid",
+                    sentence_type=mcp_handler.SentenceType.MIDDLE,
+                    content_type=mcp_handler.ContentType.ACTION,
+                    completion_event=completion,
+                )
+            )
+            provider.tts_text_priority_thread()
+            if module_name in {
+                "alibl_stream",
+                "aliyun_stream",
+                "huoshan_double_stream",
+            }:
+                self.assertTrue(provider.tts_audio_queue.empty(), module_name)
+                provider._complete_remote_sentence("sid")
+            forwarded = provider.tts_audio_queue.get_nowait()
+            self.assertIs(forwarded[4], completion, module_name)
+
+    def test_remote_completion_is_queued_after_received_audio_and_failure_is_direct(self):
+        from core.providers.tts.base import TTSProviderBase
+
+        class ConcreteProvider(TTSProviderBase):
+            async def text_to_speak(self, text, output_file):
+                return None
+
+        provider = ConcreteProvider.__new__(ConcreteProvider)
+        provider.conn = SimpleNamespace(loop=None)
+        provider.tts_audio_queue = queue.Queue()
+        success = threading.Event()
+        message = mcp_handler.TTSMessageDTO(
+            sentence_id="sid",
+            sentence_type=mcp_handler.SentenceType.MIDDLE,
+            content_type=mcp_handler.ContentType.ACTION,
+            completion_event=success,
+        )
+        provider._defer_remote_sentence_completion(message)
+        provider.tts_audio_queue.put((mcp_handler.SentenceType.MIDDLE, b"audio", None, "sid"))
+        provider._complete_remote_sentence("sid")
+        self.assertEqual(b"audio", provider.tts_audio_queue.get_nowait()[1])
+        self.assertIs(success, provider.tts_audio_queue.get_nowait()[4])
+
+        failed = mcp_handler.ProactiveDeliveryCompletion()
+        message.completion_event = failed
+        provider._defer_remote_sentence_completion(message)
+        provider._complete_remote_sentence("sid", succeeded=False)
+        self.assertTrue(failed.is_set())
+        self.assertFalse(failed.succeeded)
+
+    def test_remote_sentence_completion_keeps_fifo_placeholders_and_session_separate(self):
+        from core.providers.tts.base import TTSProviderBase
+
+        class ConcreteProvider(TTSProviderBase):
+            async def text_to_speak(self, text, output_file):
+                return None
+
+        provider = ConcreteProvider.__new__(ConcreteProvider)
+        provider.conn = SimpleNamespace(loop=None)
+        provider.tts_audio_queue = queue.Queue()
+        first = mcp_handler.TTSMessageDTO(
+            sentence_id="sid",
+            sentence_type=mcp_handler.SentenceType.MIDDLE,
+            content_type=mcp_handler.ContentType.TEXT,
+            content_detail="前一段。",
+        )
+        segment_completion = threading.Event()
+        second = mcp_handler.TTSMessageDTO(
+            sentence_id="sid",
+            sentence_type=mcp_handler.SentenceType.MIDDLE,
+            content_type=mcp_handler.ContentType.TEXT,
+            content_detail="后一段。",
+            completion_event=segment_completion,
+        )
+        session_completion = threading.Event()
+        last = mcp_handler.TTSMessageDTO(
+            sentence_id="sid",
+            sentence_type=mcp_handler.SentenceType.LAST,
+            content_type=mcp_handler.ContentType.ACTION,
+            completion_event=session_completion,
+        )
+        for message in (first, second, last):
+            provider._defer_remote_sentence_completion(message)
+
+        provider._complete_remote_sentence("sid")
+        self.assertTrue(provider.tts_audio_queue.empty())
+        self.assertFalse(segment_completion.is_set())
+        self.assertFalse(session_completion.is_set())
+
+        provider._complete_remote_sentence("sid")
+        self.assertIs(
+            segment_completion, provider.tts_audio_queue.get_nowait()[4]
+        )
+        provider._complete_remote_sentence("sid")
+        self.assertTrue(provider.tts_audio_queue.empty())
+        self.assertFalse(session_completion.is_set())
+
+        provider._complete_remote_sentence("sid", all_pending=True)
+        self.assertIs(
+            session_completion, provider.tts_audio_queue.get_nowait()[4]
+        )
+
+    def test_remote_completion_stays_failed_after_an_earlier_segment_failure(self):
+        from core.providers.tts.base import TTSProviderBase
+
+        class ConcreteProvider(TTSProviderBase):
+            async def text_to_speak(self, text, output_file):
+                return None
+
+        provider = ConcreteProvider.__new__(ConcreteProvider)
+        provider.conn = SimpleNamespace(loop=None)
+        provider.tts_audio_queue = queue.Queue()
+        first = mcp_handler.TTSMessageDTO(
+            sentence_id="sid",
+            sentence_type=mcp_handler.SentenceType.MIDDLE,
+            content_type=mcp_handler.ContentType.TEXT,
+            content_detail="失败前段",
+        )
+        completion = mcp_handler.ProactiveDeliveryCompletion()
+        second = mcp_handler.TTSMessageDTO(
+            sentence_id="sid",
+            sentence_type=mcp_handler.SentenceType.MIDDLE,
+            content_type=mcp_handler.ContentType.TEXT,
+            content_detail="成功后段",
+            completion_event=completion,
+        )
+        provider._defer_remote_sentence_completion(first)
+        provider._mark_sentence_completion_failed(first)
+        provider._defer_remote_sentence_completion(second)
+
+        provider._complete_remote_sentence("sid", succeeded=True)
+
+        self.assertTrue(completion.is_set())
+        self.assertFalse(completion.succeeded)
+        self.assertTrue(provider.tts_audio_queue.empty())
+
+    def test_bidirectional_providers_execute_plain_segment_before_completed_segment(self):
+        class StopAfterTwo:
+            def __init__(self):
+                self.calls = 0
+
+            def is_set(self):
+                self.calls += 1
+                return self.calls > 2
+
+        class CompletedFuture:
+            def result(self, timeout=None):
+                return None
+
+        def complete_immediately(coro, loop=None):
+            coro.close()
+            return CompletedFuture()
+
+        for module_name in (
+            "alibl_stream",
+            "aliyun_stream",
+            "huoshan_double_stream",
+        ):
+            module = importlib.import_module(f"core.providers.tts.{module_name}")
+            provider = module.TTSProvider.__new__(module.TTSProvider)
+            provider.conn = SimpleNamespace(
+                stop_event=StopAfterTwo(),
+                client_abort=False,
+                sentence_id="sid",
+                loop=object(),
+            )
+            provider.tts_text_queue = queue.Queue()
+            provider.tts_audio_queue = queue.Queue()
+            provider.tts_timeout = 1
+            completion = threading.Event()
+            provider.tts_text_queue.put(mcp_handler.TTSMessageDTO(
+                sentence_id="sid",
+                sentence_type=mcp_handler.SentenceType.MIDDLE,
+                content_type=mcp_handler.ContentType.TEXT,
+                content_detail="前一段。",
+            ))
+            provider.tts_text_queue.put(mcp_handler.TTSMessageDTO(
+                sentence_id="sid",
+                sentence_type=mcp_handler.SentenceType.MIDDLE,
+                content_type=mcp_handler.ContentType.TEXT,
+                content_detail="后一段。",
+                completion_event=completion,
+            ))
+
+            with patch.object(
+                module.asyncio,
+                "run_coroutine_threadsafe",
+                side_effect=complete_immediately,
+            ):
+                provider.tts_text_priority_thread()
+
+            provider._complete_remote_sentence("sid")
+            self.assertTrue(provider.tts_audio_queue.empty(), module_name)
+            provider._complete_remote_sentence("sid")
+            self.assertIs(
+                completion, provider.tts_audio_queue.get_nowait()[4], module_name
+            )
+
+    def test_tts_one_sentence_keeps_terminal_punctuation_with_completion_segment(self):
+        from core.providers.tts.base import TTSProviderBase
+
+        class ConcreteProvider(TTSProviderBase):
+            async def text_to_speak(self, text, output_file):
+                return None
+
+        provider = ConcreteProvider.__new__(ConcreteProvider)
+        provider.tts_text_queue = queue.Queue()
+        completion = threading.Event()
+        conn = SimpleNamespace(sentence_id="sid")
+
+        provider.tts_one_sentence(
+            conn,
+            mcp_handler.ContentType.TEXT,
+            content_detail="我来处理一下。",
+            completion_event=completion,
+        )
+
+        message = provider.tts_text_queue.get_nowait()
+        self.assertEqual("我来处理一下。", message.content_detail)
+        self.assertIs(completion, message.completion_event)
+        self.assertTrue(provider.tts_text_queue.empty())
+        provider.conn = SimpleNamespace(loop=None)
+        provider.tts_audio_queue = queue.Queue()
+        provider._defer_remote_sentence_completion(message)
+        provider._complete_remote_sentence("sid")
+        self.assertIs(completion, provider.tts_audio_queue.get_nowait()[4])
+
+    async def test_late_tts_future_completion_after_cancel_is_thread_safe(self):
+        loop = asyncio.get_running_loop()
+        completion = loop.create_future()
+        completion.cancel()
+        await asyncio.to_thread(
+            _complete_playback_event,
+            SimpleNamespace(loop=loop),
+            completion,
+            True,
+        )
+        await asyncio.sleep(0)
+        self.assertTrue(completion.cancelled())
+
+    async def test_tts_future_completion_uses_event_loop_thread(self):
+        loop = asyncio.get_running_loop()
+        completion = loop.create_future()
+        worker_id = None
+
+        def complete_from_worker():
+            nonlocal worker_id
+            worker_id = threading.get_ident()
+            _complete_playback_event(SimpleNamespace(loop=loop), completion, True)
+
+        await asyncio.to_thread(complete_from_worker)
+        self.assertTrue(await completion)
+        self.assertNotEqual(worker_id, threading.get_ident())
 
 
 class ManageApiProactiveClientTest(unittest.IsolatedAsyncioTestCase):
@@ -309,6 +1002,10 @@ class ManageApiProactiveClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("PUT", calls[2].args[0])
         self.assertEqual("POST", calls[3].args[0])
         self.assertEqual("GET", calls[4].args[0])
+        for call in calls:
+            self.assertEqual(0.5, call.kwargs["timeout"])
+            self.assertEqual(1, call.kwargs["_max_retries"])
+            self.assertEqual(0.1, call.kwargs["_retry_delay"])
 
 
 class ContextSuggestionTest(unittest.TestCase):
@@ -332,6 +1029,12 @@ class ContextSuggestionTest(unittest.TestCase):
         self.assertIn("带伞", weather_action_suggestion(self.conn, "广州今天有雨。"))
         self.assertEqual("", weather_action_suggestion(self.conn, "广州今天多云。"))
 
+    def test_weather_negation_does_not_suggest_rain_action(self):
+        self.assertEqual("", weather_action_suggestion(self.conn, "广州今天没有雨。"))
+        self.assertEqual("", weather_action_suggestion(self.conn, "广州今天无雨。"))
+        self.assertEqual("", weather_action_suggestion(self.conn, "广州今天不会有雨。"))
+        self.assertEqual("", weather_action_suggestion(self.conn, "广州今天没有阵雨。"))
+
 
 class HabitSuggestionTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -350,10 +1053,13 @@ class HabitSuggestionTest(unittest.IsolatedAsyncioTestCase):
             "core.providers.tools.device_mcp.proactive_habits.create_proactive_event",
             AsyncMock(return_value={"delivery_status": "pending"}),
         ), patch(
-            "core.providers.tools.device_mcp.proactive_habits.update_proactive_event_status",
+            "core.providers.tools.device_mcp.mcp_handler.create_proactive_event",
+            AsyncMock(return_value={"delivery_status": "pending"}),
+        ), patch(
+            "core.providers.tools.device_mcp.mcp_handler.update_proactive_event_status",
             AsyncMock(),
         ) as status, patch.object(
-            mcp_handler, "_speak_proactive_notification", AsyncMock(return_value="sid")
+            mcp_handler, "_speak_proactive_notification", side_effect=_completed_speech
         ) as speak:
             first = await observe_habit_and_maybe_suggest(
                 conn,
@@ -391,10 +1097,13 @@ class HabitSuggestionTest(unittest.IsolatedAsyncioTestCase):
             "core.providers.tools.device_mcp.proactive_habits.create_proactive_event",
             side_effect=record_event,
         ), patch(
-            "core.providers.tools.device_mcp.proactive_habits.update_proactive_event_status",
+            "core.providers.tools.device_mcp.mcp_handler.create_proactive_event",
+            side_effect=record_event,
+        ), patch(
+            "core.providers.tools.device_mcp.mcp_handler.update_proactive_event_status",
             AsyncMock(),
         ), patch.object(
-            mcp_handler, "_speak_proactive_notification", AsyncMock(return_value="sid")
+            mcp_handler, "_speak_proactive_notification", side_effect=_completed_speech
         ):
             for _index in range(2):
                 reset_proactive_policy_for_test()
@@ -433,10 +1142,13 @@ class HabitSuggestionTest(unittest.IsolatedAsyncioTestCase):
             "core.providers.tools.device_mcp.proactive_habits.create_proactive_event",
             side_effect=existing_status,
         ), patch(
-            "core.providers.tools.device_mcp.proactive_habits.update_proactive_event_status",
+            "core.providers.tools.device_mcp.mcp_handler.create_proactive_event",
+            AsyncMock(return_value={"delivery_status": "pending"}),
+        ), patch(
+            "core.providers.tools.device_mcp.mcp_handler.update_proactive_event_status",
             AsyncMock(),
         ), patch.object(
-            mcp_handler, "_speak_proactive_notification", AsyncMock(return_value="sid")
+            mcp_handler, "_speak_proactive_notification", side_effect=_completed_speech
         ) as speak:
             old_result = await suggest_habit_candidate(
                 conn, {**base, "habit_key": "music:category:old"}

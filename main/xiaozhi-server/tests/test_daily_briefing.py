@@ -110,7 +110,9 @@ class DailyBriefingTest(unittest.IsolatedAsyncioTestCase):
         ) as schedule_resume:
             await handle_mcp_message(conn, MCPClient(), payload)
             await handle_mcp_message(conn, MCPClient(), payload)
-        build.assert_awaited_once_with(conn, ["weather", "news"], "广州")
+        build.assert_awaited_once()
+        self.assertEqual((conn, ["weather", "news"], "广州"), build.await_args.args)
+        self.assertEqual([], build.await_args.kwargs["suggestion_topics"])
         capture.assert_called_once_with(conn, 0)
         speak.assert_awaited_once_with(
             conn,
@@ -183,11 +185,8 @@ class DailyBriefingTest(unittest.IsolatedAsyncioTestCase):
             )
 
         reminder_call, alarm_call = speak.await_args_list
-        reminder_transform = reminder_call.kwargs["text_transform"]
-        self.assertIn(
-            "处理完告诉我一声",
-            reminder_transform(reminder_call.args[1]),
-        )
+        self.assertIn("处理完告诉我一声", reminder_call.args[1])
+        self.assertIsNone(reminder_call.kwargs["text_transform"])
         self.assertIsNone(alarm_call.kwargs["text_transform"])
 
     async def test_rejects_event_id_that_does_not_match_occurrence(self):

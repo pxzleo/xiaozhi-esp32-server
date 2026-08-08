@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import Future
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -40,6 +41,8 @@ SCHEDULE_FOLLOW_UP_METHOD = "notifications/schedule/follow_up"
 DEVICE_HEALTH_METHOD = "notifications/device/health"
 PROACTIVE_TTS_READY_TIMEOUT_SECONDS = 2
 DEVICE_REMINDER_TTS_WAIT_SECONDS = 15
+PROACTIVE_DELIVERY_TIMEOUT_SECONDS = 120
+MAX_SEEN_NOTIFICATION_EVENTS = 256
 _LOCAL_DATETIME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
 _INTEGER_STRING_PATTERN = re.compile(r"^\d+$")
 _SIGNED_INTEGER_STRING_PATTERN = re.compile(r"^-?\d+$")
@@ -52,6 +55,20 @@ _HEALTH_KINDS = {
 }
 _HEALTH_SEVERITIES = {"info", "warning", "critical"}
 _event_claim_lock = threading.Lock()
+
+
+class ProactiveDeliveryCompletion(threading.Event):
+    def __init__(self):
+        super().__init__()
+        self.succeeded = False
+        self._result_lock = threading.Lock()
+
+    def set_result(self, succeeded):
+        with self._result_lock:
+            if self.is_set():
+                return
+            self.succeeded = succeeded is True
+            self.set()
 
 
 def capture_netease_briefing_resume(conn, abort_generation):
@@ -383,6 +400,8 @@ def _validate_unified_event(params, expected_topics):
             raise ValueError(f"通知{name}无效")
     if created_at and expires_at <= created_at:
         raise ValueError("通知过期时间无效")
+    if expires_at <= int(time.time()):
+        raise ValueError("通知已过期")
     if not isinstance(dedupe_key, str) or not dedupe_key or len(dedupe_key) > 96:
         raise ValueError("通知去重键无效")
     if not isinstance(requires_response, bool):
@@ -402,14 +421,20 @@ def _validate_unified_event(params, expected_topics):
 def _claim_notification_event(conn, event_id):
     with _event_claim_lock:
         seen = getattr(conn, "_proactive_notification_events", None)
+        order = getattr(conn, "_proactive_notification_event_order", None)
         if seen is None:
             seen = set()
             conn._proactive_notification_events = seen
+        if order is None:
+            order = deque()
+            conn._proactive_notification_event_order = order
         if event_id in seen:
             return False
-        if len(seen) >= 256:
-            seen.clear()
+        if len(seen) >= MAX_SEEN_NOTIFICATION_EVENTS:
+            oldest = order.popleft()
+            seen.discard(oldest)
         seen.add(event_id)
+        order.append(event_id)
         return True
 
 
@@ -427,17 +452,16 @@ def _iso_timestamp(value):
     return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-async def _audit_proactive_delivery(conn, event, payload, delivered):
+def _build_proactive_audit(conn, event, payload):
     mac_address = getattr(conn, "device_id", None)
     if not isinstance(mac_address, str) or not mac_address:
-        logger.bind(tag=TAG).error("积极主动审计失败: 设备MAC缺失")
-        return
+        raise ValueError("设备MAC缺失")
     created_at = event["created_at"] or int(time.time())
     expires_at = event["expires_at"]
     if expires_at <= created_at:
         expires_at = created_at + 3600
     audit_event_id = _manager_event_id(event["event_id"])
-    audit = {
+    return {
         "mac_address": mac_address,
         "event_id": audit_event_id,
         "topic": _manager_topic(event["topic"]),
@@ -450,22 +474,79 @@ async def _audit_proactive_delivery(conn, event, payload, delivered):
         "dedupe_key": event["dedupe_key"],
         "requires_response": event["requires_response"],
     }
+
+
+async def _prepare_proactive_audit(audit):
+    try:
+        stored = await create_proactive_event(audit)
+        return isinstance(stored, dict) and stored.get("delivery_status") == "delivered"
+    except Exception as error:
+        logger.bind(tag=TAG).error(
+            f"积极主动事件预审计失败: {type(error).__name__}"
+        )
+        return False
+
+
+async def _wait_for_proactive_delivery(
+    conn, completion, sentence_id, abort_generation
+):
+    deadline = asyncio.get_running_loop().time() + PROACTIVE_DELIVERY_TIMEOUT_SECONDS
+    while asyncio.get_running_loop().time() < deadline:
+        if completion.is_set():
+            return (
+                completion.succeeded
+                and _connection_is_active(conn)
+                and getattr(conn, "sentence_id", None) == sentence_id
+                and getattr(conn, "abort_generation", 0) == abort_generation
+                and not getattr(conn, "client_abort", False)
+            )
+        if (
+            not _connection_is_active(conn)
+            or getattr(conn, "sentence_id", None) != sentence_id
+            or getattr(conn, "abort_generation", 0) != abort_generation
+            or getattr(conn, "client_abort", False)
+        ):
+            return False
+        await asyncio.sleep(0.05)
+    logger.bind(tag=TAG).error("积极主动通知等待TTS完成超时")
+    return False
+
+
+async def _audit_proactive_delivery(audit, delivery_result):
+    mac_address = audit["mac_address"]
+    audit_event_id = audit["event_id"]
     try:
         await create_proactive_event(audit)
+        delivered = (
+            await delivery_result
+            if hasattr(delivery_result, "__await__")
+            else delivery_result is True
+        )
         await update_proactive_event_status(
             audit_event_id,
             mac_address,
             "delivered" if delivered else "failed",
             "none" if delivered else "failed",
         )
+        return True
+    except asyncio.CancelledError:
+        raise
     except Exception as error:
+        if isinstance(delivery_result, asyncio.Future):
+            if not delivery_result.done():
+                delivery_result.set_result(False)
+        else:
+            close = getattr(delivery_result, "close", None)
+            if callable(close):
+                close()
         logger.bind(tag=TAG).error(
             f"积极主动事件审计失败: {type(error).__name__}"
         )
+        return False
 
 
-def _schedule_delivery_audit(conn, event, payload, delivered):
-    task = asyncio.create_task(_audit_proactive_delivery(conn, event, payload, delivered))
+def _schedule_delivery_audit(conn, audit, delivery_result):
+    task = asyncio.create_task(_audit_proactive_delivery(audit, delivery_result))
     tasks = getattr(conn, "_proactive_audit_tasks", None)
     if tasks is None:
         tasks = set()
@@ -473,6 +554,46 @@ def _schedule_delivery_audit(conn, event, payload, delivered):
     tasks.add(task)
     task.add_done_callback(tasks.discard)
     return task
+
+
+def _new_delivery_lifecycle(conn, audit):
+    delivery_future = _new_delivery_future(conn)
+    return delivery_future, _schedule_delivery_audit(conn, audit, delivery_future)
+
+
+def _new_delivery_future(conn):
+    delivery_future = asyncio.get_running_loop().create_future()
+    futures = getattr(conn, "_proactive_delivery_futures", None)
+    if futures is None:
+        futures = set()
+        conn._proactive_delivery_futures = futures
+    futures.add(delivery_future)
+    delivery_future.add_done_callback(futures.discard)
+    return delivery_future
+
+
+def _resolve_delivery_lifecycle(conn, delivery_future, delivery_result):
+    async def resolve():
+        delivered = False
+        try:
+            delivered = await delivery_result
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.bind(tag=TAG).error(
+                f"积极主动投递完成检查失败: {type(error).__name__}"
+            )
+        finally:
+            if not delivery_future.done():
+                delivery_future.set_result(delivered is True)
+
+    task = asyncio.create_task(resolve())
+    tasks = getattr(conn, "_proactive_audit_tasks", None)
+    if tasks is None:
+        tasks = set()
+        conn._proactive_audit_tasks = tasks
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
 
 
 def _schedule_visible_background_task(conn, coroutine, name):
@@ -510,8 +631,8 @@ async def _sync_preference_with_retry(conn, preference):
 async def _sync_followup_outcome_after_audit(
     audit_task, event_id, mac_address, delivery_status, outcome
 ):
-    if isinstance(audit_task, asyncio.Task):
-        await audit_task
+    if not isinstance(audit_task, asyncio.Task) or await audit_task is not True:
+        raise RuntimeError("follow-up初始审计未成功")
     await update_proactive_event_status(
         event_id, mac_address, delivery_status, outcome
     )
@@ -581,7 +702,19 @@ def handle_successful_device_tool_result(conn, actual_name, result):
     }
     if actual_name in schedule_outcomes:
         event_id = getattr(conn, "_current_followup_audit_event_id", None)
+        expected_source_id = getattr(conn, "_current_followup_source_id", None)
         mac_address = getattr(conn, "device_id", None)
+        result_data = result.get("data")
+        result_source_id = (
+            result_data.get("source_id") if isinstance(result_data, dict) else None
+        )
+        if (
+            not isinstance(result_source_id, int)
+            or isinstance(result_source_id, bool)
+            or result_source_id != expected_source_id
+        ):
+            logger.bind(tag=TAG).warning("follow-up结果来源不匹配，拒绝回写")
+            return
         if isinstance(event_id, str) and isinstance(mac_address, str):
             delivery_status, outcome = schedule_outcomes[actual_name]
             audit_task = getattr(conn, "_current_followup_audit_task", None)
@@ -625,6 +758,14 @@ async def _handle_schedule_follow_up_notification(conn, params, notification_sta
     except ValueError as error:
         logger.bind(tag=TAG).warning(str(error))
         return
+    audit = _build_proactive_audit(
+        conn,
+        event,
+        {"title": "完成跟进", "reference_id": str(source_id), "source": "device"},
+    )
+    if await _prepare_proactive_audit(audit):
+        logger.bind(tag=TAG).info("忽略manager已投递的完成跟进通知")
+        return
     if not _claim_notification_event(conn, event["event_id"]):
         logger.bind(tag=TAG).info("忽略重复的完成跟进通知")
         return
@@ -634,22 +775,43 @@ async def _handle_schedule_follow_up_notification(conn, params, notification_sta
         cooldown_seconds=30 * 60,
         policy_topic="reminder",
     ):
-        _schedule_delivery_audit(
-            conn, event, {"title": "完成跟进", "reference_id": str(source_id), "source": "device"}, False
-        )
+        _schedule_delivery_audit(conn, audit, False)
         return
     conn._current_followup_event_id = event["event_id"]
     conn._current_followup_audit_event_id = _manager_event_id(event["event_id"])
     conn._current_followup_source_id = source_id
-    sentence_id = await _speak_proactive_notification(
-        conn, f"刚才提醒的{label.strip()}完成了吗？", "完成跟进", notification_state
+    delivery_future, conn._current_followup_audit_task = _new_delivery_lifecycle(
+        conn, audit
     )
-    conn._current_followup_audit_task = _schedule_delivery_audit(
-        conn,
-        event,
-        {"title": "完成跟进", "reference_id": str(source_id), "source": "device"},
-        sentence_id is not None,
+    completion = ProactiveDeliveryCompletion()
+    abort_generation = (
+        notification_state[1]
+        if notification_state is not None
+        else getattr(conn, "abort_generation", 0)
     )
+    try:
+        sentence_id = await _speak_proactive_notification(
+            conn,
+            f"刚才提醒的{label.strip()}完成了吗？",
+            "完成跟进",
+            notification_state,
+            completion_event=completion,
+        )
+    except BaseException:
+        if not delivery_future.done():
+            delivery_future.set_result(False)
+        raise
+    if sentence_id is None:
+        if not delivery_future.done():
+            delivery_future.set_result(False)
+    else:
+        _resolve_delivery_lifecycle(
+            conn,
+            delivery_future,
+            _wait_for_proactive_delivery(
+                conn, completion, sentence_id, abort_generation
+            ),
+        )
 
 
 def _validate_health_details(kind, recovered, details):
@@ -720,6 +882,14 @@ async def _handle_device_health_notification(conn, params, notification_state=No
     except ValueError as error:
         logger.bind(tag=TAG).warning(str(error))
         return
+    audit = _build_proactive_audit(
+        conn,
+        event,
+        {"title": "设备健康", "reference_id": kind, "source": "device"},
+    )
+    if await _prepare_proactive_audit(audit):
+        logger.bind(tag=TAG).info("忽略manager已投递的设备健康通知")
+        return
     if not _claim_notification_event(conn, event["event_id"]):
         logger.bind(tag=TAG).info("忽略重复的设备健康通知")
         return
@@ -731,19 +901,38 @@ async def _handle_device_health_notification(conn, params, notification_state=No
         policy_topic="health",
     )
     if not allowed:
-        _schedule_delivery_audit(
-            conn, event, {"title": "设备健康", "reference_id": kind, "source": "device"}, False
-        )
+        _schedule_delivery_audit(conn, audit, False)
         return
-    sentence_id = await _speak_proactive_notification(
-        conn, _health_text(kind, recovered), "设备健康", notification_state
+    delivery_future, _audit_task = _new_delivery_lifecycle(conn, audit)
+    completion = ProactiveDeliveryCompletion()
+    abort_generation = (
+        notification_state[1]
+        if notification_state is not None
+        else getattr(conn, "abort_generation", 0)
     )
-    _schedule_delivery_audit(
-        conn,
-        event,
-        {"title": "设备健康", "reference_id": kind, "source": "device"},
-        sentence_id is not None,
-    )
+    try:
+        sentence_id = await _speak_proactive_notification(
+            conn,
+            _health_text(kind, recovered),
+            "设备健康",
+            notification_state,
+            completion_event=completion,
+        )
+    except BaseException:
+        if not delivery_future.done():
+            delivery_future.set_result(False)
+        raise
+    if sentence_id is None:
+        if not delivery_future.done():
+            delivery_future.set_result(False)
+    else:
+        _resolve_delivery_lifecycle(
+            conn,
+            delivery_future,
+            _wait_for_proactive_delivery(
+                conn, completion, sentence_id, abort_generation
+            ),
+        )
 
 
 async def _handle_schedule_triggered_notification(
@@ -798,40 +987,60 @@ async def _handle_schedule_triggered_notification(
     else:
         text = f"提醒你：{normalized_label}"
         notification_name = "日程提醒"
-        completion_invited = False
-
-        def add_completion_invitation(base_text):
-            nonlocal completion_invited
-            if claim_proactive_opportunity(
-                conn,
-                "reminder_completion",
-                cooldown_seconds=30 * 60,
-            ):
-                completion_invited = True
-                return base_text + "。处理完告诉我一声"
-            return base_text
-
-        text_transform = add_completion_invitation
+        completion_invited = claim_proactive_opportunity(
+            conn,
+            "reminder_completion",
+            cooldown_seconds=30 * 60,
+        )
+        if completion_invited:
+            text += "。处理完告诉我一声"
+        text_transform = None
     if schedule_kind == "alarm":
         text_transform = None
-    sentence_id = await _speak_proactive_notification(
-        conn,
-        text,
-        notification_name,
-        notification_state,
-        text_transform=text_transform,
+    completion = ProactiveDeliveryCompletion() if schedule_kind == "reminder" else None
+    abort_generation = (
+        notification_state[1]
+        if notification_state is not None
+        else getattr(conn, "abort_generation", 0)
     )
+    invitation_future = None
     if schedule_kind == "reminder" and completion_invited:
         from core.providers.tools.device_mcp.proactive_audit import (
             schedule_server_suggestion_audit,
         )
 
+        invitation_future = _new_delivery_future(conn)
         schedule_server_suggestion_audit(
             conn,
             "reminder",
             "reminder completion invitation",
             reference_id=str(schedule_id),
-            delivered=sentence_id is not None,
+            delivered=invitation_future,
+        )
+    try:
+        sentence_id = await _speak_proactive_notification(
+            conn,
+            text,
+            notification_name,
+            notification_state,
+            completion_event=completion,
+            text_transform=text_transform,
+        )
+    except BaseException:
+        if invitation_future is not None and not invitation_future.done():
+            invitation_future.set_result(False)
+        raise
+    if schedule_kind == "reminder" and completion_invited:
+        _resolve_delivery_lifecycle(
+            conn,
+            invitation_future,
+            (
+                _wait_for_proactive_delivery(
+                    conn, completion, sentence_id, abort_generation
+                )
+                if sentence_id is not None
+                else asyncio.sleep(0, result=False)
+            ),
         )
 
 
@@ -906,14 +1115,31 @@ async def _handle_assistant_triggered_notification(
     if len(seen) >= 64:
         seen.clear()
     seen.add(event_id)
-    text = await build_daily_briefing(conn, sections, location)
+    suggestion_topics = []
+    text = await build_daily_briefing(
+        conn, sections, location, suggestion_topics=suggestion_topics
+    )
     abort_generation = (
         notification_state[1]
         if notification_state is not None
         else getattr(conn, "abort_generation", 0)
     )
     resume_token = capture_netease_briefing_resume(conn, abort_generation)
-    completion_event = threading.Event() if resume_token is not None else None
+    completion_event = ProactiveDeliveryCompletion()
+    weather_future = None
+    if "weather" in suggestion_topics:
+        from core.providers.tools.device_mcp.proactive_audit import (
+            schedule_server_suggestion_audit,
+        )
+
+        weather_future = _new_delivery_future(conn)
+        schedule_server_suggestion_audit(
+            conn,
+            "weather",
+            "weather keyword action",
+            reference_id="daily_briefing_weather",
+            delivered=weather_future,
+        )
     try:
         proactive_sentence_id = await _speak_proactive_notification(
             conn,
@@ -922,7 +1148,9 @@ async def _handle_assistant_triggered_notification(
             notification_state,
             completion_event=completion_event,
         )
-    except Exception:
+    except BaseException:
+        if weather_future is not None and not weather_future.done():
+            weather_future.set_result(False)
         if resume_token is not None:
             completion_event.set()
             schedule_netease_briefing_resume(
@@ -950,6 +1178,21 @@ async def _handle_assistant_triggered_notification(
                 "topic": "habit",
             },
             allow_suggestion=False,
+        )
+    if weather_future is not None:
+        _resolve_delivery_lifecycle(
+            conn,
+            weather_future,
+            (
+                _wait_for_proactive_delivery(
+                    conn,
+                    completion_event,
+                    proactive_sentence_id,
+                    abort_generation,
+                )
+                if proactive_sentence_id is not None
+                else asyncio.sleep(0, result=False)
+            ),
         )
     if resume_token is not None:
         if proactive_sentence_id is None:
@@ -1108,6 +1351,9 @@ async def _stop_superseded_proactive_start(
 def _connection_is_active(conn):
     connection_state = vars(conn)
     if connection_state.get("_closed", False):
+        return False
+    connection_closed_event = connection_state.get("connection_closed_event")
+    if connection_closed_event is not None and connection_closed_event.is_set():
         return False
     stop_event = connection_state.get("stop_event")
     return stop_event is None or not stop_event.is_set()

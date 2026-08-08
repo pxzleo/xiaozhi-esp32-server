@@ -184,6 +184,8 @@ class NeteasePlaybackState:
     source_playlist_id: str = ""
     intelligence_eligible: bool = False
     interrupted_abort_generation: object = None
+    pending_suggestion_audit: object = None
+    active_suggestion_delivery: object = None
 
 
 @dataclass(frozen=True)
@@ -1689,6 +1691,16 @@ def _build_rolling_loader(client, cache, pending_tracks, batch_size, timeout_sec
 
 def _cancel_playback_task(state):
     state.generation += 1
+    pending_audit = state.pending_suggestion_audit
+    if pending_audit is not None:
+        delivery_future, _abort_generation, _sentence_id = pending_audit
+        if not delivery_future.done():
+            delivery_future.set_result(False)
+        state.pending_suggestion_audit = None
+    active_delivery = state.active_suggestion_delivery
+    if active_delivery is not None and not active_delivery.done():
+        active_delivery.set_result(False)
+    state.active_suggestion_delivery = None
     task = state.task
     if task and not task.done():
         task.cancel()
@@ -1862,6 +1874,7 @@ def _schedule_lyrics_clear(conn, reason):
 
 def _enqueue_playback_end(conn):
     suggestion = ""
+    suggestion_completion = None
     if claim_proactive_opportunity(
         conn,
         "music_continue",
@@ -1881,15 +1894,38 @@ def _enqueue_playback_end(conn):
         from core.providers.tools.device_mcp.proactive_audit import (
             schedule_server_suggestion_audit,
         )
+        from core.providers.tools.device_mcp.mcp_handler import (
+            ProactiveDeliveryCompletion,
+            _new_delivery_future,
+            _resolve_delivery_lifecycle,
+            _wait_for_proactive_delivery,
+        )
 
+        suggestion_completion = ProactiveDeliveryCompletion()
+        delivery_future = _new_delivery_future(conn)
         schedule_server_suggestion_audit(
-            conn, "music", "music queue completed", reference_id="music_continue"
+            conn,
+            "music",
+            "music queue completed",
+            reference_id="music_continue",
+            delivered=delivery_future,
+        )
+        _resolve_delivery_lifecycle(
+            conn,
+            delivery_future,
+            _wait_for_proactive_delivery(
+                conn,
+                suggestion_completion,
+                conn.sentence_id,
+                getattr(conn, "abort_generation", 0),
+            ),
         )
     conn.tts.tts_text_queue.put(
         TTSMessageDTO(
             sentence_id=conn.sentence_id,
             sentence_type=SentenceType.LAST,
             content_type=ContentType.ACTION,
+            completion_event=suggestion_completion,
         )
     )
     conn.server_audio_playback_sentence_id = None
@@ -1950,7 +1986,16 @@ async def _run_playback(conn, state, generation, prompt):
                         f"获取《{_song_title(song)}》歌词失败: {exc}"
                     )
             playback_event = _build_lyrics_start_event(song, lyric_text)
-            completion_event = threading.Event()
+            if start_session and state.pending_suggestion_audit is not None:
+                from core.providers.tools.device_mcp.mcp_handler import (
+                    ProactiveDeliveryCompletion,
+                    _resolve_delivery_lifecycle,
+                    _wait_for_proactive_delivery,
+                )
+
+                completion_event = ProactiveDeliveryCompletion()
+            else:
+                completion_event = threading.Event()
             _enqueue_track(
                 conn,
                 prompt if start_session else "",
@@ -1960,6 +2005,28 @@ async def _run_playback(conn, state, generation, prompt):
                 start_session,
                 playback_event,
             )
+            if start_session and state.pending_suggestion_audit is not None:
+                delivery_future, audit_abort_generation, audit_sentence_id = (
+                    state.pending_suggestion_audit
+                )
+                state.pending_suggestion_audit = None
+                state.active_suggestion_delivery = delivery_future
+
+                def clear_active_suggestion(completed_future):
+                    if state.active_suggestion_delivery is completed_future:
+                        state.active_suggestion_delivery = None
+
+                delivery_future.add_done_callback(clear_active_suggestion)
+                _resolve_delivery_lifecycle(
+                    conn,
+                    delivery_future,
+                    _wait_for_proactive_delivery(
+                        conn,
+                        completion_event,
+                        audit_sentence_id,
+                        audit_abort_generation,
+                    ),
+                )
             prompt = ""
             start_session = False
             while not completion_event.is_set():
@@ -1992,6 +2059,7 @@ def _start_playback(
     lyrics_loader=None,
     source_playlist_id="",
     intelligence_eligible=False,
+    pending_suggestion_audit=None,
 ):
     previous = getattr(conn, "_netease_playback", None)
     if previous:
@@ -2015,6 +2083,7 @@ def _start_playback(
         lyrics_loader=lyrics_loader,
         source_playlist_id=source_playlist_id,
         intelligence_eligible=intelligence_eligible,
+        pending_suggestion_audit=pending_suggestion_audit,
     )
     _protect_playback_state(state)
     conn._netease_playback = state
@@ -2274,25 +2343,45 @@ async def play_netease_music(
                     prepare_timeout,
                 )
             late_night_suggestion = _late_night_music_suggestion(conn)
+            pending_suggestion_audit = None
             if late_night_suggestion:
                 prompt = f"{prompt}。{late_night_suggestion}"
                 from core.providers.tools.device_mcp.proactive_audit import (
                     schedule_server_suggestion_audit,
                 )
+                from core.providers.tools.device_mcp.mcp_handler import (
+                    _new_delivery_future,
+                )
 
+                delivery_future = _new_delivery_future(conn)
                 schedule_server_suggestion_audit(
                     conn,
                     "music",
                     "late night music started",
                     reference_id="music_late_night",
+                    delivered=delivery_future,
                 )
-            _start_playback(
-                conn,
-                prompt,
-                resolved,
-                load_more=load_more,
-                lyrics_loader=client.lyrics,
-            )
+                pending_suggestion_audit = (
+                    delivery_future,
+                    getattr(conn, "abort_generation", 0),
+                    conn.sentence_id,
+                )
+            try:
+                _start_playback(
+                    conn,
+                    prompt,
+                    resolved,
+                    load_more=load_more,
+                    lyrics_loader=client.lyrics,
+                    pending_suggestion_audit=pending_suggestion_audit,
+                )
+            except BaseException:
+                if (
+                    pending_suggestion_audit is not None
+                    and not pending_suggestion_audit[0].done()
+                ):
+                    pending_suggestion_audit[0].set_result(False)
+                raise
         if skipped:
             conn.logger.bind(tag=TAG).warning(
                 f"网易云播放队列跳过 {len(skipped)} 首不可播放歌曲: {'; '.join(skipped)}"
@@ -2369,7 +2458,13 @@ def _music_failure_response(conn, message):
         )
 
         schedule_server_suggestion_audit(
-            conn, "music", "music service failures", reference_id="music_service_fault"
+            conn,
+            "music",
+            "music service failures",
+            reference_id="music_service_fault",
+            # 此文本随普通工具结果进入后续TTS，当前调用点没有播放完成句柄；
+            # 明确记为failed，禁止仅凭生成了响应文本写delivered。
+            delivered=False,
         )
         return f"{message}。音乐服务已经连续失败，要不要我帮你检查登录状态？"
     return message

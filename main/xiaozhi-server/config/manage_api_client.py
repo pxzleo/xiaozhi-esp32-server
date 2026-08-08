@@ -144,20 +144,22 @@ class ManageApiClient:
         """带重试机制的异步请求执行器"""
         import asyncio
 
+        max_retries = kwargs.pop("_max_retries", cls.max_retries)
+        retry_delay = kwargs.pop("_retry_delay", cls.retry_delay)
         retry_count = 0
 
-        while retry_count <= cls.max_retries:
+        while retry_count <= max_retries:
             try:
                 # 执行异步请求
                 return await cls._async_request(method, endpoint, **kwargs)
             except Exception as e:
                 # 判断是否应该重试
-                if retry_count < cls.max_retries and cls._should_retry(e):
+                if retry_count < max_retries and cls._should_retry(e):
                     retry_count += 1
                     print(
-                        f"{method} {endpoint} 异步请求失败，将在 {cls.retry_delay:.1f} 秒后进行第 {retry_count} 次重试"
+                        f"{method} {endpoint} 异步请求失败，将在 {retry_delay:.1f} 秒后进行第 {retry_count} 次重试"
                     )
-                    await asyncio.sleep(cls.retry_delay)
+                    await asyncio.sleep(retry_delay)
                     continue
                 else:
                     # 不重试，直接抛出明确的类型。
@@ -186,16 +188,27 @@ def _require_manager_client() -> ManageApiClient:
     return client
 
 
+async def _execute_proactive_request(method: str, endpoint: str, **kwargs):
+    return await _require_manager_client()._execute_async_request(
+        method,
+        endpoint,
+        timeout=0.5,
+        _max_retries=1,
+        _retry_delay=0.1,
+        **kwargs,
+    )
+
+
 async def get_proactive_preference(mac_address: str) -> Dict:
     """读取设备积极主动偏好。"""
-    return await _require_manager_client()._execute_async_request(
+    return await _execute_proactive_request(
         "GET", f"/config/proactive/preferences/{quote(mac_address, safe='')}"
     )
 
 
 async def update_proactive_preference(mac_address: str, preference: Dict) -> Dict:
     """同步设备端已成功更新的积极主动偏好。"""
-    return await _require_manager_client()._execute_async_request(
+    return await _execute_proactive_request(
         "PUT",
         f"/config/proactive/preferences/{quote(mac_address, safe='')}",
         json=preference,
@@ -204,7 +217,7 @@ async def update_proactive_preference(mac_address: str, preference: Dict) -> Dic
 
 async def create_proactive_event(event: Dict) -> Dict:
     """幂等写入积极主动事件审计。"""
-    return await _require_manager_client()._execute_async_request(
+    return await _execute_proactive_request(
         "POST", "/config/proactive/events", json=event
     )
 
@@ -213,7 +226,7 @@ async def update_proactive_event_status(
     event_id: str, mac_address: str, delivery_status: str, outcome: str = "none"
 ) -> Dict:
     """更新事件投递状态。"""
-    return await _require_manager_client()._execute_async_request(
+    return await _execute_proactive_request(
         "PUT",
         f"/config/proactive/events/{quote(event_id, safe='')}/status",
         json={
@@ -226,7 +239,7 @@ async def update_proactive_event_status(
 
 async def observe_proactive_habit(observation: Dict) -> Dict:
     """提交一次受控的习惯证据。"""
-    return await _require_manager_client()._execute_async_request(
+    return await _execute_proactive_request(
         "POST", "/config/proactive/habits/observe", json=observation
     )
 
@@ -234,7 +247,7 @@ async def observe_proactive_habit(observation: Dict) -> Dict:
 async def get_proactive_habit_candidates(mac_address: str) -> list:
     """读取已达阈值且尚未处理的习惯候选。"""
     query = urlencode({"mac_address": mac_address})
-    data = await _require_manager_client()._execute_async_request(
+    data = await _execute_proactive_request(
         "GET", f"/config/proactive/habits/candidates?{query}"
     )
     if not isinstance(data, list):

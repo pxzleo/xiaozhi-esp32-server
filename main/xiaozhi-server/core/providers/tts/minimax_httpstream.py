@@ -96,9 +96,14 @@ class TTSProvider(TTSProviderBase):
     def tts_text_priority_thread(self):
         """流式文本处理线程"""
         while not self.conn.stop_event.is_set():
+            message = None
             try:
                 message = self.tts_text_queue.get(timeout=1)
+                if self.conn.client_abort or message.sentence_id != self.conn.sentence_id:
+                    self._mark_sentence_completion_failed(message)
+                    continue
                 if message.sentence_type == SentenceType.FIRST:
+                    self._reset_sentence_completion(message.sentence_id)
                     # 初始化参数
                     self.tts_stop_request = False
                     self.processed_chars = 0
@@ -108,7 +113,8 @@ class TTSProvider(TTSProviderBase):
                     self.tts_text_buff.append(message.content_detail)
                     segment_text = self._get_segment_text()
                     if segment_text:
-                        self.to_tts_single_stream(segment_text)
+                        if not self.to_tts_single_stream(segment_text):
+                            self._mark_sentence_completion_failed(message)
 
                 elif ContentType.FILE == message.content_type:
                     logger.bind(tag=TAG).info(
@@ -125,11 +131,16 @@ class TTSProvider(TTSProviderBase):
                         self._process_audio_file_stream(message.content_file, callback=callback)
                 if message.sentence_type == SentenceType.LAST:
                     # 处理剩余的文本
-                    self._process_remaining_text_stream(True)
+                    if not self._process_remaining_text_stream(True):
+                        self._mark_sentence_completion_failed(message)
+                if message.completion_event:
+                    self._forward_sentence_completion(message)
 
             except queue.Empty:
                 continue
             except Exception as e:
+                if message is not None:
+                    self._mark_sentence_completion_failed(message)
                 logger.bind(tag=TAG).error(
                     f"处理TTS文本失败: {str(e)}, 类型: {type(e).__name__}, 堆栈: {traceback.format_exc()}"
                 )
@@ -144,16 +155,17 @@ class TTSProvider(TTSProviderBase):
         if remaining_text:
             segment_text = textUtils.get_string_no_punctuation_or_emoji(remaining_text)
             if segment_text:
-                self.to_tts_single_stream(segment_text, is_last)
+                succeeded = self.to_tts_single_stream(segment_text, is_last)
                 self.processed_chars += len(full_text)
+                return succeeded
             else:
                 self._process_before_stop_play_files()
         else:
             self._process_before_stop_play_files()
+        return True
 
     def to_tts_single_stream(self, text, is_last=False):
         try:
-            max_repeat_time = 5
             original_text = text
             text = MarkdownCleaner.clean_markdown(text)
             if self._correct_words_pattern:
@@ -162,22 +174,14 @@ class TTSProvider(TTSProviderBase):
                 asyncio.run(self.text_to_speak(text, is_last))
             except Exception as e:
                 logger.bind(tag=TAG).warning(
-                    f"语音生成失败{5 - max_repeat_time + 1}次: {original_text}，错误: {e}"
+                    f"语音生成失败: {original_text}，错误: {e}"
                 )
-                max_repeat_time -= 1
-
-            if max_repeat_time > 0:
-                logger.bind(tag=TAG).info(
-                    f"语音生成成功: {original_text}，重试{5 - max_repeat_time}次"
-                )
-            else:
-                logger.bind(tag=TAG).error(
-                    f"语音生成失败: {original_text}，请检查网络或服务是否正常"
-                )
+                return False
+            logger.bind(tag=TAG).info(f"语音生成成功: {original_text}")
+            return True
         except Exception as e:
             logger.bind(tag=TAG).error(f"Failed to generate TTS file: {e}")
-        finally:
-            return None
+            return False
 
     async def text_to_speak(self, text, is_last):
         """流式处理TTS音频，每句只推送一次音频列表"""
@@ -211,11 +215,7 @@ class TTSProvider(TTSProviderBase):
                 ) as resp:
 
                     if resp.status != 200:
-                        logger.bind(tag=TAG).error(
-                            f"TTS请求失败: {resp.status}, {await resp.text()}"
-                        )
-                        self.tts_audio_queue.put((SentenceType.LAST, [], None))
-                        return
+                        raise RuntimeError(f"TTS请求失败: HTTP {resp.status}")
 
                     self.pcm_buffer.clear()
                     self.tts_audio_queue.put((SentenceType.FIRST, [], text))
@@ -249,11 +249,9 @@ class TTSProvider(TTSProviderBase):
                                 status_code = base_resp.get("status_code", 0)
                                 if status_code != 0:
                                     status_msg = base_resp.get("status_msg", "未知错误")
-                                    logger.bind(tag=TAG).error(
+                                    raise RuntimeError(
                                         f"TTS请求失败, 错误码:{status_code}, 错误消息:{status_msg}"
                                     )
-                                    self.tts_audio_queue.put((SentenceType.LAST, [], None))
-                                    return
 
                                 status = data.get("data", {}).get("status", 1)
                                 audio_hex = data.get("data", {}).get("audio")
@@ -291,6 +289,7 @@ class TTSProvider(TTSProviderBase):
         except Exception as e:
             logger.bind(tag=TAG).error(f"TTS请求异常: {e}")
             self.tts_audio_queue.put((SentenceType.LAST, [], None))
+            raise
 
     async def close(self):
         """资源清理"""

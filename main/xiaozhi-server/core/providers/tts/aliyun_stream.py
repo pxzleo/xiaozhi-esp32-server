@@ -216,10 +216,12 @@ class TTSProvider(TTSProviderBase):
     def tts_text_priority_thread(self):
         """流式文本处理线程"""
         while not self.conn.stop_event.is_set():
+            message = None
             try:
                 message = self.tts_text_queue.get(timeout=1)
 
                 if self.conn.client_abort:
+                    self._mark_sentence_completion_failed(message)
                     logger.bind(tag=TAG).info("收到打断信息，终止TTS文本处理线程")
                     asyncio.run_coroutine_threadsafe(
                         self.finish_session(self.conn.sentence_id),
@@ -229,13 +231,16 @@ class TTSProvider(TTSProviderBase):
 
                 # 过滤旧消息：检查sentence_id是否匹配
                 if message.sentence_id != self.conn.sentence_id:
+                    self._mark_sentence_completion_failed(message)
                     continue
 
                 logger.bind(tag=TAG).debug(
                     f"收到TTS任务｜{message.sentence_type.name} ｜ {message.content_type.name} | 会话ID: {message.sentence_id}"
                 )
+                self._defer_remote_sentence_completion(message)
 
                 if message.sentence_type == SentenceType.FIRST:
+                    self._reset_sentence_completion(message.sentence_id)
                     # 重置流式处理状态
                     self.reset_stream_state()
                     # 初始化参数
@@ -250,6 +255,7 @@ class TTSProvider(TTSProviderBase):
                         logger.bind(tag=TAG).debug("TTS会话启动成功")
 
                     except Exception as e:
+                        self._mark_sentence_completion_failed(message)
                         logger.bind(tag=TAG).error(f"启动TTS会话失败: {str(e)}")
                         continue
 
@@ -265,6 +271,7 @@ class TTSProvider(TTSProviderBase):
                             )
                             future.result(timeout=self.tts_timeout)
                         except Exception as e:
+                            self._mark_sentence_completion_failed(message)
                             logger.bind(tag=TAG).error(f"发送TTS文本失败: {str(e)}")
                             continue
 
@@ -290,12 +297,14 @@ class TTSProvider(TTSProviderBase):
                         )
                         future.result(timeout=self.tts_timeout)
                     except Exception as e:
+                        self._mark_sentence_completion_failed(message)
                         logger.bind(tag=TAG).error(f"结束TTS会话失败: {str(e)}")
                         continue
-
             except queue.Empty:
                 continue
             except Exception as e:
+                if message is not None:
+                    self._mark_sentence_completion_failed(message)
                 logger.bind(tag=TAG).error(
                     f"处理TTS文本失败: {str(e)}, 类型: {type(e).__name__}, 堆栈: {traceback.format_exc()}"
                 )
@@ -303,8 +312,7 @@ class TTSProvider(TTSProviderBase):
     async def text_to_speak(self, text, _):
         try:
             if self.ws is None:
-                logger.bind(tag=TAG).warning(f"WebSocket连接不存在，终止发送文本")
-                return
+                raise RuntimeError("WebSocket连接不存在")
             filtered_text = MarkdownCleaner.clean_markdown(text)
 
             if filtered_text:
@@ -386,6 +394,8 @@ class TTSProvider(TTSProviderBase):
     async def finish_session(self, task_id):
         logger.bind(tag=TAG).debug(f"关闭会话～～{task_id}")
         try:
+            if not self.ws:
+                raise RuntimeError("WebSocket连接不存在")
             if self.ws:
                 stop_request = {
                     "header": {
@@ -458,19 +468,35 @@ class TTSProvider(TTSProviderBase):
                                         (SentenceType.FIRST, [], tts_text)
                                     )
                                     self.clear_tts_text(self.conn.sentence_id)
+                                self._complete_remote_sentence(self.conn.sentence_id)
                             elif event_name == "SynthesisCompleted":
                                 logger.bind(tag=TAG).debug(f"会话结束～～")
                                 self.activate_session = False
                                 self._process_before_stop_play_files()
+                                self._complete_remote_sentence(
+                                    self.conn.sentence_id, all_pending=True
+                                )
+                            elif event_name == "TaskFailed":
+                                self._complete_remote_sentence(
+                                    self.conn.sentence_id,
+                                    succeeded=False,
+                                    all_pending=True,
+                                )
                         except json.JSONDecodeError:
                             logger.bind(tag=TAG).warning("收到无效的JSON消息")
                     # 二进制消息（音频数据）
                     elif isinstance(msg, (bytes, bytearray)):
                         self.opus_encoder.encode_pcm_to_opus_stream(msg, False, self.handle_opus)
                 except websockets.ConnectionClosed:
+                    self._complete_remote_sentence(
+                        succeeded=False, all_pending=True
+                    )
                     logger.bind(tag=TAG).warning("WebSocket连接已关闭")
                     break
                 except Exception as e:
+                    self._complete_remote_sentence(
+                        succeeded=False, all_pending=True
+                    )
                     logger.bind(tag=TAG).error(
                         f"处理TTS响应时出错: {e}\n{traceback.format_exc()}"
                     )

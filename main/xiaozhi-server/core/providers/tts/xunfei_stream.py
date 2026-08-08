@@ -152,15 +152,18 @@ class TTSProvider(TTSProviderBase):
     def tts_text_priority_thread(self):
         """流式文本处理线程"""
         while not self.conn.stop_event.is_set():
+            message = None
             try:
                 message = self.tts_text_queue.get(timeout=1)
 
                 if self.conn.client_abort:
+                    self._mark_sentence_completion_failed(message)
                     logger.bind(tag=TAG).info("收到打断信息，终止TTS文本处理线程")
                     continue
 
                 # 过滤旧消息：检查sentence_id是否匹配
                 if message.sentence_id != self.conn.sentence_id:
+                    self._mark_sentence_completion_failed(message)
                     continue
 
                 logger.bind(tag=TAG).debug(
@@ -168,6 +171,7 @@ class TTSProvider(TTSProviderBase):
                 )
 
                 if message.sentence_type == SentenceType.FIRST:
+                    self._reset_sentence_completion(message.sentence_id)
                     # 重置流式处理状态
                     self.reset_stream_state()
                     # 重置序列号
@@ -192,6 +196,7 @@ class TTSProvider(TTSProviderBase):
                         logger.bind(tag=TAG).debug("TTS会话启动成功")
 
                     except Exception as e:
+                        self._mark_sentence_completion_failed(message)
                         logger.bind(tag=TAG).error(f"启动TTS会话失败: {str(e)}")
                         continue
 
@@ -208,6 +213,7 @@ class TTSProvider(TTSProviderBase):
                             )
                             future.result(timeout=self.tts_timeout)
                         except Exception as e:
+                            self._mark_sentence_completion_failed(message)
                             logger.bind(tag=TAG).error(f"发送TTS文本失败: {str(e)}")
                             # 不使用continue，确保后续处理不被中断
 
@@ -230,17 +236,23 @@ class TTSProvider(TTSProviderBase):
                 if message.sentence_type == SentenceType.LAST:
                     try:
                         logger.bind(tag=TAG).debug("开始结束TTS会话...")
-                        asyncio.run_coroutine_threadsafe(
+                        future = asyncio.run_coroutine_threadsafe(
                             self.finish_session(self.conn.sentence_id),
                             loop=self.conn.loop,
                         )
+                        future.result(timeout=self.tts_timeout)
                     except Exception as e:
+                        self._mark_sentence_completion_failed(message)
                         logger.bind(tag=TAG).error(f"结束TTS会话失败: {str(e)}")
                         continue
+                if message.completion_event:
+                    self._forward_sentence_completion(message)
 
             except queue.Empty:
                 continue
             except Exception as e:
+                if message is not None:
+                    self._mark_sentence_completion_failed(message)
                 logger.bind(tag=TAG).error(
                     f"处理TTS文本失败: {str(e)}, 类型: {type(e).__name__}, 堆栈: {traceback.format_exc()}"
                 )
