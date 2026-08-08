@@ -1,5 +1,6 @@
 import os
 import base64
+import json
 from typing import Optional, Dict
 from urllib.parse import quote, urlencode
 
@@ -189,10 +190,11 @@ def _require_manager_client() -> ManageApiClient:
 
 
 async def _execute_proactive_request(method: str, endpoint: str, **kwargs):
+    timeout = kwargs.pop("timeout", 0.5)
     return await _require_manager_client()._execute_async_request(
         method,
         endpoint,
-        timeout=0.5,
+        timeout=timeout,
         _max_retries=1,
         _retry_delay=0.1,
         **kwargs,
@@ -273,6 +275,150 @@ async def get_proactive_habit_candidates(mac_address: str) -> list:
     )
     if not isinstance(data, list):
         raise ManageApiBusinessError("manager-api习惯候选响应格式错误")
+    return data
+
+
+async def create_proactive_monitor_event(event: Dict) -> Dict:
+    """按 manager-api 数据库时钟与去重账本原子创建外界事件。"""
+    if not isinstance(event, dict):
+        raise ValueError("外界监测事件无效")
+    data = await _execute_proactive_request(
+        "POST", "/config/proactive/monitor-events", json=event
+    )
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"created", "deduped", "authoritative_event_id", "event"}
+        or not isinstance(data["created"], bool)
+        or not isinstance(data["deduped"], bool)
+        or data["created"] == data["deduped"]
+        or not isinstance(data["authoritative_event_id"], str)
+        or not data["authoritative_event_id"]
+        or not isinstance(data["event"], dict)
+    ):
+        raise ManageApiBusinessError("manager-api外界事件创建响应格式错误")
+    return data
+
+
+async def claim_proactive_monitor_tasks(lease_owner: str, limit: int = 20) -> list:
+    """领取 manager-api 权威调度的到期外界监测任务。"""
+    if not isinstance(lease_owner, str) or not lease_owner.strip() or len(lease_owner) > 64:
+        raise ValueError("monitor lease_owner无效")
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        raise ValueError("monitor limit无效")
+    data = await _execute_proactive_request(
+        "POST",
+        "/config/proactive/monitors/claim",
+        json={"lease_owner": lease_owner, "limit": limit},
+    )
+    if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+        raise ManageApiBusinessError("manager-api监测任务响应格式错误")
+    return data
+
+
+async def complete_proactive_monitor_task(
+    task: Dict, *, success: bool, state: Dict, error_code: Optional[str] = None
+) -> None:
+    """使用领取 token 完成监测任务；失效租约由 manager-api 明确拒绝。"""
+    if not isinstance(task, dict) or not isinstance(state, dict):
+        raise ValueError("monitor task或state无效")
+    payload = {
+        "device_id": task.get("device_id"),
+        "monitor_type": task.get("monitor_type"),
+        "lease_owner": task.get("lease_owner"),
+        "lease_token": task.get("lease_token"),
+        "success": success is True,
+        "state": state,
+    }
+    if success is not True:
+        if not isinstance(error_code, str) or not error_code.strip() or len(error_code) > 64:
+            raise ValueError("monitor error_code无效")
+        payload["error_code"] = error_code
+    elif error_code is not None:
+        raise ValueError("monitor成功时不能提供error_code")
+    await _execute_proactive_request(
+        "POST", "/config/proactive/monitors/complete", json=payload
+    )
+
+
+def _validate_classifier_output(output: object, candidate_count: int) -> dict:
+    if not isinstance(output, str) or len(output.encode("utf-8")) > 16_384:
+        raise ManageApiBusinessError("manager-api分类输出无效")
+    try:
+        root = json.loads(output)
+    except (TypeError, ValueError) as error:
+        raise ManageApiBusinessError("manager-api分类输出不是严格JSON") from error
+    if not isinstance(root, dict) or set(root) != {"items"}:
+        raise ManageApiBusinessError("manager-api分类输出根结构无效")
+    items = root["items"]
+    if not isinstance(items, list) or len(items) != candidate_count:
+        raise ManageApiBusinessError("manager-api分类输出条目数量无效")
+    expected = {
+        "index", "is_major", "category", "severity", "confidence",
+        "spoken_summary", "facts",
+    }
+    indexes = set()
+    categories = {
+        "public_safety", "natural_disaster", "major_policy",
+        "international_conflict", "major_economy", "major_technology",
+    }
+    for item in items:
+        if not isinstance(item, dict) or set(item) != expected:
+            raise ManageApiBusinessError("manager-api分类条目结构无效")
+        index = item["index"]
+        confidence = item["confidence"]
+        facts = item["facts"]
+        if (
+            not isinstance(index, int) or isinstance(index, bool)
+            or not 0 <= index < candidate_count or index in indexes
+            or not isinstance(item["is_major"], bool)
+            or not isinstance(item["category"], str) or item["category"] not in categories
+            or not isinstance(item["severity"], str)
+            or item["severity"] not in {"low", "medium", "high", "critical"}
+            or not isinstance(confidence, (int, float)) or isinstance(confidence, bool)
+            or not 0 <= confidence <= 1
+            or not isinstance(item["spoken_summary"], str)
+            or not item["spoken_summary"].strip()
+            or len(item["spoken_summary"]) > 120
+            or not isinstance(facts, list) or not 1 <= len(facts) <= 8
+            or any(not isinstance(fact, str) or not fact.strip() or len(fact) > 300 for fact in facts)
+        ):
+            raise ManageApiBusinessError("manager-api分类条目值无效")
+        indexes.add(index)
+    return root
+
+
+async def evaluate_proactive_news_candidates(candidates: list) -> dict:
+    """调用独立全局分类模型并再次校验严格七字段结果。"""
+    if not isinstance(candidates, list) or not 1 <= len(candidates) <= 20:
+        raise ValueError("新闻分类候选数量无效")
+    try:
+        data = await _execute_proactive_request(
+            "POST",
+            "/config/proactive/classifier/evaluate",
+            json={"candidates": candidates},
+            timeout=20,
+        )
+    except ManageApiError:
+        raise
+    except Exception as error:
+        raise ManageApiError("manager-api新闻分类请求失败") from error
+    if not isinstance(data, dict) or set(data) != {"output"}:
+        raise ManageApiBusinessError("manager-api分类响应格式错误")
+    return _validate_classifier_output(data["output"], len(candidates))
+
+
+async def get_proactive_monitor_event(event_id: str, mac_address: str) -> Dict:
+    """读取由 manager-api 持久化的权威外界事件内容。"""
+    if not isinstance(event_id, str) or not event_id or len(event_id) > 64:
+        raise ValueError("外界事件ID无效")
+    if not isinstance(mac_address, str) or not mac_address or len(mac_address) > 50:
+        raise ValueError("设备MAC无效")
+    query = urlencode({"mac_address": mac_address})
+    data = await _execute_proactive_request(
+        "GET", f"/config/proactive/monitor-events/{quote(event_id, safe='')}?{query}"
+    )
+    if not isinstance(data, dict):
+        raise ManageApiBusinessError("manager-api外界事件响应格式错误")
     return data
 
 async def get_server_config() -> Optional[Dict]:

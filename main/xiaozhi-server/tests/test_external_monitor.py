@@ -1,0 +1,601 @@
+import asyncio
+import json
+import unittest
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from config.manage_api_client import (
+    ManageApiError,
+    ManageApiBusinessError,
+    ManageApiTimeoutError,
+    _validate_classifier_output,
+)
+from config import manage_api_client
+from core.proactive_monitor.runner import (
+    ExternalMonitorRunner,
+    MonitorError,
+    QWeatherClient,
+    _normalized_hourly,
+    _validate_monitor_state,
+    detect_weather_hazards,
+    normalize_news_url,
+    prefilter_news,
+    process_news,
+    process_weather,
+)
+
+
+def hourly(icon="100", *, pop=0, wind=10, temp=20, count=24):
+    return [
+        {
+            "fxTime": f"2026-08-{9 + index // 24:02d}T{index % 24:02d}:00+00:00",
+            "icon": icon,
+            "pop": str(pop),
+            "windSpeed": str(wind),
+            "temp": str(temp - index // 12),
+            "precip": "0",
+        }
+        for index in range(count)
+    ]
+
+
+def weather_task(state=None):
+    return {
+        "device_id": "device-1",
+        "mac_address": "AA:BB",
+        "monitor_type": "weather",
+        "config": {
+            "hazard_types": [
+                "rainstorm", "thunderstorm", "hail", "blizzard", "high_wind",
+                "high_temperature", "low_temperature", "temperature_drop",
+            ],
+            "minimum_warning_severity": "moderate",
+            "precip_probability": 70,
+            "wind_speed_kmh": 62,
+            "high_temp_c": 35,
+            "low_temp_c": 0,
+            "temp_drop_24h_c": 8,
+            "forecast_hours": 6,
+            "cooldown_minutes": 720,
+        },
+        "state": state or {},
+        "weather_location": "广州",
+        "weather_location_error": None,
+        "weather_api_host": "https://weather.example.com",
+        "weather_auth_type": "api_key",
+        "weather_credential": "secret",
+        "weather_credentials_error": None,
+    }
+
+
+def news_task(state=None):
+    return {
+        "device_id": "device-1",
+        "mac_address": "AA:BB",
+        "monitor_type": "news",
+        "config": {
+            "confidence": 0.85,
+            "categories": ["public_safety"],
+            "cooldown_minutes": 120,
+            "dedupe_hours": 24,
+        },
+        "state": state or {},
+        "news_sources": ["澎湃新闻", "财联社"],
+        "news_sources_error": None,
+    }
+
+
+class FakeWeather:
+    def __init__(self, warnings, values):
+        self.warnings = warnings
+        self.values = values
+
+    async def snapshot(self, task, location):
+        return {"id": "101280101", "name": location}, self.warnings, self.values
+
+
+class FakeNews:
+    def __init__(self, items):
+        self.items = items
+
+    async def fetch(self, source):
+        return self.items[source]
+
+
+class WeatherDetectionTest(unittest.IsolatedAsyncioTestCase):
+    def test_weather_credentials_support_api_key_and_bearer_without_fallback(self):
+        client = QWeatherClient()
+        base_url, headers = client._access(weather_task())
+        self.assertEqual("https://weather.example.com", base_url)
+        self.assertEqual("secret", headers["X-QW-Api-Key"])
+        bearer = weather_task()
+        bearer.update({"weather_auth_type": "bearer", "weather_credential": "jwt"})
+        _, headers = client._access(bearer)
+        self.assertEqual("Bearer jwt", headers["Authorization"])
+        missing = weather_task()
+        missing["weather_credentials_error"] = "weather_credentials_missing"
+        with self.assertRaises(MonitorError):
+            client._access(missing)
+
+    async def test_first_normal_forecast_only_builds_baseline(self):
+        client = FakeWeather([], hourly(icon="310", pop=70))
+        with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            state, created = await process_weather(weather_task(), client)
+        self.assertEqual([], created)
+        self.assertIn("rainstorm", state["detection_status"]["active_hazards"])
+        create.assert_not_awaited()
+
+    async def test_first_active_severe_warning_is_immediate_and_deduped(self):
+        warning = {
+            "id": "warning-1", "severity": "severe",
+            "messageType": {"code": "alert", "supersedes": []},
+            "headline": "暴雨红色预警", "description": "请减少外出",
+            "effectiveTime": "2026-01-01T00:00:00+00:00",
+            "expireTime": "2099-01-01T00:00:00+00:00",
+        }
+        client = FakeWeather([warning], hourly())
+        with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            state, created = await process_weather(weather_task(), client)
+            self.assertEqual(1, len(created))
+            stored = create.await_args.args[0]
+            self.assertEqual("critical", stored["priority"])
+            bounded = {key: value for key, value in stored["payload"].items() if key != "reference_url"}
+            self.assertLessEqual(len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":")).encode()), 512)
+            second_task = weather_task(state)
+            _, second_created = await process_weather(second_task, client)
+        self.assertEqual([], second_created)
+        self.assertEqual(1, create.await_count)
+
+    async def test_first_moderate_warning_is_baselined_and_not_spoken_next_round(self):
+        warning = {
+            "id": "warning-m", "severity": "moderate",
+            "messageType": {"code": "alert", "supersedes": []},
+            "headline": "黄色预警", "effectiveTime": "2026-01-01T00:00:00+00:00",
+            "expireTime": "2099-01-01T00:00:00+00:00",
+        }
+        client = FakeWeather([warning], hourly())
+        with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            state, first = await process_weather(weather_task(), client)
+            _, second = await process_weather(weather_task(state), client)
+        self.assertEqual([], first)
+        self.assertEqual([], second)
+        self.assertTrue(any(value.startswith("w:") for value in state["fingerprints"]))
+        create.assert_not_awaited()
+
+    async def test_more_than_sixteen_long_moderate_warnings_stay_baselined(self):
+        warnings = [{
+            "id": f"official-warning-{index}-" + "x" * 120,
+            "severity": "moderate", "messageType": {"code": "alert"},
+            "headline": "黄色预警", "effectiveTime": None,
+            "issuedTime": "2026-01-01T00:00:00+00:00",
+            "expireTime": "2099-01-01T00:00:00+00:00",
+        } for index in range(20)]
+        client = FakeWeather(warnings, hourly())
+        with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            state, first = await process_weather(weather_task(), client)
+            _, second = await process_weather(weather_task(state), client)
+        self.assertEqual([], first)
+        self.assertEqual([], second)
+        self.assertLessEqual(len(json.dumps(state, ensure_ascii=False).encode()), 4096)
+        self.assertEqual(20, len(state["detection_status"]["active_warning_ids"]))
+        create.assert_not_awaited()
+
+    async def test_cancel_and_recovery_only_update_state(self):
+        prior = {
+            "schema_version": 1,
+            "fingerprints": ["warning:warning-1:severe"],
+            "detection_status": {
+                "active_warning_ids": ["warning-1"], "active_hazards": ["rainstorm"]
+            },
+            "baseline": {"captured_at": "2026-01-01T00:00:00+00:00", "location_id": "101280101"},
+        }
+        cancelled = {
+            "id": "cancel-1", "severity": "severe",
+            "messageType": {"code": "cancel", "supersedes": ["warning-1"]},
+        }
+        with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            state, created = await process_weather(weather_task(prior), FakeWeather([cancelled], hourly()))
+        self.assertEqual([], created)
+        self.assertEqual([], state["detection_status"]["active_warning_ids"])
+        self.assertEqual([], state["detection_status"]["active_hazards"])
+        create.assert_not_awaited()
+
+    async def test_forecast_deterioration_and_warning_upgrade_create_events(self):
+        baseline, _ = await process_weather(weather_task(), FakeWeather([], hourly()))
+        with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            _, created = await process_weather(
+                weather_task(baseline), FakeWeather([], hourly(icon="310", pop=70))
+            )
+        self.assertEqual(1, len(created))
+        self.assertEqual("high", create.await_args.args[0]["priority"])
+        self.assertEqual("rolling_window", create.await_args.args[0]["dedupe_policy"])
+        self.assertEqual(12, create.await_args.args[0]["dedupe_window_hours"])
+
+        warning_prior = weather_task()["state"] = {
+            "schema_version": 1,
+            "fingerprints": ["warning:w1:moderate"],
+            "detection_status": {"active_warning_ids": ["w1"], "active_hazards": []},
+            "baseline": {"captured_at": "2026-01-01T00:00:00+00:00", "location_id": "101280101"},
+        }
+        upgraded = {
+            "id": "w1", "severity": "severe", "messageType": {"code": "update"},
+            "headline": "预警升级", "effectiveTime": "2026-01-01T00:00:00+00:00",
+            "expireTime": "2099-01-01T00:00:00+00:00",
+        }
+        with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            _, created = await process_weather(weather_task(warning_prior), FakeWeather([upgraded], hourly()))
+        self.assertEqual(1, len(created))
+        self.assertEqual("critical", create.await_args.args[0]["priority"])
+
+    def test_threshold_boundaries_and_temperature_drop(self):
+        values = hourly(pop=70, wind=62, temp=35)
+        values[-1]["temp"] = "27"
+        values = _normalized_hourly(values)
+        hazards = {item["type"] for item in detect_weather_hazards(values, weather_task()["config"])}
+        self.assertTrue({"rainstorm", "high_wind", "high_temperature", "temperature_drop"} <= hazards)
+        cold = _normalized_hourly(hourly(temp=0))
+        self.assertIn("low_temperature", {item["type"] for item in detect_weather_hazards(cold, weather_task()["config"])})
+        missing_temp = hourly(temp=20)
+        for item in missing_temp:
+            item.pop("temp")
+        with self.assertRaisesRegex(MonitorError, "逐小时天气必填字段无效"):
+            _normalized_hourly(missing_temp)
+
+    async def test_invalid_warning_expiry_is_not_treated_as_active(self):
+        warning = {
+            "id": "warning-invalid", "severity": "extreme",
+            "messageType": {"code": "alert"}, "headline": "无效预警",
+            "effectiveTime": "invalid", "expireTime": "invalid",
+        }
+        with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            with self.assertRaisesRegex(MonitorError, "官方天气预警生效时间无效"):
+                await process_weather(weather_task(), FakeWeather([warning], hourly()))
+        create.assert_not_awaited()
+
+    async def test_null_effective_time_uses_issued_time(self):
+        warning = {
+            "id": "warning-null-effective", "severity": "severe",
+            "messageType": {"code": "alert"}, "headline": "红色预警",
+            "effectiveTime": None, "issuedTime": "2026-01-01T00:00:00+00:00",
+            "expireTime": "2099-01-01T00:00:00+00:00",
+        }
+        with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            _, created = await process_weather(weather_task(), FakeWeather([warning], hourly()))
+        self.assertEqual(1, len(created))
+        create.assert_awaited_once()
+
+    async def test_invalid_issued_time_is_rejected_when_effective_is_null(self):
+        warning = {
+            "id": "warning-invalid-issued", "severity": "severe",
+            "messageType": {"code": "alert"}, "headline": "红色预警",
+            "effectiveTime": None, "issuedTime": "invalid",
+            "expireTime": "2099-01-01T00:00:00+00:00",
+        }
+        with self.assertRaisesRegex(MonitorError, "官方天气预警发布时间无效"):
+            await process_weather(weather_task(), FakeWeather([warning], hourly()))
+
+    def test_nonempty_invalid_optional_hourly_number_is_rejected(self):
+        values = hourly()
+        values[0]["pop"] = "unknown"
+        with self.assertRaisesRegex(MonitorError, "可空数值字段无效"):
+            _normalized_hourly(values)
+
+    async def test_weather_401_and_403_are_non_retryable_permission_errors(self):
+        client = QWeatherClient()
+        for status in (401, 403):
+            response = MagicMock()
+            response.status_code = status
+            response.raise_for_status.side_effect = __import__("httpx").HTTPStatusError(
+                "denied", request=__import__("httpx").Request("GET", "https://weather.example.com/x"),
+                response=__import__("httpx").Response(status),
+            )
+            http = AsyncMock()
+            http.get.return_value = response
+            context = AsyncMock()
+            context.__aenter__.return_value = http
+            with patch("core.proactive_monitor.runner.httpx.AsyncClient", return_value=context):
+                with self.assertRaises(MonitorError) as caught:
+                    await client._get("https://weather.example.com", {}, "/x")
+            self.assertEqual("weather_api_denied", caught.exception.code)
+            self.assertFalse(caught.exception.retryable)
+
+    async def test_weather_timeout_is_retryable_and_city_resolution_is_cached(self):
+        client = QWeatherClient()
+        client._get = AsyncMock(return_value={
+            "location": [{"id": "101280101", "name": "广州", "lat": "23.13", "lon": "113.27"}]
+        })
+        first = await client.resolve_location("广州", "https://weather.example.com", {})
+        second = await client.resolve_location("广州", "https://weather.example.com", {})
+        self.assertEqual(first, second)
+        client._get.assert_awaited_once()
+
+        timeout_client = QWeatherClient()
+        http = AsyncMock()
+        http.get.side_effect = __import__("httpx").ReadTimeout("timeout")
+        context = AsyncMock()
+        context.__aenter__.return_value = http
+        with patch("core.proactive_monitor.runner.httpx.AsyncClient", return_value=context):
+            with self.assertRaises(MonitorError) as caught:
+                await timeout_client._get("https://weather.example.com", {}, "/x")
+        self.assertEqual("weather_timeout", caught.exception.code)
+        self.assertTrue(caught.exception.retryable)
+
+    def test_state_is_rejected_before_persistence_when_over_4kb(self):
+        state = {
+            "schema_version": 1,
+            "fingerprints": ["x" * 160 for _ in range(30)],
+            "detection_status": {},
+        }
+        with self.assertRaisesRegex(MonitorError, "超过4096字节"):
+            _validate_monitor_state("news", state)
+
+    async def test_new_hazard_during_cooldown_remains_eligible_after_cooldown(self):
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        prior = {
+            "schema_version": 1, "fingerprints": [],
+            "detection_status": {"active_warning_ids": [], "active_hazards": [], "cooldown_until": future},
+            "baseline": {"captured_at": "2026-01-01T00:00:00+00:00", "location_id": "101280101"},
+        }
+        rainy = FakeWeather([], hourly(icon="310", pop=70))
+        with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            state, during = await process_weather(weather_task(prior), rainy)
+            state["detection_status"]["cooldown_until"] = "2026-01-01T00:00:00+00:00"
+            _, after = await process_weather(weather_task(state), rainy)
+        self.assertEqual([], during)
+        self.assertNotIn("rainstorm", state["detection_status"]["active_hazards"])
+        self.assertEqual(1, len(after))
+        self.assertEqual(1, create.await_count)
+
+    async def test_location_change_rebuilds_ordinary_baseline_without_alert(self):
+        prior = {
+            "schema_version": 1, "fingerprints": [],
+            "detection_status": {"active_warning_ids": [], "active_hazards": []},
+            "baseline": {"captured_at": "2026-01-01T00:00:00+00:00", "location_id": "old-city"},
+        }
+        with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            state, created = await process_weather(
+                weather_task(prior), FakeWeather([], hourly(icon="310", pop=70))
+            )
+        self.assertEqual([], created)
+        self.assertEqual("101280101", state["baseline"]["location_id"])
+        create.assert_not_awaited()
+
+
+class NewsDetectionTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.items = {
+            "澎湃新闻": [
+                {"title": "某地发生强烈地震启动紧急响应", "url": "https://news.example/a?utm=x"},
+                {"title": "明星演唱会现场夺冠热搜", "url": "https://news.example/fun"},
+            ],
+            "财联社": [
+                {"title": "某地发生强烈地震启动紧急响应", "url": "https://news.example/a"},
+            ],
+        }
+
+    def test_prefilter_clusters_sources_excludes_entertainment_and_normalizes_url(self):
+        candidates = prefilter_news(self.items)
+        self.assertEqual(1, len(candidates))
+        self.assertEqual(["澎湃新闻", "财联社"], candidates[0]["sources"])
+        self.assertEqual("https://news.example/a", normalize_news_url("https://news.example/a?utm=x#x"))
+        self.assertEqual("", normalize_news_url("https://user:password@news.example/a"))
+
+    async def test_first_run_builds_news_baseline_without_classifier(self):
+        with patch("core.proactive_monitor.runner.evaluate_proactive_news_candidates", AsyncMock()) as classify:
+            state, created = await process_news(news_task(), FakeNews(self.items))
+        self.assertEqual([], created)
+        self.assertTrue(state["fingerprints"])
+        classify.assert_not_awaited()
+
+    async def test_twenty_first_run_candidates_all_remain_deduped(self):
+        many = {"澎湃新闻": [], "财联社": []}
+        candidates = [{
+            "title": f"重大事件{index}", "url": f"https://news.example/{index}",
+            "sources": ["澎湃新闻"], "primary_source": "澎湃新闻", "position": index,
+            "facts": f"事实{index}", "cluster_id": f"{index:040x}", "score": 100 - index,
+        } for index in range(20)]
+        with patch("core.proactive_monitor.runner.prefilter_news", return_value=candidates), patch(
+            "core.proactive_monitor.runner.evaluate_proactive_news_candidates", AsyncMock()
+        ) as classify:
+            state, _ = await process_news(news_task(), FakeNews(many))
+            self.assertEqual(20, len(state["fingerprints"]))
+            _, repeated = await process_news(news_task(state), FakeNews(many))
+        self.assertEqual([], repeated)
+        classify.assert_not_awaited()
+
+    async def test_confidence_boundary_creates_one_and_24h_dedupes(self):
+        task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
+        output = {"items": [{
+            "index": 0, "is_major": True, "category": "public_safety",
+            "severity": "high", "confidence": 0.85, "spoken_summary": "某地发生强烈地震。",
+            "facts": ["当地已启动紧急响应"],
+        }]}
+        with patch("core.proactive_monitor.runner.evaluate_proactive_news_candidates", AsyncMock(return_value=output)), patch(
+            "core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()
+        ) as create:
+            state, created = await process_news(task, FakeNews(self.items))
+            self.assertEqual(1, len(created))
+            self.assertEqual("https://news.example/a", create.await_args.args[0]["payload"]["reference_url"])
+            self.assertEqual("rolling_window", create.await_args.args[0]["dedupe_policy"])
+            self.assertEqual(24, create.await_args.args[0]["dedupe_window_hours"])
+            task["state"] = state
+            _, repeated = await process_news(task, FakeNews(self.items))
+        self.assertEqual([], repeated)
+        self.assertEqual(1, create.await_count)
+
+    async def test_classifier_failure_is_explicit_and_never_creates_event(self):
+        task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
+        with patch(
+            "core.proactive_monitor.runner.evaluate_proactive_news_candidates",
+            AsyncMock(side_effect=ManageApiTimeoutError("timeout")),
+        ), patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            with self.assertRaisesRegex(RuntimeError, "新闻分类模型调用失败"):
+                await process_news(task, FakeNews(self.items))
+        create.assert_not_awaited()
+
+    async def test_event_retry_is_byte_stable_when_monitor_completion_was_lost(self):
+        task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
+        output = {"items": [{
+            "index": 0, "is_major": True, "category": "public_safety",
+            "severity": "high", "confidence": 0.9, "spoken_summary": "重大事件摘要",
+            "facts": ["已启动响应"],
+        }]}
+        with patch(
+            "core.proactive_monitor.runner.evaluate_proactive_news_candidates",
+            AsyncMock(return_value=output),
+        ), patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
+            await process_news(task, FakeNews(self.items))
+            first = create.await_args.args[0]
+            await process_news(task, FakeNews(self.items))
+            second = create.await_args.args[0]
+        self.assertEqual(first, second)
+
+    async def test_event_retry_accepts_authoritative_existing_when_model_output_changes(self):
+        task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
+        first_output = {"items": [{
+            "index": 0, "is_major": True, "category": "public_safety",
+            "severity": "high", "confidence": 0.9, "spoken_summary": "首次摘要",
+            "facts": ["首次事实"],
+        }]}
+        second_output = {"items": [{
+            **first_output["items"][0], "severity": "critical",
+            "spoken_summary": "变化后的摘要", "facts": ["变化后的事实"],
+        }]}
+        create = AsyncMock()
+        with patch(
+            "core.proactive_monitor.runner.evaluate_proactive_news_candidates",
+            AsyncMock(side_effect=[first_output, second_output]),
+        ), patch("core.proactive_monitor.runner.create_proactive_monitor_event", create), patch(
+            "core.proactive_monitor.runner.get_proactive_monitor_event", AsyncMock()
+        ) as get_existing:
+            await process_news(task, FakeNews(self.items))
+            first = create.await_args.args[0]
+            create.side_effect = __import__("httpx").RemoteProtocolError("response lost")
+            get_existing.return_value = {
+                "event_id": first["event_id"], "mac_address": first["mac_address"],
+                "topic": first["topic"], "event_type": first["event_type"],
+                "dedupe_key": first["dedupe_key"], "payload": first["payload"],
+            }
+            _, created = await process_news(task, FakeNews(self.items))
+        self.assertEqual([first["event_id"]], created)
+        get_existing.assert_awaited_once()
+
+    def test_classifier_contract_rejects_invalid_and_accepts_exact_boundary(self):
+        valid = {"items": [{
+            "index": 0, "is_major": True, "category": "public_safety",
+            "severity": "high", "confidence": 0.85, "spoken_summary": "摘要", "facts": ["事实"],
+        }]}
+        self.assertEqual(valid, _validate_classifier_output(json.dumps(valid), 1))
+        invalid = {"items": [{**valid["items"][0], "reasoning": "hidden"}]}
+        with self.assertRaises(ManageApiBusinessError):
+            _validate_classifier_output(json.dumps(invalid), 1)
+
+
+class RunnerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_claims_once_and_completes_failure_explicitly(self):
+        runner = ExternalMonitorRunner({"plugins": {}}, poll_seconds=0.01)
+        task = {
+            "device_id": "d", "monitor_type": "bad", "state": {},
+            "lease_owner": runner.lease_owner, "lease_token": "t",
+        }
+        with patch("core.proactive_monitor.runner.claim_proactive_monitor_tasks", AsyncMock(return_value=[task])), patch(
+            "core.proactive_monitor.runner.complete_proactive_monitor_task", AsyncMock()
+        ) as complete:
+            self.assertEqual(1, await runner.run_once())
+        self.assertFalse(complete.await_args.kwargs["success"])
+        self.assertEqual("monitor_type_invalid", complete.await_args.kwargs["error_code"])
+
+    async def test_empty_authoritative_claim_pauses_offline_devices(self):
+        runner = ExternalMonitorRunner({"plugins": {}})
+        with patch(
+            "core.proactive_monitor.runner.claim_proactive_monitor_tasks",
+            AsyncMock(return_value=[]),
+        ) as claim:
+            self.assertEqual(0, await runner.run_once())
+        claim.assert_awaited_once_with(runner.lease_owner, runner.limit)
+
+    async def test_retryable_source_error_uses_bounded_backoff_then_completes(self):
+        runner = ExternalMonitorRunner({"plugins": {}})
+        task = {
+            "device_id": "d", "monitor_type": "weather", "state": {},
+            "lease_owner": runner.lease_owner, "lease_token": "t",
+        }
+        retry = MonitorError("weather_timeout", "timeout", retryable=True)
+        with patch(
+            "core.proactive_monitor.runner.claim_proactive_monitor_tasks",
+            AsyncMock(return_value=[task]),
+        ), patch(
+            "core.proactive_monitor.runner.process_weather",
+            AsyncMock(side_effect=[retry, retry, ({"schema_version": 1}, [])]),
+        ) as process, patch(
+            "core.proactive_monitor.runner.complete_proactive_monitor_task", AsyncMock()
+        ) as complete, patch("core.proactive_monitor.runner.asyncio.sleep", AsyncMock()) as sleep:
+            await runner.run_once()
+        self.assertEqual(3, process.await_count)
+        self.assertEqual([0.25, 0.5], [call.args[0] for call in sleep.await_args_list])
+        self.assertTrue(complete.await_args.kwargs["success"])
+
+    async def test_runner_start_and_stop_cancel_background_loop_cleanly(self):
+        runner = ExternalMonitorRunner({"plugins": {}}, poll_seconds=30)
+        with patch(
+            "core.proactive_monitor.runner.claim_proactive_monitor_tasks",
+            AsyncMock(return_value=[]),
+        ):
+            await runner.start()
+            await asyncio.sleep(0)
+            await runner.stop()
+        self.assertIsNone(runner._task)
+
+
+class ManagerClientContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_monitor_endpoints_use_actual_config_contract(self):
+        task = {
+            "device_id": "d", "monitor_type": "weather", "lease_owner": "worker",
+            "lease_token": "token",
+        }
+        with patch.object(
+            manage_api_client, "_execute_proactive_request", AsyncMock(side_effect=[[], None])
+        ) as request:
+            claimed = await manage_api_client.claim_proactive_monitor_tasks("worker", 20)
+            await manage_api_client.complete_proactive_monitor_task(
+                task, success=False, state={}, error_code="weather_timeout"
+            )
+        self.assertEqual([], claimed)
+        self.assertEqual("/config/proactive/monitors/claim", request.await_args_list[0].args[1])
+        self.assertEqual("/config/proactive/monitors/complete", request.await_args_list[1].args[1])
+        self.assertEqual("token", request.await_args_list[1].kwargs["json"]["lease_token"])
+
+    async def test_monitor_event_query_does_not_accept_device_payload(self):
+        with patch.object(
+            manage_api_client, "_execute_proactive_request", AsyncMock(return_value={"event_id": "e"})
+        ) as request:
+            result = await manage_api_client.get_proactive_monitor_event("e", "AA:BB")
+        self.assertEqual("e", result["event_id"])
+        endpoint = request.await_args.args[1]
+        self.assertEqual("/config/proactive/monitor-events/e?mac_address=AA%3ABB", endpoint)
+
+    async def test_monitor_event_create_uses_authoritative_dedupe_endpoint(self):
+        response = {
+            "created": False, "deduped": True,
+            "authoritative_event_id": "existing", "event": {"event_id": "existing"},
+        }
+        with patch.object(
+            manage_api_client, "_execute_proactive_request", AsyncMock(return_value=response)
+        ) as request:
+            result = await manage_api_client.create_proactive_monitor_event({"event_id": "new"})
+        self.assertTrue(result["deduped"])
+        self.assertEqual("/config/proactive/monitor-events", request.await_args.args[1])
+
+    async def test_classifier_transport_failure_has_explicit_manager_error(self):
+        with patch.object(
+            manage_api_client, "_execute_proactive_request",
+            AsyncMock(side_effect=__import__("httpx").ConnectError("offline")),
+        ):
+            with self.assertRaisesRegex(ManageApiError, "新闻分类请求失败"):
+                await manage_api_client.evaluate_proactive_news_candidates([{
+                    "title": "重大事件", "source": "澎湃新闻", "facts": "事实",
+                }])
+
+
+if __name__ == "__main__":
+    unittest.main()

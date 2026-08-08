@@ -10,6 +10,8 @@ from core.http_server import SimpleHttpServer
 from core.websocket_server import WebSocketServer
 from core.utils.util import check_ffmpeg_installed
 from core.utils.gc_manager import get_gc_manager
+from config.manage_api_client import ManageApiClient
+from core.proactive_monitor import ExternalMonitorRunner
 
 TAG = __name__
 logger = setup_logging()
@@ -74,6 +76,13 @@ async def main():
     # 启动 Simple http 服务器
     ota_server = SimpleHttpServer(config)
     ota_task = asyncio.create_task(ota_server.start())
+    external_monitor = None
+    if ManageApiClient._instance is not None:
+        external_monitor = ExternalMonitorRunner(config)
+        await external_monitor.start()
+        logger.bind(tag=TAG).info("服务端外界监测任务已启动")
+    else:
+        logger.bind(tag=TAG).warning("manager-api未启用，服务端外界监测任务未启动")
 
     read_config_from_api = config.get("read_config_from_api", False)
     port = int(config["server"].get("http_port", 8003))
@@ -127,6 +136,8 @@ async def main():
     except asyncio.CancelledError:
         print("任务被取消，清理资源中...")
     finally:
+        if external_monitor is not None:
+            await external_monitor.stop()
         # 停止全局GC管理器
         await gc_manager.stop()
 

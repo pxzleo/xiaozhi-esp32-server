@@ -11,10 +11,12 @@ from collections import deque
 from concurrent.futures import Future
 from datetime import datetime
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from config.manage_api_client import (
     claim_proactive_event,
     create_proactive_event,
+    get_proactive_monitor_event,
     update_proactive_event_status,
     update_proactive_preference,
 )
@@ -26,8 +28,11 @@ from core.utils.dialogue import Message
 from core.utils.auth import AuthToken
 from core.utils.util import get_vision_url, sanitize_tool_name
 from core.providers.tools.device_mcp.daily_briefing import build_daily_briefing
+from plugins_func.functions.get_news_from_newsnow import CHANNEL_MAP
 from core.providers.tools.device_mcp.proactive_policy import (
     claim_proactive_opportunity,
+    release_proactive_opportunity,
+    reserve_proactive_opportunity,
     set_connection_preferences,
 )
 
@@ -38,6 +43,7 @@ TAG = __name__
 logger = setup_logging()
 SCHEDULE_TRIGGERED_METHOD = "notifications/schedule/triggered"
 ASSISTANT_TRIGGERED_METHOD = "notifications/assistant/triggered"
+EXTERNAL_TRIGGERED_METHOD = "notifications/assistant/external_triggered"
 SCHEDULE_FOLLOW_UP_METHOD = "notifications/schedule/follow_up"
 DEVICE_HEALTH_METHOD = "notifications/device/health"
 PROACTIVE_TTS_READY_TIMEOUT_SECONDS = 2
@@ -345,6 +351,11 @@ async def handle_mcp_message(
             return
         if method == ASSISTANT_TRIGGERED_METHOD:
             await _handle_assistant_triggered_notification(
+                conn, payload.get("params"), notification_state
+            )
+            return
+        if method == EXTERNAL_TRIGGERED_METHOD:
+            await _handle_external_triggered_notification(
                 conn, payload.get("params"), notification_state
             )
             return
@@ -1239,6 +1250,271 @@ async def _handle_assistant_triggered_notification(
             proactive_sentence_id,
             completion_event,
         )
+
+
+def _validated_external_event(event, event_id, mac_address):
+    if not isinstance(event, dict) or event.get("event_id") != event_id:
+        raise ValueError("外界事件响应无效")
+    if event.get("mac_address") != mac_address:
+        raise ValueError("外界事件设备不匹配")
+    event_type = event.get("event_type")
+    topic = event.get("topic")
+    if (event_type, topic) not in {
+        ("weather_alert", "weather"), ("news_alert", "news")
+    }:
+        raise ValueError("外界事件类型无效")
+    priority = event.get("priority")
+    if priority not in {"low", "normal", "high", "critical"}:
+        raise ValueError("外界事件优先级无效")
+    if event.get("delivery_status") not in {"pending", "claimed"}:
+        raise ValueError("外界事件状态无效")
+    expires_at = event.get("expires_at")
+    if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool):
+        expires_timestamp = float(expires_at) / (1000 if expires_at > 10_000_000_000 else 1)
+    elif isinstance(expires_at, str):
+        try:
+            expires_timestamp = datetime.fromisoformat(
+                expires_at.replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError as error:
+            raise ValueError("外界事件有效期无效") from error
+    else:
+        raise ValueError("外界事件有效期无效")
+    if expires_timestamp <= time.time():
+        raise ValueError("外界事件已过期")
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or not set(payload) <= {
+        "title", "message", "reference_id", "reference_url", "scheduled_at", "action", "source"
+    }:
+        raise ValueError("外界事件内容无效")
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in payload.values()
+    ):
+        raise ValueError("外界事件内容字段无效")
+    title = payload.get("title")
+    message = payload.get("message")
+    if not isinstance(title, str) or not title.strip() or len(title) > 100:
+        raise ValueError("外界事件标题无效")
+    if not isinstance(message, str) or not message.strip() or len(message) > 300:
+        raise ValueError("外界事件播报内容无效")
+    reference_id = payload.get("reference_id")
+    if not isinstance(reference_id, str) or not reference_id.strip() or len(reference_id) > 128:
+        raise ValueError("外界事件引用无效")
+    if event_type == "news_alert":
+        reference_url = payload.get("reference_url")
+        try:
+            parsed_reference_url = urlsplit(reference_url)
+        except (TypeError, ValueError) as error:
+            raise ValueError("新闻原始链接无效") from error
+        if (
+            not isinstance(reference_url, str)
+            or parsed_reference_url.scheme not in {"http", "https"}
+            or not parsed_reference_url.hostname
+            or parsed_reference_url.username is not None
+            or parsed_reference_url.password is not None
+            or len(reference_url) > 2048
+        ):
+            raise ValueError("新闻原始链接无效")
+    requires_response = event.get("requires_response")
+    if not isinstance(requires_response, bool) or requires_response != (event_type == "news_alert"):
+        raise ValueError("外界事件响应标记无效")
+    return {
+        "topic": topic,
+        "event_type": event_type,
+        "priority": priority,
+        "payload": payload,
+        "requires_response": event.get("requires_response") is True,
+    }
+
+
+async def _finish_external_delivery(event_id, mac_address, claim_token, delivery_result):
+    try:
+        delivered = await delivery_result
+        await _update_external_status_with_retry(
+            event_id,
+            mac_address,
+            "delivered" if delivered else "failed",
+            "none" if delivered else "failed",
+            claim_token=claim_token,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        logger.bind(tag=TAG).error(
+            "外界事件投递终态回写失败: {}", type(error).__name__
+        )
+
+
+async def _update_external_status_with_retry(
+    event_id, mac_address, delivery_status, outcome, *, claim_token
+):
+    last_error = None
+    for attempt in range(8):
+        try:
+            return await update_proactive_event_status(
+                event_id, mac_address, delivery_status, outcome,
+                claim_token=claim_token,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            last_error = error
+            if attempt < 7:
+                await asyncio.sleep(min(0.5 * (2 ** attempt), 30))
+    raise last_error
+
+
+def _schedule_external_delivery(conn, event_id, mac_address, claim_token, delivery_result):
+    task = asyncio.create_task(
+        _finish_external_delivery(event_id, mac_address, claim_token, delivery_result)
+    )
+    tasks = getattr(conn, "_proactive_audit_tasks", None)
+    if tasks is None:
+        tasks = set()
+        conn._proactive_audit_tasks = tasks
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
+async def _mark_external_failed(event_id, mac_address, claim_token):
+    try:
+        await _update_external_status_with_retry(
+            event_id, mac_address, "failed", "failed", claim_token=claim_token
+        )
+    except Exception as error:
+        logger.bind(tag=TAG).error(
+            "外界事件失败状态回写失败: {}", type(error).__name__
+        )
+
+
+async def _handle_external_triggered_notification(
+    conn, params, notification_state=None
+):
+    try:
+        if not isinstance(params, dict) or set(params) != {"version", "event_id", "speak"}:
+            raise ValueError("外界触发通知字段无效")
+        if params.get("version") != 1 or isinstance(params.get("version"), bool):
+            raise ValueError("外界触发通知版本无效")
+        event_id = params.get("event_id")
+        if not isinstance(event_id, str) or not event_id or len(event_id) > 64:
+            raise ValueError("外界触发事件ID无效")
+        if params.get("speak") is not True:
+            raise ValueError("外界触发通知未要求播报")
+        mac_address = getattr(conn, "device_id", None)
+        if not isinstance(mac_address, str) or not mac_address:
+            raise ValueError("设备MAC缺失")
+        authoritative = await get_proactive_monitor_event(event_id, mac_address)
+        event = _validated_external_event(authoritative, event_id, mac_address)
+    except ValueError as error:
+        logger.bind(tag=TAG).warning(str(error))
+        return
+    except Exception as error:
+        logger.bind(tag=TAG).error(
+            "读取权威外界事件失败: {}", type(error).__name__
+        )
+        return
+
+    critical_weather = (
+        event["event_type"] == "weather_alert" and event["priority"] == "critical"
+    )
+    cooldown = 12 * 3600 if event["topic"] == "weather" else 2 * 3600
+    opportunity_key = (
+        f"external_weather:{event['payload'].get('reference_id')}"
+        if event["topic"] == "weather" else "external_news"
+    )
+    reservation = reserve_proactive_opportunity(
+        conn,
+        opportunity_key,
+        cooldown_seconds=cooldown,
+        policy_topic=event["topic"],
+        critical=critical_weather,
+    )
+    if reservation is None:
+        logger.bind(tag=TAG).info("外界事件被当前主动策略抑制")
+        return
+    claim_token = uuid.uuid4().hex
+    try:
+        if not await claim_proactive_event(event_id, mac_address, claim_token):
+            release_proactive_opportunity(reservation)
+            logger.bind(tag=TAG).info("外界事件已由其他连接领取")
+            return
+    except Exception as error:
+        release_proactive_opportunity(reservation)
+        logger.bind(tag=TAG).error(
+            "外界事件领取失败: {}", type(error).__name__
+        )
+        return
+
+    payload = event["payload"]
+    is_news = event["event_type"] == "news_alert"
+    text = payload["message"].strip()
+    news_context = None
+    if is_news:
+        text = text.rstrip("。！？?!") + "。要了解详情吗？"
+        news_link = {
+            "url": payload.get("reference_url", ""),
+            "title": payload["title"].strip(),
+            "source_id": next(
+                (source_id for source_name, source_id in CHANNEL_MAP.items()
+                 if source_name == payload.get("source", "").split("、", 1)[0]),
+                "thepaper",
+            ),
+        }
+        news_context = (
+            f"外界新闻上下文：标题={payload['title'].strip()}；"
+            f"来源={payload.get('source', '')}；事实={payload.get('action', payload['message'])}；"
+            f"原始链接={payload.get('reference_url', '')}"
+        )
+    else:
+        conn._external_news_waiting_response = False
+
+    completion = ProactiveDeliveryCompletion()
+    abort_generation = (
+        notification_state[1]
+        if notification_state is not None
+        else getattr(conn, "abort_generation", 0)
+    )
+    try:
+        sentence_id = await _speak_proactive_notification(
+            conn,
+            text,
+            "重大新闻" if is_news else "天气预警",
+            notification_state,
+            completion_event=completion,
+        )
+    except BaseException:
+        await _mark_external_failed(event_id, mac_address, claim_token)
+        raise
+    if sentence_id is None:
+        await _mark_external_failed(event_id, mac_address, claim_token)
+        return
+    try:
+        if is_news:
+            conn.last_newsnow_link = news_link
+            conn.dialogue.put(Message(role="assistant", content=news_context))
+            conn._external_news_waiting_response = True
+            conn.close_after_chat = False
+        else:
+            conn._external_news_waiting_response = False
+        delivery_future = _new_delivery_future(conn)
+        _schedule_external_delivery(
+            conn,
+            event_id,
+            mac_address,
+            claim_token,
+            delivery_future,
+        )
+        _resolve_delivery_lifecycle(
+            conn,
+            delivery_future,
+            _wait_for_proactive_delivery(
+                conn, completion, sentence_id, abort_generation
+            ),
+        )
+    except BaseException:
+        await _mark_external_failed(event_id, mac_address, claim_token)
+        raise
 
 
 async def _speak_proactive_notification(

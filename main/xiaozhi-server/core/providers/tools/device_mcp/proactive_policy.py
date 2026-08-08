@@ -8,7 +8,7 @@ from datetime import datetime
 
 DEFAULT_DAILY_LIMIT = 5
 MAX_TRACKED_DEVICES = 1024
-_KNOWN_TOPICS = {"reminder", "calendar", "weather", "music", "health", "habit", "system"}
+_KNOWN_TOPICS = {"reminder", "calendar", "weather", "news", "music", "health", "habit", "system"}
 
 
 @dataclass
@@ -16,6 +16,14 @@ class _DevicePolicyState:
     day: str
     used: int = 0
     topic_deadlines: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ProactiveOpportunityReservation:
+    device_key: str | None
+    day: str | None
+    topic: str | None
+    deadline: float | None
 
 
 _states: dict[str, _DevicePolicyState] = {}
@@ -132,7 +140,7 @@ def policy_allows(conn, topic: str, *, critical: bool = False, now: float | None
     return not _in_quiet_window(preferences, time.time() if now is None else now)
 
 
-def claim_proactive_opportunity(
+def reserve_proactive_opportunity(
     conn,
     topic: str,
     *,
@@ -141,13 +149,16 @@ def claim_proactive_opportunity(
     now: float | None = None,
     policy_topic: str | None = None,
     critical: bool = False,
-) -> bool:
-    """原子领取一次主动发言机会，兼容旧调用签名。"""
+) -> ProactiveOpportunityReservation | None:
+    """原子预留一次主动发言机会；调用方可在外部领取失败时精确回滚。"""
     if not topic or cooldown_seconds < 0:
         raise ValueError("主动机会参数无效")
     current = time.time() if now is None else now
     if not policy_allows(conn, policy_topic or topic, critical=critical, now=current):
-        return False
+        return None
+    # 关键事件不消耗普通建议预算，也不应被 today_silent 的 0 配额判为参数错误。
+    if critical:
+        return ProactiveOpportunityReservation(None, None, None, None)
     preferences = getattr(conn, "proactive_preferences", None)
     if not isinstance(preferences, dict):
         preferences = None
@@ -162,9 +173,6 @@ def claim_proactive_opportunity(
     if (not isinstance(effective_limit, int) or isinstance(effective_limit, bool) or
             (effective_limit < 1 and not (unlimited and effective_limit == 0))):
         raise ValueError("主动机会参数无效")
-    # 关键事件不消耗普通建议预算。
-    if critical:
-        return True
     day = datetime.fromtimestamp(current).strftime("%Y-%m-%d")
     key = _device_key(conn)
     with _lock:
@@ -185,12 +193,47 @@ def claim_proactive_opportunity(
         for tracked_topic in expired_topics:
             del state.topic_deadlines[tracked_topic]
         if topic in state.topic_deadlines:
-            return False
+            return None
         if not unlimited and state.used >= effective_limit:
-            return False
+            return None
         state.used += 1
-        state.topic_deadlines[topic] = current + cooldown_seconds
-        return True
+        deadline = current + cooldown_seconds
+        state.topic_deadlines[topic] = deadline
+        return ProactiveOpportunityReservation(key, day, topic, deadline)
+
+
+def release_proactive_opportunity(reservation: ProactiveOpportunityReservation) -> None:
+    """仅撤销仍与本次预留完全匹配的本地额度和冷却。"""
+    if not isinstance(reservation, ProactiveOpportunityReservation):
+        raise ValueError("主动机会预留无效")
+    if reservation.device_key is None:
+        return
+    with _lock:
+        state = _states.get(reservation.device_key)
+        if (
+            state is None or state.day != reservation.day
+            or state.topic_deadlines.get(reservation.topic) != reservation.deadline
+        ):
+            return
+        del state.topic_deadlines[reservation.topic]
+        state.used = max(0, state.used - 1)
+
+
+def claim_proactive_opportunity(
+    conn,
+    topic: str,
+    *,
+    cooldown_seconds: int,
+    daily_limit: int | None = None,
+    now: float | None = None,
+    policy_topic: str | None = None,
+    critical: bool = False,
+) -> bool:
+    """原子领取一次主动发言机会，兼容旧调用签名。"""
+    return reserve_proactive_opportunity(
+        conn, topic, cooldown_seconds=cooldown_seconds, daily_limit=daily_limit,
+        now=now, policy_topic=policy_topic, critical=critical,
+    ) is not None
 
 
 def reset_proactive_policy_for_test() -> None:

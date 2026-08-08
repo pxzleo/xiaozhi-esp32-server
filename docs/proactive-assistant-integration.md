@@ -50,10 +50,25 @@ manager-api 请求体中的 `created_at`、`expires_at` 和 `seen_at` 使用 Uni
 
 外界监测内部接口继续位于 `/config/proactive/**` 并使用 server-secret：
 
-- `POST /config/proactive/monitors/claim`：每次最多领取 100 条到期任务，只选择 15 分钟内有设备探测的记录；数据库以 owner 和唯一 token 做 CAS，租约固定 120 秒，多实例只能有一个领取者成功。候选到期、活跃窗口、租约生成和 CAS 均以 MySQL `CURRENT_TIMESTAMP` 为唯一权威时钟，不使用各 JVM 墙钟。每条 `MonitorTask` 同时携带 manager-api 权威解析的 `weather_location/weather_location_error` 和 `news_sources/news_sources_error`；新闻插件未配置、设备未绑定智能体，或 `news_sources` 缺失/null/纯空白时使用“澎湃新闻、百度热搜、财联社”默认值且错误为空，只有非字符串、非法分隔、超限、重复键或多根 JSON 等畸形配置才返回空列表和明确错误。worker 不从天气 baseline 猜城市，也不自行读取智能体私有插件配置。
+- `POST /config/proactive/monitors/claim`：每次最多领取 100 条到期任务，只选择 15 分钟内有设备探测的记录；全局外界监测开关关闭时权威返回空列表。数据库以 owner 和唯一 token 做 CAS，租约固定 120 秒，多实例只能有一个领取者成功。候选到期、活跃窗口、租约生成和 CAS 均以 MySQL `CURRENT_TIMESTAMP` 为唯一权威时钟，不使用各 JVM 墙钟。每条 server-secret `MonitorTask` 同时携带 manager-api 权威解析的 `weather_location/weather_location_error`、`weather_api_host/weather_auth_type/weather_credential/weather_credentials_error` 和 `news_sources/news_sources_error`；天气认证只允许 `api_key`（Python 使用 `X-QW-Api-Key`）或 `bearer`（使用 `Authorization: Bearer`），敏感 credential 严禁进入日志、用户/Web/设备响应。新闻插件未配置、设备未绑定智能体，或 `news_sources` 缺失/null/纯空白时使用“澎湃新闻、百度热搜、财联社”默认值且错误为空，只有非字符串、非法分隔、超限、重复键或多根 JSON 等畸形配置才返回空列表和明确错误。worker 不从天气 baseline 猜城市，也不自行读取智能体私有插件配置。
 - `POST /config/proactive/monitors/complete`：只有数据库当前时间仍早于租约截止且匹配 owner/token 才能更新 state、成功时间、下次检查时间和错误码并释放租约；探测时间、活跃窗口和下次调度均以 MySQL 当前时间计算。用户 PUT 任一配置会立即使该 monitor 的现有租约失效，旧 worker 不得覆盖新配置对应的 state 或调度。状态 JSON 有大小上限并采用分类型白名单：两类顶层只允许 `schema_version`、字符串数组 `fingerprints` 和 `detection_status`；`detection_status` 只允许 ISO 时间 `last_event_at/cooldown_until`、字符串数组 `active_warning_ids/active_hazards`、字符串 `last_cluster_id`。仅 WEATHER 可额外保存 `baseline`，其顶层只允许 `captured_at/location_id/hourly/warning_ids/hazards`；`hourly` 元素只允许 `forecast_time/temp_c/weather_code/wind_speed_kmh/precip_mm/pop_pct`，`hazards` 元素只允许 `type/severity/window_start/window_end`。NEWS 禁止 `baseline`，所有层级未知字段和错误类型均明确拒绝。
 - `GET /config/proactive/monitor-events/{eventId}?mac_address=...`：按 MAC 与 event ID 读取权威天气或新闻事件；投递仍复用既有 180 秒 `/events/{eventId}/claim` 接口。
+- `POST /config/proactive/monitor-events`：只用于外界监测事件，返回 `created/deduped/authoritative_event_id/event`。新闻必须使用数据库时钟的滚动 24 小时去重，天气预报过程使用滚动 12 小时去重，官方预警按稳定事件 ID 幂等；去重账本以设备、事件类型和去重键散列加行锁串行化，不依赖 Python 的 4KB 短期状态或 UTC 自然日桶。
 - `POST /config/proactive/classifier/evaluate`：仅接受有界的新闻标题、来源和事实，使用全局独立分类模型，禁止回退设备智能体模型。固定分类契约使用 system 消息，序列化候选只作为独立的不可信 user JSON 数据；候选中的任何指令都不得改变角色或输出契约。模型只能返回一个完整 JSON 根对象，根对象后到 EOF 之间只能有空白；每个候选结果严格包含 `index/is_major/category/severity/confidence/spoken_summary/facts`，其中 `severity` 仅允许 `low/medium/high/critical`。manager-api 校验 JSON 结构、整数且不越界的索引、索引完整性和字段范围，并只返回重新序列化的规范 JSON，绝不透传原始模型文本或尾随推理内容。worker 只有在 `is_major=true`、`severity=high|critical` 且 `confidence>=0.85` 时才可创建新闻事件。
+
+Python 服务启动后运行唯一的进程内外界监测 runner，每 30 秒领取一次到期任务；同一进程不并发重入，多实例互斥完全依赖 manager-api 的 120 秒数据库租约，不保存第二套权威调度状态。停止服务时 runner 必须取消并等待退出。数据源网络调用使用显式连接/总超时；可重试网络错误在当前租约内短暂指数退避，最终失败以受控错误码完成任务，下一次执行时间仍由 manager-api 计算。城市解析结果缓存 1 小时、NewsNow 单源列表缓存 60 秒，缓存仅减少外部请求，不参与到期判断、租约或事件终态。
+
+全局开关由超级管理员 `GET|PUT /proactive/settings/external-monitoring` 管理并默认关闭。关闭后 manager-api 同时阻止任务领取、外界 pending/read/claim 和外界事件创建；Python runner 可以保持运行，但不会自行保存或猜测另一份开关状态，普通提醒不受影响。
+
+天气 worker 只使用任务中的 `weather_location`，通过和风 Geo API 解析 location id 与经纬度后并行请求 `/weatheralert/v1/current/{latitude}/{longitude}` 和 `/v7/weather/24h` 的结构化 JSON；预警严格读取 `messageType.code/supersedes`、`severity`、`effectiveTime/expireTime`、`headline/description/instruction`，不解析自然语言网页。普通逐小时预报首次只写基线；仍有效的 `severe/extreme` 官方预警可在首次运行创建 critical 事件。后续只对新增或升级的官方预警、未命中到命中的预报风险创建事件；取消、过期和恢复只更新白名单状态。新闻 worker 对继承的 NewsNow 来源执行标题/URL 规范化、相似标题跨源聚类、可信来源与榜位评分、重大关键词预筛和娱乐体育排除；首次只记录当前聚类基线。后续候选必须通过 manager-api 独立分类模型的严格七字段复核，每轮最多创建一条，分类不可用或输出无效时明确失败，禁止回退设备智能体模型。
+
+设备发现 pending 后建立音频连接，并只发送：
+
+```json
+{"jsonrpc":"2.0","method":"notifications/assistant/external_triggered","params":{"version":1,"event_id":"ext-...","speak":true}}
+```
+
+Python 严格要求 params 恰好包含 `version/event_id/speak`，任何设备自带标题、文本、优先级或 payload 都会整体拒绝。服务端按当前连接 MAC 从 manager-api 读取权威事件，校验类型、主题、有效期和响应标记，再以随机 token 领取既有 180 秒事件租约。普通新闻继续执行偏好、安静时段、每日额度和 2 小时主题冷却；critical 天气绕过这些普通限制但不绕过 manager-api 的 monitor 开关复验、事件有效期、原子领取、连接状态和真实播放终态。TTS 完成信号成功才写 `delivered`；合成失败、连接中断、用户打断、句子替换或超时写 `failed`。新闻固定以“要了解详情吗？”结尾，保存权威标题、来源、事实和原始链接到当前对话及 NewsNow 详情关联并保持连接收听；天气播报行动建议后不进入新闻追问状态。
 
 超级管理员通过 `GET|PUT /proactive/classifier/model` 读取或保存独立 LLM model id，并通过 `POST /proactive/classifier/model/test` 检查可用性。未配置、非 LLM、未启用或缺少必要连接配置时明确返回不可用；任何接口都不得返回模型密钥。
 
@@ -68,13 +83,13 @@ manager-web 在设备管理列表的单台设备操作区提供“主动助理�
 - 弹窗关闭、切换设备或同一通道发起新请求后，旧响应必须失效；偏好保存只能使用已成功加载且仍为当前设备的 `device_id`。保存失败保留当前表单以便重试，首次加载失败则清空不可信状态并禁用写操作。
 - 弹窗宽度受视口限制，筛选项可换行，表格在窄屏下允许横向滚动，确保移动端仍可访问主要操作。
 
-超级管理员的桌面“参数管理”页提供“外界新闻分类模型”专用卡片。模型选项只读取 LLM 列表，保存和连通性测试分别调用 `PUT /proactive/classifier/model` 与 `POST /proactive/classifier/model/test`；未配置或不可用时显示错误，并明确说明新闻监测不会回退设备智能体模型。该首期页面不修改 manager-mobile。
+超级管理员的桌面“参数管理”页在同一外界监测区域提供服务端总开关和“外界新闻分类模型”设置。总开关严格调用 `GET|PUT /proactive/settings/external-monitoring`，读取失败禁用保存，切换或保存失败保留当前值并显示明确错误；关闭只暂停服务端监测及外界事件领取，不修改任一设备的天气/新闻配置。模型选项只读取 LLM 列表，保存和连通性测试分别调用 `PUT /proactive/classifier/model` 与 `POST /proactive/classifier/model/test`；未配置或不可用时显示错误，并明确说明新闻监测不会回退设备智能体模型。普通设备所有者只从 `MonitorsView.external_monitoring_enabled` 读取总开关状态，不调用超级管理员接口。该首期页面不修改 manager-mobile。
 
 偏好默认模式为 `aggressive`、`daily_limit=0`，表示普通主动发言不受每日总额度限制，且积极模式不能配置成有限次数；没有默认安静时段。`active` 未显式给出 `daily_limit` 时为 5，允许用户在 1 至 5 内调低；`conservative` 固定为 1，`today_silent` 为 0。进入当日静默会同时保留 `previous_mode`、`previous_daily_limit` 和次日恢复时间；读取偏好时若静默已到期，manager-api 原子、完整地恢复原模式与原每日上限并递增 `version`。存量 `aggressive` 的 1 至 5 会以模式、旧额度和版本为条件做窄字段 CAS 规范化为 0，再权威重读，避免覆盖并发偏好更新；存量 `active` 的 1 至 3 保持原值。安静时段必须同时给出 `quiet_start`、`quiet_end` 且不能相同。
 
 `conservative` 只执行关键事件属于设备端或服务端的策略执行职责；manager-api 只持久化偏好与完整事件审计，不在写入审计事件时按模式过滤。内部按 MAC 操作时必须且只能匹配一个现有设备；重复 MAC 会明确报错，不会任取其中一条记录。
 
-所有接口枚举使用小写值。主题仅允许 `reminder`、`calendar`、`weather`、`news`、`music`、`health`、`habit`、`system`，事件类型增加 `news_alert`。事件 payload 只允许 `title`、`message`、`reference_id`、`scheduled_at`、`action`、`source`，每个值必须是非空字符串，`scheduled_at` 必须是 ISO 本地日期时间。习惯 payload 只允许 `description`、`suggested_mode`、`suggested_time`、`topic`：`description` 必须是非空短文本，`topic` 必须是上述小写主题，`suggested_mode` 只允许 `conservative`、`active`、`aggressive`，`suggested_time` 必须为 `HH:mm`。任一 payload 序列化后最多 512 字节，不接收也不保存自由推理链。响应将 JSON 字段解析为对象，不返回数据库中的原始 JSON 文本。
+所有接口枚举使用小写值。主题仅允许 `reminder`、`calendar`、`weather`、`news`、`music`、`health`、`habit`、`system`，事件类型增加 `news_alert`。事件 payload 只允许 `title`、`message`、`reference_id`、`reference_url`、`scheduled_at`、`action`、`source`，每个值必须是非空字符串，`scheduled_at` 必须是 ISO 本地日期时间；`reference_url` 仅允许不含用户信息、最长 2048 字符的 HTTP(S) URL，并单独计入长度，其余 payload 序列化后最多 512 字节。习惯 payload 只允许 `description`、`suggested_mode`、`suggested_time`、`topic`：`description` 必须是非空短文本，`topic` 必须是上述小写主题，`suggested_mode` 只允许 `conservative`、`active`、`aggressive`，`suggested_time` 必须为 `HH:mm`。所有 payload 不接收也不保存自由推理链。响应将 JSON 字段解析为对象，不返回数据库中的原始 JSON 文本。
 
 ### 服务端执行契约
 
