@@ -37,6 +37,8 @@
 - `POST /config/proactive/habits/observe`：按 `(device_id, habit_type, habit_key)` 原子累加证据；证据达到 3 次后进入候选。
 - `GET /config/proactive/habits/candidates?mac_address=...`：列出尚未接受或忽略的建议候选。
 
+manager-api 请求体中的 `created_at`、`expires_at` 和 `seen_at` 使用 Unix 毫秒整数；设备通知协议中的同名统一事件字段仍使用 UTC 基准的 Unix 秒整数。设备若在系统墙钟中叠加 OTA `timezone_offset`，发送前必须扣除该偏移；服务端在审计边界显式完成秒到毫秒转换。manager-api 响应中的 `Date` 为 `yyyy-MM-dd HH:mm:ss`，再次写入前也必须规范化成毫秒，不能把任一格式化时间字符串直接写回。
+
 用户接口：
 
 - `GET /device/proactive/preferences`、`GET|PUT /device/proactive/preferences/{deviceId}`：列出本人设备或管理单个设备偏好。

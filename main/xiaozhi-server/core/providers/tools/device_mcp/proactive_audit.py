@@ -1,8 +1,8 @@
 """服务端生成主动建议的统一异步审计。"""
 
 import asyncio
+import time
 import uuid
-from datetime import datetime, timezone
 
 from config.logger import setup_logging
 from config.manage_api_client import create_proactive_event, update_proactive_event_status
@@ -18,7 +18,7 @@ def schedule_server_suggestion_audit(
     if not isinstance(mac_address, str) or not mac_address:
         return
     event_id = uuid.uuid4().hex
-    now = datetime.now(timezone.utc)
+    now_ms = int(time.time() * 1000)
     event = {
         "mac_address": mac_address,
         "event_id": event_id,
@@ -31,10 +31,8 @@ def schedule_server_suggestion_audit(
             "reference_id": str(reference_id),
             "source": "server",
         },
-        "created_at": now.isoformat().replace("+00:00", "Z"),
-        "expires_at": datetime.fromtimestamp(now.timestamp() + 86400, timezone.utc)
-        .isoformat()
-        .replace("+00:00", "Z"),
+        "created_at": now_ms,
+        "expires_at": now_ms + 86_400_000,
         "dedupe_key": f"{topic}:{reference_id}:{event_id}",
         "requires_response": requires_response,
     }

@@ -2,7 +2,8 @@
 
 import asyncio
 import hashlib
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 
 from config.logger import setup_logging
 from config.manage_api_client import (
@@ -20,6 +21,20 @@ _SUGGESTION_TEXT = {
     "daily_briefing": "我发现你经常收听每日简报，要不要保留这个安排？",
     "music": "我发现你经常播放这类音乐，要不要下次直接为你播放？",
 }
+
+
+def _manager_date_to_epoch_milliseconds(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone(timedelta(hours=8))
+            )
+        except ValueError as error:
+            raise ValueError("manager时间字段格式无效") from error
+        return int(parsed.timestamp() * 1000)
+    raise ValueError("manager时间字段格式无效")
 
 
 def schedule_candidate_suggestion(conn):
@@ -101,14 +116,14 @@ async def observe_habit_and_maybe_suggest(
     mac_address = getattr(conn, "device_id", None)
     if not isinstance(mac_address, str) or not mac_address:
         raise ValueError("设备MAC缺失")
-    now = datetime.now(timezone.utc)
+    now_ms = int(time.time() * 1000)
     observed = await observe_proactive_habit(
         {
             "mac_address": mac_address,
             "habit_type": habit_type,
             "habit_key": habit_key,
             "evidence_delta": 1,
-            "seen_at": now.isoformat().replace("+00:00", "Z"),
+            "seen_at": now_ms,
             "payload": payload,
         }
     )
@@ -122,7 +137,7 @@ async def observe_habit_and_maybe_suggest(
         habit_group,
         habit_type,
         habit_key,
-        observed.get("first_seen_at") or now.isoformat().replace("+00:00", "Z"),
+        observed.get("first_seen_at") if observed.get("first_seen_at") is not None else now_ms,
         notification_state,
     )
 
@@ -137,6 +152,7 @@ async def _suggest_habit(
         or created_at == ""
     ):
         return False
+    created_at = _manager_date_to_epoch_milliseconds(created_at)
     event_id = "habit-" + hashlib.sha256(
         f"{mac_address}:{habit_type}:{habit_key}".encode("utf-8")
     ).hexdigest()[:40]

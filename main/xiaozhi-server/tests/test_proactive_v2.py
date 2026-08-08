@@ -13,8 +13,10 @@ from unittest.mock import AsyncMock, Mock, patch
 from config import manage_api_client
 from core.connection import ConnectionHandler
 from core.providers.tools.device_mcp import mcp_handler
+from core.providers.tools.device_mcp import proactive_audit
 from core.providers.tools.device_mcp.daily_briefing import weather_action_suggestion
 from core.providers.tools.device_mcp.proactive_habits import (
+    _manager_date_to_epoch_milliseconds,
     observe_habit_and_maybe_suggest,
     suggest_habit_candidate,
 )
@@ -89,6 +91,43 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
         speak.assert_awaited_once()
         self.assertEqual("刚才提醒的喝水完成了吗？", speak.await_args.args[1])
         audit.assert_called_once()
+
+    def test_device_event_audit_uses_manager_epoch_milliseconds(self):
+        audit = mcp_handler._build_proactive_audit(
+            self.conn,
+            _event_fields(created_at=1_786_189_462, expires_at=1_786_193_062),
+            {"title": "完成跟进", "reference_id": "7", "source": "device"},
+        )
+        self.assertEqual(1_786_189_462_000, audit["created_at"])
+        self.assertEqual(1_786_193_062_000, audit["expires_at"])
+
+    async def test_device_mcp_error_does_not_expose_protocol_prefix(self):
+        client = mcp_handler.MCPClient()
+        result = asyncio.get_running_loop().create_future()
+        await client.register_call_result_future(7, result)
+        await mcp_handler.handle_mcp_message(
+            self.conn,
+            client,
+            {"id": 7, "error": {"message": "当前没有未决的提醒确认"}},
+        )
+        with self.assertRaisesRegex(RuntimeError, "^当前没有需要确认的提醒。$"):
+            await result
+
+    async def test_server_suggestion_audit_uses_manager_epoch_milliseconds(self):
+        create = AsyncMock(return_value={"delivery_status": "pending"})
+        with patch.object(proactive_audit, "create_proactive_event", create):
+            proactive_audit.schedule_server_suggestion_audit(
+                self.conn,
+                "weather",
+                "weather action suggestion",
+                reference_id="rain",
+                delivered=None,
+            )
+            await asyncio.gather(*self.conn._proactive_audit_tasks)
+        event = create.await_args.args[0]
+        self.assertIsInstance(event["created_at"], int)
+        self.assertIsInstance(event["expires_at"], int)
+        self.assertEqual(86_400_000, event["expires_at"] - event["created_at"])
 
     async def test_critical_health_manager_claim_has_one_cross_connection_winner(self):
         params = {
@@ -1273,15 +1312,25 @@ class HabitSuggestionTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         reset_proactive_policy_for_test()
 
+    def test_manager_formatted_date_is_normalized_to_epoch_milliseconds(self):
+        value = _manager_date_to_epoch_milliseconds("2026-08-08 19:44:22")
+        self.assertIsInstance(value, int)
+        self.assertEqual(1_786_189_462_000, value)
+
+    def test_malformed_manager_date_is_explicit_error(self):
+        with self.assertRaisesRegex(ValueError, "manager时间字段格式无效"):
+            _manager_date_to_epoch_milliseconds("2026/08/08 19:44:22")
+
     async def test_threshold_three_suggests_once_and_audits(self):
         conn = SimpleNamespace(
             device_id="AA:BB",
             headers={"device-id": "AA:BB"},
             proactive_preferences=safe_local_preferences(),
         )
+        observe = AsyncMock(return_value={"evidence_count": 3})
         with patch(
             "core.providers.tools.device_mcp.proactive_habits.observe_proactive_habit",
-            AsyncMock(return_value={"evidence_count": 3}),
+            observe,
         ), patch(
             "core.providers.tools.device_mcp.proactive_habits.create_proactive_event",
             AsyncMock(return_value={"delivery_status": "pending"}),
@@ -1312,13 +1361,15 @@ class HabitSuggestionTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second)
         speak.assert_awaited_once()
         status.assert_awaited_once()
+        self.assertIsInstance(observe.await_args_list[0].args[0]["seen_at"], int)
+        self.assertGreater(observe.await_args_list[0].args[0]["seen_at"], 1_000_000_000_000)
 
     async def test_candidate_audit_is_identical_across_connections(self):
         candidate = {
             "evidence_count": 3,
             "habit_key": "music:category:abc",
             "habit_type": "content_preference",
-            "first_seen_at": 1_786_170_600_000,
+            "first_seen_at": "2026-08-08 14:30:00",
         }
         events = []
 
@@ -1347,6 +1398,7 @@ class HabitSuggestionTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(await suggest_habit_candidate(conn, candidate))
         self.assertEqual(events[0], events[1])
+        self.assertIsInstance(events[0]["created_at"], int)
 
     async def test_delivered_candidate_does_not_consume_daily_budget(self):
         conn = SimpleNamespace(

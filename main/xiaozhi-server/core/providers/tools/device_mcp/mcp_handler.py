@@ -9,7 +9,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from config.manage_api_client import (
@@ -361,7 +361,7 @@ async def handle_mcp_message(
         msg_id = int(payload.get("id", 0))
         if msg_id in mcp_client.call_results:
             await mcp_client.reject_call_result(
-                msg_id, Exception(f"MCP错误: {error_msg}")
+                msg_id, RuntimeError(_user_facing_mcp_error(error_msg))
             )
 
 
@@ -456,8 +456,15 @@ def _manager_event_id(event_id):
     return "evt-" + hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:56]
 
 
-def _iso_timestamp(value):
-    return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
+def _user_facing_mcp_error(error_msg):
+    message = error_msg.strip() if isinstance(error_msg, str) else "未知错误"
+    if message == "当前没有未决的提醒确认":
+        return "当前没有需要确认的提醒。"
+    return message or "设备操作失败，请稍后再试。"
+
+
+def _epoch_milliseconds_from_seconds(value):
+    return int(value) * 1000
 
 
 def _build_proactive_audit(conn, event, payload):
@@ -477,8 +484,8 @@ def _build_proactive_audit(conn, event, payload):
         "reason": event["reason"],
         "event_type": "reminder" if event["topic"] == "follow_up" else "system",
         "payload": payload,
-        "created_at": _iso_timestamp(created_at),
-        "expires_at": _iso_timestamp(expires_at),
+        "created_at": _epoch_milliseconds_from_seconds(created_at),
+        "expires_at": _epoch_milliseconds_from_seconds(expires_at),
         "dedupe_key": event["dedupe_key"],
         "requires_response": event["requires_response"],
     }
