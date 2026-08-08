@@ -12,6 +12,25 @@ from core.providers.tools.device_mcp.mcp_handler import (
 
 
 class DailyBriefingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_superseded_reminder_does_not_claim_completion_budget(self):
+        conn = Mock()
+        conn.sentence_id = "new-turn"
+        conn.abort_generation = 3
+        conn.stop_event.is_set.return_value = False
+        conn.connection_closed_event.is_set.return_value = False
+        transform = Mock(return_value="不应播报")
+
+        result = await _speak_proactive_notification(
+            conn,
+            "提醒你：喝水",
+            "日程提醒",
+            notification_state=("old-turn", 2),
+            text_transform=transform,
+        )
+
+        self.assertIsNone(result)
+        transform.assert_not_called()
+
     async def test_proactive_completion_event_is_attached_after_tts_stop(self):
         conn = Mock()
         conn.sentence_id = "old-turn"
@@ -135,6 +154,41 @@ class DailyBriefingTest(unittest.IsolatedAsyncioTestCase):
 
         capture.assert_not_called()
         schedule_resume.assert_not_called()
+
+    async def test_reminder_invites_completion_confirmation_but_alarm_does_not(self):
+        conn = SimpleNamespace(sentence_id="old", abort_generation=3)
+        base = {
+            "version": 1,
+            "id": 18,
+            "label": "吃药",
+            "triggered_at": "2026-08-10T08:00:00",
+            "speak": True,
+        }
+        with patch(
+            "core.providers.tools.device_mcp.mcp_handler._speak_proactive_notification",
+            AsyncMock(),
+        ) as speak, patch(
+            "core.providers.tools.device_mcp.mcp_handler.claim_proactive_opportunity",
+            Mock(return_value=True),
+        ):
+            await handle_mcp_message(
+                conn,
+                MCPClient(),
+                {"method": "notifications/schedule/triggered", "params": {**base, "kind": "reminder"}},
+            )
+            await handle_mcp_message(
+                conn,
+                MCPClient(),
+                {"method": "notifications/schedule/triggered", "params": {**base, "id": 19, "kind": "alarm"}},
+            )
+
+        reminder_call, alarm_call = speak.await_args_list
+        reminder_transform = reminder_call.kwargs["text_transform"]
+        self.assertIn(
+            "处理完告诉我一声",
+            reminder_transform(reminder_call.args[1]),
+        )
+        self.assertIsNone(alarm_call.kwargs["text_transform"])
 
     async def test_rejects_event_id_that_does_not_match_occurrence(self):
         conn = SimpleNamespace(sentence_id="old", abort_generation=0)

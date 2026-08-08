@@ -148,18 +148,21 @@ class ScheduleMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
         with patch(
             "core.providers.tools.device_mcp.mcp_handler.cancelActiveLLMResponse",
             new=AsyncMock(return_value=True),
-        ) as cancel:
+        ) as cancel, patch(
+            "core.providers.tools.device_mcp.mcp_handler.claim_proactive_opportunity",
+            return_value=True,
+        ):
             await handle_mcp_message(conn, Mock(), self._valid_payload(label="  喝水  "))
 
         sentence_id, text = conn.tts.store_tts_text.call_args.args
-        self.assertEqual("提醒你：喝水", text)
+        self.assertEqual("提醒你：喝水。处理完告诉我一声", text)
         self.assertEqual(sentence_id, conn.sentence_id)
         self.assertEqual(
             sentence_id,
             conn.tts.tts_one_sentence.call_args.kwargs["sentence_id"],
         )
         self.assertEqual(
-            "提醒你：喝水",
+            "提醒你：喝水。处理完告诉我一声",
             conn.tts.tts_one_sentence.call_args.kwargs["content_detail"],
         )
         self.assertEqual(2, conn.tts.tts_text_queue.put.call_count)

@@ -1512,6 +1512,30 @@ class NeteaseMusicPreparationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([song["id"] for song, _ in resolved], [1])
         self.assertEqual(errors, ["歌曲准备超时"])
 
+    async def test_all_download_service_failures_keep_service_error_type(self):
+        class Client:
+            async def playable_url(self, song):
+                return f"https://audio.example/{song['id']}.mp3"
+
+        class Cache:
+            async def download(self, song, _url):
+                raise netease.NeteaseMusicError(
+                    f"下载《{song['name']}》失败: upstream reset"
+                )
+
+        with self.assertRaises(netease.NeteaseMusicError) as raised:
+            await netease._resolve_audio_files(
+                Client(),
+                Cache(),
+                [{"id": 1, "name": "测试歌"}],
+                timeout_seconds=1,
+            )
+
+        self.assertNotIsInstance(
+            raised.exception, netease.NeteaseMusicUnavailableError
+        )
+        self.assertTrue(netease._is_music_service_failure(raised.exception))
+
     async def test_total_preparation_timeout_includes_catalog_requests(self):
         async def slow_selection(*_args):
             await asyncio.sleep(1)
@@ -1836,9 +1860,68 @@ class _Connection:
 
     def __init__(self):
         self.tts = _Tts()
+        self.dialogue = _Queue()
 
 
 class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
+    def test_playback_end_proactively_offers_similar_music(self):
+        connection = _Connection()
+        connection.headers = {"device-id": "music-end-device"}
+        with patch.object(
+            netease,
+            "claim_proactive_opportunity",
+            return_value=True,
+        ):
+            suggestion = netease._enqueue_playback_end(connection)
+
+        self.assertEqual("歌单播完了，要继续播放相似歌曲吗？", suggestion)
+        messages = connection.tts.tts_text_queue.items
+        self.assertEqual(messages[-2].content_detail, suggestion)
+        self.assertEqual(messages[-1].sentence_type, netease.SentenceType.LAST)
+
+    def test_second_music_failure_adds_actionable_suggestion(self):
+        connection = _Connection()
+        with patch.object(
+            netease,
+            "claim_proactive_opportunity",
+            return_value=True,
+        ) as claim:
+            self.assertEqual(
+                "第一次失败",
+                netease._music_failure_response(connection, "第一次失败"),
+            )
+            response = netease._music_failure_response(connection, "第二次失败")
+
+        self.assertIn("连续失败", response)
+        self.assertIn("检查登录状态", response)
+        claim.assert_called_once()
+
+    def test_user_input_error_does_not_count_as_service_failure(self):
+        error = netease.NeteaseMusicError("请告诉我想播放的歌曲名称")
+        self.assertFalse(netease._is_music_service_failure(error))
+
+    def test_unavailable_content_does_not_count_as_service_failure(self):
+        error = netease.NeteaseMusicUnavailableError("没有找到可播放的歌曲")
+        self.assertFalse(netease._is_music_service_failure(error))
+
+    def test_http_error_counts_as_service_failure(self):
+        error = netease.NeteaseMusicHttpError("服务异常", 500)
+        self.assertTrue(netease._is_music_service_failure(error))
+
+    def test_non_service_outcome_breaks_consecutive_failure_sequence(self):
+        connection = _Connection()
+        with patch.object(
+            netease,
+            "claim_proactive_opportunity",
+            return_value=True,
+        ) as claim:
+            netease._music_failure_response(connection, "真实故障一")
+            netease._reset_music_failure_count(connection)
+            response = netease._music_failure_response(connection, "真实故障二")
+
+        self.assertEqual("真实故障二", response)
+        claim.assert_not_called()
+
     async def test_track_queue_contains_timed_lyrics_start_event(self):
         connection = _Connection()
         lyrics_loader = AsyncMock(

@@ -15,6 +15,10 @@ import httpx
 
 from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
 from core.handle.sendAudioHandle import send_music_lyrics_event, send_tts_message
+from core.providers.tools.device_mcp.proactive_policy import (
+    claim_proactive_opportunity,
+)
+from core.utils.dialogue import Message
 from plugins_func.register import Action, ActionResponse, ToolType, register_function
 
 if TYPE_CHECKING:
@@ -1524,14 +1528,19 @@ async def _resolve_audio_files(client, cache, tracks, timeout_seconds):
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-            errors.extend(["歌曲准备超时"] * len(pending))
+            errors.extend(
+                [
+                    (None, NeteaseMusicError("网易云音乐服务准备歌曲超时"))
+                    for _ in pending
+                ]
+            )
 
         for task in done:
             index, song, path, error = task.result()
             if path:
                 resolved_by_index[index] = (song, path)
             else:
-                errors.append(f"{_song_title(song)}: {error}")
+                errors.append((song, error))
     finally:
         for task in tasks:
             if not task.done():
@@ -1539,10 +1548,20 @@ async def _resolve_audio_files(client, cache, tracks, timeout_seconds):
         await asyncio.gather(*tasks, return_exceptions=True)
 
     resolved = [resolved_by_index[index] for index in sorted(resolved_by_index)]
+    formatted_errors = [
+        "歌曲准备超时" if song is None else f"{_song_title(song)}: {error}"
+        for song, error in errors
+    ]
     if not resolved:
-        detail = errors[0] if errors else "没有可播放的歌曲"
+        service_error = next(
+            (error for _song, error in errors if _is_music_service_failure(error)),
+            None,
+        )
+        if service_error is not None:
+            raise service_error
+        detail = formatted_errors[0] if formatted_errors else "没有可播放的歌曲"
         raise NeteaseMusicUnavailableError(detail)
-    return resolved, errors
+    return resolved, formatted_errors
 
 
 async def _resolve_audio_files_to_limit(client, cache, tracks, limit, deadline):
@@ -1840,6 +1859,23 @@ def _schedule_lyrics_clear(conn, reason):
 
 
 def _enqueue_playback_end(conn):
+    suggestion = ""
+    if claim_proactive_opportunity(
+        conn,
+        "music_continue",
+        cooldown_seconds=2 * 3600,
+    ):
+        suggestion = "歌单播完了，要继续播放相似歌曲吗？"
+        conn.tts.store_tts_text(conn.sentence_id, suggestion)
+        conn.tts.tts_text_queue.put(
+            TTSMessageDTO(
+                sentence_id=conn.sentence_id,
+                sentence_type=SentenceType.MIDDLE,
+                content_type=ContentType.TEXT,
+                content_detail=suggestion,
+            )
+        )
+        conn.dialogue.put(Message(role="assistant", content=suggestion))
     conn.tts.tts_text_queue.put(
         TTSMessageDTO(
             sentence_id=conn.sentence_id,
@@ -1849,6 +1885,7 @@ def _enqueue_playback_end(conn):
     )
     conn.server_audio_playback_sentence_id = None
     _schedule_lyrics_clear(conn, "completed")
+    return suggestion
 
 
 def _protect_additional_tracks(state, resolved):
@@ -2156,12 +2193,14 @@ async def play_netease_music(
             async with _playback_request_lock(conn):
                 if not _playback_request_is_current(conn, request_generation):
                     return _superseded_playback_response(conn)
-                return await _control_playback(
+                response = await _control_playback(
                     conn,
                     action,
                     position=position,
                     request_generation=request_generation,
                 )
+                _reset_music_failure_count(conn)
+                return response
 
         config = await _device_plugin_config(conn)
         action = _normalize_music_action(action, name)
@@ -2236,6 +2275,7 @@ async def play_netease_music(
             conn.logger.bind(tag=TAG).warning(
                 f"网易云播放队列跳过 {len(skipped)} 首不可播放歌曲: {'; '.join(skipped)}"
             )
+        _reset_music_failure_count(conn)
         return ActionResponse(
             action=Action.RECORD,
             result=f"已加入 {len(resolved)} 首歌曲",
@@ -2249,19 +2289,53 @@ async def play_netease_music(
         if not _playback_request_is_current(conn, request_generation):
             return _superseded_playback_response(conn)
         message = "网易云音乐登录已失效，请让当前设备重新扫码登录"
+        _reset_music_failure_count(conn)
         conn.logger.bind(tag=TAG).warning("设备网易云凭证已失效，已请求撤销")
         return ActionResponse(action=Action.RESPONSE, result=message, response=message)
     except NeteaseMusicUnavailableError as exc:
         if not _playback_request_is_current(conn, request_generation):
             return _superseded_playback_response(conn)
         conn.logger.bind(tag=TAG).warning(f"网易云音乐不可播放: {exc}")
-        return ActionResponse(action=Action.RESPONSE, result=str(exc), response=str(exc))
+        _reset_music_failure_count(conn)
+        message = str(exc)
+        return ActionResponse(action=Action.RESPONSE, result=message, response=message)
     except NeteaseMusicError as exc:
         if not _playback_request_is_current(conn, request_generation):
             return _superseded_playback_response(conn)
         conn.logger.bind(tag=TAG).warning(f"网易云音乐播放请求无效: {exc}")
+        message = str(exc)
+        if _is_music_service_failure(exc):
+            message = _music_failure_response(conn, message)
+        else:
+            _reset_music_failure_count(conn)
         return ActionResponse(
             action=Action.RESPONSE,
-            result=str(exc),
-            response=str(exc),
+            result=message,
+            response=message,
         )
+
+
+def _music_failure_response(conn, message):
+    current = getattr(conn, "_netease_consecutive_failures", 0)
+    if not isinstance(current, int) or isinstance(current, bool):
+        current = 0
+    failures = current + 1
+    conn._netease_consecutive_failures = failures
+    if failures >= 2 and claim_proactive_opportunity(
+        conn,
+        "music_service_fault",
+        cooldown_seconds=3600,
+    ):
+        return f"{message}。音乐服务已经连续失败，要不要我帮你检查登录状态？"
+    return message
+
+
+def _reset_music_failure_count(conn):
+    conn._netease_consecutive_failures = 0
+
+
+def _is_music_service_failure(error):
+    if isinstance(error, (NeteaseMusicHttpError, NeteaseManagerUnavailableError)):
+        return True
+    message = str(error)
+    return message.startswith("网易云音乐服务") or message.startswith("下载《")

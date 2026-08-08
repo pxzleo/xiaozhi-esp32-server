@@ -878,6 +878,40 @@ class ConnectionHandler:
                     )
                 )
 
+        if "self_schedule_create" in tool_names:
+            self.dialogue.put(
+                Message(
+                    role="user",
+                    content="我晚点要交报告",
+                    is_temporary=True,
+                )
+            )
+            self.dialogue.put(
+                Message(
+                    role="assistant",
+                    tool_calls=[
+                        {
+                            "id": "fewshot_deferred_reminder_001",
+                            "function": {
+                                "arguments": '{"response":"要不要我提醒你？如果需要，想几点提醒？"}',
+                                "name": "direct_answer",
+                            },
+                            "type": "function",
+                            "index": 0,
+                        }
+                    ],
+                    is_temporary=True,
+                )
+            )
+            self.dialogue.put(
+                Message(
+                    role="tool",
+                    tool_call_id="fewshot_deferred_reminder_001",
+                    content="已直接回复",
+                    is_temporary=True,
+                )
+            )
+
         self.logger.bind(tag=TAG).debug("已注入工具调用 few-shot 示例")
 
     def _init_report_threads(self):

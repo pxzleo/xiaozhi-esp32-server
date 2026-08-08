@@ -204,6 +204,28 @@ class ChatTurnIsolationTest(unittest.TestCase):
             '{"action":"album","name":"周杰伦 七里香"}',
         )
 
+    def test_vague_deferred_intent_asks_before_creating_reminder(self):
+        conn = ConnectionHandler.__new__(ConnectionHandler)
+        conn.intent_type = "function_call"
+        conn.func_handler = Mock()
+        conn.func_handler.get_functions.return_value = [
+            {"type": "function", "function": {"name": "self_schedule_create"}}
+        ]
+        conn.dialogue = _Dialogue()
+        conn.logger = Mock()
+        conn.logger.bind.return_value = conn.logger
+
+        conn._inject_tool_call_fewshot()
+
+        index = next(
+            index
+            for index, message in enumerate(conn.dialogue.messages)
+            if message.role == "user" and message.content == "我晚点要交报告"
+        )
+        tool_call = conn.dialogue.messages[index + 1].tool_calls[0]
+        self.assertEqual(tool_call["function"]["name"], "direct_answer")
+        self.assertIn("几点提醒", tool_call["function"]["arguments"])
+
     def test_abort_cancels_active_llm_response(self):
         logger = Mock()
         logger.bind.return_value = logger

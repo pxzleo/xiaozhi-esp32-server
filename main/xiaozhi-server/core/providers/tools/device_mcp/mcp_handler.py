@@ -17,6 +17,9 @@ from core.utils.dialogue import Message
 from core.utils.auth import AuthToken
 from core.utils.util import get_vision_url, sanitize_tool_name
 from core.providers.tools.device_mcp.daily_briefing import build_daily_briefing
+from core.providers.tools.device_mcp.proactive_policy import (
+    claim_proactive_opportunity,
+)
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
@@ -377,8 +380,25 @@ async def _handle_schedule_triggered_notification(
     else:
         text = f"提醒你：{normalized_label}"
         notification_name = "日程提醒"
+
+        def add_completion_invitation(base_text):
+            if claim_proactive_opportunity(
+                conn,
+                "reminder_completion",
+                cooldown_seconds=30 * 60,
+            ):
+                return base_text + "。处理完告诉我一声"
+            return base_text
+
+        text_transform = add_completion_invitation
+    if schedule_kind == "alarm":
+        text_transform = None
     await _speak_proactive_notification(
-        conn, text, notification_name, notification_state
+        conn,
+        text,
+        notification_name,
+        notification_state,
+        text_transform=text_transform,
     )
 
 
@@ -497,6 +517,7 @@ async def _speak_proactive_notification(
     notification_name,
     notification_state=None,
     completion_event=None,
+    text_transform=None,
 ):
     if not _connection_is_active(conn):
         logger.bind(tag=TAG).info(f"{notification_name}通知因连接关闭而取消")
@@ -550,6 +571,8 @@ async def _speak_proactive_notification(
         return
     conn.client_is_speaking = True
     try:
+        if text_transform is not None:
+            text = text_transform(text)
         tts.store_tts_text(sentence_id, text)
         tts.tts_text_queue.put(TTSMessageDTO(
             sentence_id=sentence_id,
