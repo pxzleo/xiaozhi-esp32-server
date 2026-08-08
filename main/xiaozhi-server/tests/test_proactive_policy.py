@@ -109,8 +109,8 @@ class ProactivePolicyTest(unittest.TestCase):
             {
                 "mode": "active",
                 "daily_limit": 1,
-                "quiet_start": "22:00:00",
-                "quiet_end": "07:00:00",
+                "quiet_start": "22:00",
+                "quiet_end": "07:00",
                 "allowed_topics": ["music"],
                 "blocked_topics": [],
             },

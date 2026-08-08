@@ -61,4 +61,4 @@
 
 服务端仅在真实成功的日程创建、每日简报触发及用户发起的网易云 `category/playlist/favorites` 播放成功后观察受控习惯。证据达到 3 次后，只在策略允许时用确定性事件 ID 和固定短模板建议一次，不用 LLM 推断。22:30–01:00 用户主动开始音乐后每晚最多一次询问是否换轻音乐或设停止提醒。天气简报只对雨/高温/降温明确关键词追加一句固定行动建议，无地点或无数据不建议。
 
-`self.proactive.*` 由设备权威执行；成功结果的 `data` 立即更新当前连接并后台 PUT manager-api，失败重试一次且不改变设备成功播报。`self.schedule.complete/follow_up/dismiss` 成功后分别更新当前 follow-up outcome 为 `completed/acknowledged/dismissed`。
+`self.proactive.*` 由设备权威执行；成功结果的 `data` 立即更新当前连接并后台 PUT manager-api，失败重试一次且不改变设备成功播报。`self.schedule.complete_recent/follow_up/dismiss_follow_up` 成功后分别更新当前 follow-up outcome 为 `completed/acknowledged/dismissed`。

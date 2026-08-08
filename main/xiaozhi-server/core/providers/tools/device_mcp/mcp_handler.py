@@ -1,6 +1,7 @@
 """设备端MCP客户端支持模块"""
 
 import asyncio
+import hashlib
 import json
 import re
 import threading
@@ -416,6 +417,12 @@ def _manager_topic(topic):
     return "health" if topic in ("health", "health_critical") else "reminder"
 
 
+def _manager_event_id(event_id):
+    if len(event_id) <= 64:
+        return event_id
+    return "evt-" + hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:56]
+
+
 def _iso_timestamp(value):
     return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -429,9 +436,10 @@ async def _audit_proactive_delivery(conn, event, payload, delivered):
     expires_at = event["expires_at"]
     if expires_at <= created_at:
         expires_at = created_at + 3600
+    audit_event_id = _manager_event_id(event["event_id"])
     audit = {
         "mac_address": mac_address,
-        "event_id": event["event_id"],
+        "event_id": audit_event_id,
         "topic": _manager_topic(event["topic"]),
         "priority": event["priority"],
         "reason": event["reason"],
@@ -445,7 +453,7 @@ async def _audit_proactive_delivery(conn, event, payload, delivered):
     try:
         await create_proactive_event(audit)
         await update_proactive_event_status(
-            event["event_id"],
+            audit_event_id,
             mac_address,
             "delivered" if delivered else "failed",
             "none" if delivered else "failed",
@@ -519,6 +527,8 @@ def handle_successful_device_tool_result(conn, actual_name, result):
         preference = {field: data.get(field) for field in fields}
         try:
             set_connection_preferences(conn, preference)
+            revision = getattr(conn, "_proactive_preference_revision", 0)
+            conn._proactive_preference_revision = revision + 1
         except ValueError as error:
             logger.bind(tag=TAG).error(f"设备偏好返回无效: {type(error).__name__}")
             return
@@ -553,19 +563,16 @@ def handle_successful_device_tool_result(conn, actual_name, result):
                         # 避免与设备当前创建确认（含设备自带的重复建议）竞争 TTS。
                         allow_suggestion=False,
                     )
-    schedule_action = actual_name.rsplit(".", 1)[-1]
-    if actual_name.startswith("self.schedule.") and schedule_action in (
-        "complete", "follow_up", "dismiss"
-    ):
-        event_id = getattr(conn, "_current_followup_event_id", None)
+    schedule_outcomes = {
+        "self.schedule.complete_recent": ("delivered", "completed"),
+        "self.schedule.follow_up": ("delivered", "acknowledged"),
+        "self.schedule.dismiss_follow_up": ("dismissed", "dismissed"),
+    }
+    if actual_name in schedule_outcomes:
+        event_id = getattr(conn, "_current_followup_audit_event_id", None)
         mac_address = getattr(conn, "device_id", None)
         if isinstance(event_id, str) and isinstance(mac_address, str):
-            outcome = {
-                "complete": "completed",
-                "follow_up": "acknowledged",
-                "dismiss": "dismissed",
-            }[schedule_action]
-            delivery_status = "dismissed" if schedule_action == "dismiss" else "delivered"
+            delivery_status, outcome = schedule_outcomes[actual_name]
             _schedule_visible_background_task(
                 conn,
                 update_proactive_event_status(
@@ -597,6 +604,8 @@ async def _handle_schedule_follow_up_notification(conn, params, notification_sta
             raise ValueError("完成跟进标记无效")
         if event["requires_response"] is not True:
             raise ValueError("完成跟进必须要求响应")
+        if event["priority"] != "normal" or event["reason"] != "schedule follow up":
+            raise ValueError("完成跟进策略字段不一致")
     except ValueError as error:
         logger.bind(tag=TAG).warning(str(error))
         return
@@ -614,6 +623,7 @@ async def _handle_schedule_follow_up_notification(conn, params, notification_sta
         )
         return
     conn._current_followup_event_id = event["event_id"]
+    conn._current_followup_audit_event_id = _manager_event_id(event["event_id"])
     conn._current_followup_source_id = source_id
     sentence_id = await _speak_proactive_notification(
         conn, f"刚才提醒的{label.strip()}完成了吗？", "完成跟进", notification_state

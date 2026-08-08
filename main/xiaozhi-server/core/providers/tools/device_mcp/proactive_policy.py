@@ -44,16 +44,32 @@ def set_connection_preferences(conn, preferences) -> dict:
     daily_limit = preferences.get("daily_limit")
     if not isinstance(daily_limit, int) or isinstance(daily_limit, bool) or not 0 <= daily_limit <= 5:
         raise ValueError("积极主动偏好 daily_limit 无效")
+    valid_limits = {
+        "conservative": {1},
+        "active": {1, 2, 3},
+        "aggressive": {1, 2, 3, 4, 5},
+        "today_silent": {0},
+    }
+    if daily_limit not in valid_limits[mode]:
+        raise ValueError("积极主动偏好 mode 与 daily_limit 不匹配")
     quiet_start = preferences.get("quiet_start")
     quiet_end = preferences.get("quiet_end")
     if (quiet_start is None) != (quiet_end is None):
         raise ValueError("安静时段必须同时给出起止时间")
+    if quiet_start is not None and quiet_start == quiet_end:
+        raise ValueError("安静时段起止时间不能相同")
     for value in (quiet_start, quiet_end):
         if value is not None:
-            try:
-                datetime.strptime(value, "%H:%M:%S")
-            except (TypeError, ValueError) as error:
-                raise ValueError("安静时段格式无效") from error
+            if not isinstance(value, str):
+                raise ValueError("安静时段格式无效")
+            for time_format in ("%H:%M", "%H:%M:%S"):
+                try:
+                    datetime.strptime(value, time_format)
+                    break
+                except ValueError:
+                    continue
+            else:
+                raise ValueError("安静时段格式无效")
     allowed = preferences.get("allowed_topics") or []
     blocked = preferences.get("blocked_topics") or []
     if not isinstance(allowed, (list, set, tuple)) or not set(allowed) <= _KNOWN_TOPICS:

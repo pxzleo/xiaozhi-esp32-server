@@ -56,7 +56,12 @@ async def suggest_habit_candidate(conn, candidate):
     if not isinstance(mac_address, str) or not isinstance(habit_type, str):
         return False
     return await _suggest_habit(
-        conn, mac_address, habit_group, habit_type, habit_key, datetime.now(timezone.utc)
+        conn,
+        mac_address,
+        habit_group,
+        habit_type,
+        habit_key,
+        candidate.get("first_seen_at"),
     )
 
 
@@ -113,13 +118,26 @@ async def observe_habit_and_maybe_suggest(
     if not allow_suggestion:
         return False
     return await _suggest_habit(
-        conn, mac_address, habit_group, habit_type, habit_key, now, notification_state
+        conn,
+        mac_address,
+        habit_group,
+        habit_type,
+        habit_key,
+        observed.get("first_seen_at") or now.isoformat().replace("+00:00", "Z"),
+        notification_state,
     )
 
 
 async def _suggest_habit(
-    conn, mac_address, habit_group, habit_type, habit_key, now, notification_state=None
+    conn, mac_address, habit_group, habit_type, habit_key, created_at,
+    notification_state=None,
 ):
+    if (
+        not isinstance(created_at, (str, int, float))
+        or isinstance(created_at, bool)
+        or created_at == ""
+    ):
+        return False
     event_id = "habit-" + hashlib.sha256(
         f"{mac_address}:{habit_type}:{habit_key}".encode("utf-8")
     ).hexdigest()[:40]
@@ -139,10 +157,8 @@ async def _suggest_habit(
         "reason": "habit evidence threshold reached",
         "event_type": "habit_suggestion",
         "payload": {"title": "习惯建议", "reference_id": habit_key, "source": "server"},
-        "created_at": now.isoformat().replace("+00:00", "Z"),
-        "expires_at": datetime.fromtimestamp(now.timestamp() + 86400, timezone.utc)
-        .isoformat()
-        .replace("+00:00", "Z"),
+        "created_at": created_at,
+        "expires_at": None,
         "dedupe_key": event_id,
         "requires_response": True,
     }

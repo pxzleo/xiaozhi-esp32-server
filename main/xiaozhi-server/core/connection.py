@@ -231,6 +231,7 @@ class ConnectionHandler:
         # 标记当前是否为来电接听模式
         self.incoming_call = None
         self.proactive_preferences = safe_local_preferences()
+        self._proactive_preference_revision = 0
 
     async def handle_connection(self, ws: websockets.ServerConnection):
         try:
@@ -997,8 +998,12 @@ class ConnectionHandler:
         if not isinstance(self.device_id, str) or not self.device_id.strip():
             self.logger.bind(tag=TAG).warning("未加载积极主动偏好：设备MAC缺失")
             return
+        revision = self._proactive_preference_revision
         try:
             preference = await get_proactive_preference(self.device_id)
+            if revision != self._proactive_preference_revision:
+                self.logger.bind(tag=TAG).info("忽略建连期间返回的过期积极主动偏好")
+                return
             set_connection_preferences(self, preference)
             self.logger.bind(tag=TAG).info("已加载设备积极主动偏好")
             from core.providers.tools.device_mcp.proactive_habits import (
