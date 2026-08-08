@@ -94,6 +94,12 @@ class ProactiveMonitorContractTest {
 
     @Test
     void leaseSqlContractUsesDatabaseClockAndCasPredicates() throws Exception {
+        Method probe = ProactiveMonitorDao.class.getMethod("markProbed", String.class);
+        String probeSql = probe.getAnnotation(Update.class).value()[0];
+        assertTrue(probeSql.contains("last_probe_at = CURRENT_TIMESTAMP"));
+        assertTrue(probeSql.contains("updated_at = CURRENT_TIMESTAMP"));
+        assertFalse(probeSql.contains("#{now}"));
+
         Method candidates = ProactiveMonitorDao.class.getMethod("selectDueCandidates", int.class);
         String select = candidates.getAnnotation(Select.class).value()[0];
         assertTrue(select.contains("last_probe_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)"));

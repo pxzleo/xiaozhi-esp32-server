@@ -55,10 +55,11 @@ public interface ProactiveMonitorDao {
 
     @Update("""
             UPDATE ai_device_proactive_monitor
-            SET last_probe_at = #{now}, version = version + 1, updated_at = #{now}
+            SET last_probe_at = CURRENT_TIMESTAMP, version = version + 1,
+                updated_at = CURRENT_TIMESTAMP
             WHERE device_id = #{deviceId}
             """)
-    int markProbed(@Param("deviceId") String deviceId, @Param("now") Date now);
+    int markProbed(@Param("deviceId") String deviceId);
 
     @Select("""
             SELECT m.* FROM ai_device_proactive_monitor m

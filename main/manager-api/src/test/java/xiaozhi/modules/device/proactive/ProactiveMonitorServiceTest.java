@@ -94,7 +94,7 @@ class ProactiveMonitorServiceTest {
 
     @Test
     void pendingEnvelopeDoesNotExposePayloadAndMarksBothMonitorsProbed() {
-        when(monitorDao.markProbed(eq("device-1"), any())).thenReturn(2);
+        when(monitorDao.markProbed("device-1")).thenReturn(2);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
                 monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(preference(Set.of(), Set.of()));
@@ -108,12 +108,12 @@ class ProactiveMonitorServiceTest {
         assertEquals("event-1", envelope.eventId());
         assertEquals(0, envelope.retryAfterSeconds());
         assertFalse(envelope.toString().contains("secret"));
-        verify(monitorDao).markProbed(eq("device-1"), any());
+        verify(monitorDao).markProbed("device-1");
     }
 
     @Test
     void criticalWeatherBypassesSilenceButNewsNeverDoes() {
-        when(monitorDao.markProbed(eq("device-1"), any())).thenReturn(2);
+        when(monitorDao.markProbed("device-1")).thenReturn(2);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
                 monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
@@ -130,7 +130,7 @@ class ProactiveMonitorServiceTest {
 
     @Test
     void disabledWeatherRejectsEvenCriticalAlert() {
-        when(monitorDao.markProbed(eq("device-1"), any())).thenReturn(2);
+        when(monitorDao.markProbed("device-1")).thenReturn(2);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
                 monitor(MonitorType.WEATHER, false, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
@@ -162,14 +162,14 @@ class ProactiveMonitorServiceTest {
         complete.setLeaseOwner("worker-1");
         complete.setLeaseToken("wrong-token");
         complete.setSuccess(true);
-        complete.setState(Map.of("baseline", "ok"));
+        complete.setState(validWeatherState());
         when(monitorDao.completeCas(eq("device-1"), eq("WEATHER"), eq("worker-1"),
                 eq("wrong-token"), eq(true), any(), eq(null))).thenReturn(0);
         assertThrows(RenException.class, () -> service.complete(complete));
     }
 
     @Test
-    void nestedReasoningKeysAreRejectedBeforeCompletionWrite() {
+    void unknownStateKeysAreRejectedBeforeCompletionWrite() {
         MonitorComplete complete = new MonitorComplete();
         complete.setDeviceId("device-1");
         complete.setMonitorType(MonitorType.WEATHER);
@@ -185,22 +185,71 @@ class ProactiveMonitorServiceTest {
     }
 
     @Test
-    void nestedSensitiveStateKeysAreRejectedButNormalBaselinesRemainAllowed() {
-        List<String> forbidden = List.of("api_key", "Api-Key", "AUTHORIZATION", "token",
-                "access_token", "refresh-token", "PASSWORD", "secret", "cookie", "set_cookie",
-                "client_secret", "session-token", "dbPassword");
+    void stateUsesTypeSpecificWhitelistAtEveryLevel() {
         when(monitorDao.completeCas(any(), any(), any(), any(), eq(true), any(), eq(null)))
                 .thenReturn(1);
-        for (String key : forbidden) {
-            MonitorComplete rejected = successfulCompletion(Map.of("outer",
-                    List.of(Map.of("nested", Map.of(key, "must-not-persist")))));
+        for (String key : List.of("AWS_SECRET_ACCESS_KEY", "private_key", "credentials", "headers")) {
+            MonitorComplete rejected = successfulCompletion(Map.of(key, "must-not-persist"));
             assertThrows(RenException.class, () -> service.complete(rejected), key);
+            MonitorComplete nested = successfulCompletion(Map.of("baseline", Map.of(
+                    "hourly", List.of(Map.of("forecast_time", "2026-08-08T12:00:00Z",
+                            key, "must-not-persist")))));
+            assertThrows(RenException.class, () -> service.complete(nested), key);
         }
-        assertThrows(RenException.class, () -> service.complete(successfulCompletion(Map.of(
-                "native_array", new Object[] {Map.of("Api_Key", "must-not-persist")}))));
         service.complete(successfulCompletion(Map.of(
-                "baseline", Map.of("fingerprints", List.of("abc", "def")))));
+                "schema_version", 1,
+                "fingerprints", List.of("weather:abc", "weather:def"),
+                "detection_status", Map.of(
+                        "last_event_at", "2026-08-08T12:00:00Z",
+                        "cooldown_until", "2026-08-08T14:00:00Z",
+                        "active_warning_ids", List.of("warning-1"),
+                        "active_hazards", List.of("rain"),
+                        "last_cluster_id", "cluster-1"),
+                "baseline", Map.of(
+                        "captured_at", "2026-08-08T11:00:00Z",
+                        "location_id", "location-1",
+                        "hourly", List.of(Map.of(
+                                "forecast_time", "2026-08-08T12:00:00Z",
+                                "temp_c", 30.5,
+                                "weather_code", "rain",
+                                "wind_speed_kmh", 20.0,
+                                "precip_mm", 3.2,
+                                "pop_pct", 80)),
+                        "warning_ids", List.of("warning-1"),
+                        "hazards", List.of(Map.of(
+                                "type", "rain",
+                                "severity", "warning",
+                                "window_start", "2026-08-08T12:00:00Z",
+                                "window_end", "2026-08-08T14:00:00Z"))))));
         verify(monitorDao).completeCas(any(), any(), any(), any(), eq(true), any(), eq(null));
+    }
+
+    @Test
+    void newsStateRejectsWeatherBaselineAndInvalidNestedTypes() {
+        MonitorComplete news = successfulCompletion(Map.of(
+                "schema_version", 1,
+                "fingerprints", List.of("news:abc"),
+                "detection_status", Map.of("last_cluster_id", "cluster-1")));
+        news.setMonitorType(MonitorType.NEWS);
+        when(monitorDao.completeCas(any(), eq("NEWS"), any(), any(), eq(true), any(), eq(null)))
+                .thenReturn(1);
+        service.complete(news);
+
+        MonitorComplete newsBaseline = successfulCompletion(Map.of("baseline", Map.of()));
+        newsBaseline.setMonitorType(MonitorType.NEWS);
+        assertThrows(RenException.class, () -> service.complete(newsBaseline));
+        assertThrows(RenException.class, () -> service.complete(successfulCompletion(Map.of(
+                "fingerprints", List.of(Map.of("value", "not-a-string"))))));
+        assertThrows(RenException.class, () -> service.complete(successfulCompletion(Map.of(
+                "detection_status", Map.of("unknown", "value")))));
+        assertThrows(RenException.class, () -> service.complete(successfulCompletion(Map.of(
+                "baseline", Map.of("headers", Map.of("Authorization", "secret"))))));
+        assertThrows(RenException.class, () -> service.complete(successfulCompletion(Map.of(
+                "baseline", Map.of("hazards", List.of(Map.of("credentials", "secret")))))));
+        assertThrows(RenException.class, () -> service.complete(successfulCompletion(Map.of(
+                "detection_status", Map.of("last_event_at", "not-a-time")))));
+        assertThrows(RenException.class, () -> service.complete(successfulCompletion(Map.of(
+                "baseline", Map.of("hourly", List.of(Map.of("temp_c", "30")))))));
     }
 
     @Test
@@ -232,7 +281,7 @@ class ProactiveMonitorServiceTest {
         stale.setLeaseOwner("old-worker");
         stale.setLeaseToken("old-token");
         stale.setSuccess(true);
-        stale.setState(Map.of("baseline", "stale"));
+        stale.setState(validWeatherState());
         assertThrows(RenException.class, () -> service.complete(stale));
         verify(monitorDao).updateConfiguration(eq("device-1"), eq("WEATHER"), eq(true), eq(45),
                 org.mockito.ArgumentMatchers.contains("\"precip_probability\":70"), any());
@@ -351,7 +400,7 @@ class ProactiveMonitorServiceTest {
 
     @Test
     void conservativeOnlyAllowsCriticalWeather() {
-        when(monitorDao.markProbed(eq("device-1"), any())).thenReturn(2);
+        when(monitorDao.markProbed("device-1")).thenReturn(2);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
                 monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
@@ -397,6 +446,11 @@ class ProactiveMonitorServiceTest {
         complete.setSuccess(true);
         complete.setState(state);
         return complete;
+    }
+
+    private Map<String, Object> validWeatherState() {
+        return Map.of("schema_version", 1, "fingerprints", List.of("weather:abc"),
+                "baseline", Map.of("captured_at", "2026-08-08T12:00:00Z"));
     }
 
     private ClassifierEvaluate classifierRequest() {
