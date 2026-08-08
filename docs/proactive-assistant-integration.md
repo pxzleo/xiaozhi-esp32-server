@@ -43,6 +43,14 @@
 - `GET /device/proactive/events`：分页参数为 `page`（1 至 1000）和 `limit`（1 至 100），可选 `device_id`、`topic`、`delivery_status`、`event_type` 过滤；未给 `device_id` 时只查询本人全部绑定设备。
 - `GET /device/proactive/habits`、`DELETE /device/proactive/habits/{habitId}`：列出本人设备的习惯或删除指定候选；列表可选 `device_id`。
 
+manager-web 在设备管理列表的单台设备操作区提供“主动助理”入口，使用同一弹窗分为设置、事件审计和习惯三个区域：
+
+- 设置区可修改主动程度、每日上限、安静时段及主题 allow/block，并可启用“今日静默”。表单必须执行与 manager-api 相同的模式额度、安静时段成对及主题互斥校验。
+- 事件区支持按主题、事件类型和投递状态筛选及分页，只展示结构化的 `reason`、`delivery_status`、`outcome` 和时间，不展示 payload 或自由推理内容。
+- 习惯区展示受控习惯类型、证据次数、状态和最近观察时间，并允许删除本人设备的记录。
+- 弹窗关闭、切换设备或同一通道发起新请求后，旧响应必须失效；偏好保存只能使用已成功加载且仍为当前设备的 `device_id`。保存失败保留当前表单以便重试，首次加载失败则清空不可信状态并禁用写操作。
+- 弹窗宽度受视口限制，筛选项可换行，表格在窄屏下允许横向滚动，确保移动端仍可访问主要操作。
+
 偏好默认模式为 `aggressive`、每日上限 5 次且没有默认安静时段。`active` 未显式给出 `daily_limit` 时为 3，`conservative` 为 1，`today_silent` 为 0。进入当日静默会同时保留 `previous_mode`、`previous_daily_limit` 和次日恢复时间；读取偏好时若静默已到期，manager-api 原子、完整地恢复原模式与原每日上限并递增 `version`。安静时段必须同时给出 `quiet_start`、`quiet_end` 且不能相同。
 
 `conservative` 只执行关键事件属于设备端或服务端的策略执行职责；manager-api 只持久化偏好与完整事件审计，不在写入审计事件时按模式过滤。内部按 MAC 操作时必须且只能匹配一个现有设备；重复 MAC 会明确报错，不会任取其中一条记录。
