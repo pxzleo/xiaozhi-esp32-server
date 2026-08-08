@@ -7,6 +7,7 @@ import java.util.Set;
 import java.util.List;
 
 import com.fasterxml.jackson.annotation.JsonAnySetter;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import jakarta.validation.Valid;
@@ -109,6 +110,7 @@ public final class ProactiveDTOs {
         private Integer cooldownMinutes = 720;
 
         @AssertTrue(message = "low_temp_c必须小于high_temp_c")
+        @JsonIgnore
         public boolean isTemperatureRangeValid() {
             return lowTempC == null || highTempC == null || lowTempC < highTempC;
         }

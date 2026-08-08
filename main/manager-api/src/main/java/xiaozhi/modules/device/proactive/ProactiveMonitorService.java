@@ -341,9 +341,10 @@ public class ProactiveMonitorService {
             }
             JsonNode sourcesNode = config.get("news_sources");
             if (sourcesNode == null || sourcesNode.isNull()) {
-                return new NewsSources(List.of(), "news_sources_missing");
+                return new NewsSources(DEFAULT_NEWS_SOURCES, null);
             }
             if (!sourcesNode.isTextual()) return new NewsSources(List.of(), "news_sources_invalid");
+            if (sourcesNode.textValue().isBlank()) return new NewsSources(DEFAULT_NEWS_SOURCES, null);
             String[] values = sourcesNode.textValue().split(";", -1);
             if (values.length == 0 || values.length > 32) {
                 return new NewsSources(List.of(), "news_sources_invalid");

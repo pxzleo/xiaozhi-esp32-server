@@ -277,18 +277,32 @@ class ProactiveMonitorServiceTest {
         when(monitorDao.selectForUpdate("device-1", "NEWS")).thenReturn(news);
         when(agentPluginMappingService.proactiveMonitorPluginParamsByAgentId("agent-1"))
                 .thenReturn(List.of(),
+                        List.of(newsPlugin("{}")),
+                        List.of(newsPlugin("{\"news_sources\":null}")),
+                        List.of(newsPlugin("{\"news_sources\":\"   \"}")),
+                        List.of(newsPlugin("{\"news_sources\":[\"澎湃新闻\"]}")),
                         List.of(newsPlugin("{\"news_sources\":\"澎湃新闻;;财联社\"}")),
                         List.of(newsPlugin("{\"news_sources\":\"澎湃新闻\"} trailing")),
                         List.of(newsPlugin("{\"news_sources\":\"澎湃新闻\","
                                 + "\"news_sources\":\"财联社\"}")));
 
         var defaults = service.claimDue("worker-1", 1).getFirst();
+        var missing = service.claimDue("worker-1", 1).getFirst();
+        var nullValue = service.claimDue("worker-1", 1).getFirst();
+        var blank = service.claimDue("worker-1", 1).getFirst();
+        var nonString = service.claimDue("worker-1", 1).getFirst();
         var invalid = service.claimDue("worker-1", 1).getFirst();
         var corrupt = service.claimDue("worker-1", 1).getFirst();
         var duplicate = service.claimDue("worker-1", 1).getFirst();
 
         assertEquals(List.of("澎湃新闻", "百度热搜", "财联社"), defaults.newsSources());
         assertNull(defaults.newsSourcesError());
+        for (var fallback : List.of(missing, nullValue, blank)) {
+            assertEquals(List.of("澎湃新闻", "百度热搜", "财联社"), fallback.newsSources());
+            assertNull(fallback.newsSourcesError());
+        }
+        assertTrue(nonString.newsSources().isEmpty());
+        assertEquals("news_sources_invalid", nonString.newsSourcesError());
         assertTrue(invalid.newsSources().isEmpty());
         assertEquals("news_sources_invalid", invalid.newsSourcesError());
         assertTrue(corrupt.newsSources().isEmpty());

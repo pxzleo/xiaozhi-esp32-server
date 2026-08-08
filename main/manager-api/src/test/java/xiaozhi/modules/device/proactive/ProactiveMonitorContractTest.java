@@ -99,6 +99,7 @@ class ProactiveMonitorContractTest {
         String serialized = mapper.writeValueAsString(new WeatherMonitorConfig());
         assertTrue(serialized.contains("\"minimum_warning_severity\":\"moderate\""));
         assertFalse(serialized.contains("official_min_severity"));
+        assertFalse(serialized.contains("temperatureRangeValid"));
         assertThrows(Exception.class, () -> mapper.readValue(
                 "{\"minimum_warning_severity\":\"warning\"}", WeatherMonitorConfig.class));
         assertThrows(Exception.class, () -> mapper.readValue(
@@ -158,15 +159,27 @@ class ProactiveMonitorContractTest {
         assertTrue(sql.contains("SELECT 'WEATHER' monitor_type UNION ALL SELECT 'NEWS'"));
         assertTrue(sql.contains("'proactive.classifier.model_id'"));
         String severityMigration = Files.readString(Path.of("src/main/resources/db/changelog/202608082300.sql"));
-        assertTrue(severityMigration.contains("JSON_REMOVE(config, '$.official_min_severity')"));
+        assertTrue(severityMigration.contains(
+                "JSON_REMOVE(config, '$.official_min_severity', '$.temperatureRangeValid')"));
         assertTrue(severityMigration.contains("'$.minimum_warning_severity'"));
         assertTrue(severityMigration.contains("WHEN 'advisory' THEN 'minor'"));
         assertTrue(severityMigration.contains("WHEN 'watch' THEN 'moderate'"));
-        assertTrue(severityMigration.contains("WHEN 'warning' THEN 'severe'"));
+        assertTrue(severityMigration.contains("WHEN 'warning' THEN"));
+        assertTrue(severityMigration.contains("WHEN JSON_LENGTH(config) IN (10, 11)"));
+        assertTrue(severityMigration.contains(
+                "JSON_EXTRACT(config, '$.temperatureRangeValid') = true"));
+        assertTrue(severityMigration.contains("JSON_CONTAINS(config, CAST("));
+        assertTrue(severityMigration.contains("\"official_min_severity\":\"warning\""));
+        assertTrue(severityMigration.contains("THEN 'moderate'\n                        ELSE 'severe'"));
         assertTrue(severityMigration.contains("WHEN 'emergency' THEN 'extreme'"));
         assertTrue(severityMigration.contains("ELSE 'moderate'"));
         String master = Files.readString(Path.of("src/main/resources/db/changelog/db.changelog-master.yaml"));
         assertTrue(master.contains("classpath:db/changelog/202608082300.sql"));
+        assertTrue(master.indexOf("classpath:db/changelog/202608082100.sql")
+                < master.indexOf("classpath:db/changelog/202608082300.sql"));
+        assertTrue(sql.contains("'official_min_severity','warning'"));
+        assertEquals(WeatherWarningSeverity.MODERATE,
+                new WeatherMonitorConfig().getMinimumWarningSeverity());
     }
 
     @Test
