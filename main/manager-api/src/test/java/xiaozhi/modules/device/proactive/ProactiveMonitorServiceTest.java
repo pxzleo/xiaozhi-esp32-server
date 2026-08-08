@@ -17,6 +17,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.LocalTime;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
@@ -285,6 +286,30 @@ class ProactiveMonitorServiceTest {
                 event(EventType.WEATHER_ALERT, Topic.WEATHER, Priority.CRITICAL)));
 
         assertFalse(service.pending("device-1").pending());
+    }
+
+    @Test
+    void disabledWeatherCandidatesDoNotStarveEnabledNewsAfterDatabaseFiltering() {
+        when(monitorDao.probeAndRebaselineIfOffline("device-1")).thenReturn(2);
+        when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
+                monitor(MonitorType.WEATHER, false, 30), monitor(MonitorType.NEWS, true, 10)));
+        when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
+                preference(Set.of(), Set.of()));
+        List<ProactiveEventEntity> candidates = new ArrayList<>();
+        for (int index = 0; index < 20; index++) {
+            candidates.add(event(EventType.WEATHER_ALERT, Topic.WEATHER, Priority.CRITICAL));
+        }
+        ProactiveEventEntity news = event(EventType.NEWS_ALERT, Topic.NEWS, Priority.HIGH);
+        news.setEventId("news-after-disabled-weather");
+        candidates.add(news);
+        when(eventDao.selectPendingMonitorEvents(eq("device-1"), any(), any()))
+                .thenReturn(candidates);
+
+        var envelope = service.pending("device-1");
+
+        assertTrue(envelope.pending());
+        assertEquals("news-after-disabled-weather", envelope.eventId());
+        assertEquals(Topic.NEWS, envelope.topic());
     }
 
     @Test

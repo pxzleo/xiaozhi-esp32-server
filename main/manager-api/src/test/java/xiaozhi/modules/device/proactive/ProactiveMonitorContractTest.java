@@ -295,12 +295,18 @@ class ProactiveMonitorContractTest {
         Method pending = ProactiveEventDao.class.getMethod("selectPendingMonitorEvents",
                 String.class, java.util.Date.class, java.util.Date.class);
         String sql = pending.getAnnotation(Select.class).value()[0];
+        assertTrue(sql.contains("INNER JOIN ai_device_proactive_monitor m"));
+        assertTrue(sql.contains("m.enabled = 1"));
+        assertTrue(sql.contains("WHEN 'WEATHER_ALERT' THEN 'WEATHER'"));
+        assertTrue(sql.contains("WHEN 'NEWS_ALERT' THEN 'NEWS'"));
         assertTrue(sql.contains("INNER JOIN sys_params g"));
         assertTrue(sql.contains("proactive.external_monitoring_enabled"));
         assertTrue(sql.contains("LOWER(TRIM(g.param_value)) = 'true'"));
         assertTrue(sql.contains("event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')"));
         assertTrue(sql.contains("delivery_status = 'PENDING'"));
         assertTrue(sql.contains("claimed_at < #{claimCutoff}"));
+        assertTrue(sql.indexOf("m.enabled = 1") < sql.indexOf("ORDER BY"));
+        assertTrue(sql.indexOf("m.enabled = 1") < sql.indexOf("LIMIT 20"));
         assertFalse(java.util.Arrays.stream(ProactiveDTOs.PendingEnvelope.class.getRecordComponents())
                 .anyMatch(component -> component.getName().equals("payload") || component.getName().equals("reason")));
         assertTrue(Arrays.stream(ProactiveDTOs.MonitorsView.class.getRecordComponents())

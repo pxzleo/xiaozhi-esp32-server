@@ -116,6 +116,13 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
 
     @Select("""
             SELECT e.* FROM ai_device_proactive_event e
+            INNER JOIN ai_device_proactive_monitor m
+              ON m.device_id = e.device_id
+             AND m.enabled = 1
+             AND m.monitor_type = CASE e.event_type
+                    WHEN 'WEATHER_ALERT' THEN 'WEATHER'
+                    WHEN 'NEWS_ALERT' THEN 'NEWS'
+                 END
             INNER JOIN sys_params g
               ON g.param_code = 'proactive.external_monitoring_enabled'
              AND LOWER(TRIM(g.param_value)) = 'true'
