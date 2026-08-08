@@ -40,11 +40,11 @@
 
 - `GET /device/proactive/preferences`、`GET|PUT /device/proactive/preferences/{deviceId}`：列出本人设备或管理单个设备偏好。
 - `PUT /device/proactive/preferences/{deviceId}/today-silent`：静默至服务端所在时区的次日零点。
-- `GET /device/proactive/events`：分页参数为 `page`（1 至 100000）和 `limit`（1 至 100），可选 `device_id`、`topic`、`delivery_status`、`event_type` 过滤；未给 `device_id` 时只查询本人全部绑定设备。
+- `GET /device/proactive/events`：分页参数为 `page`（1 至 1000）和 `limit`（1 至 100），可选 `device_id`、`topic`、`delivery_status`、`event_type` 过滤；未给 `device_id` 时只查询本人全部绑定设备。
 - `GET /device/proactive/habits`、`DELETE /device/proactive/habits/{habitId}`：列出本人设备的习惯或删除指定候选；列表可选 `device_id`。
 
 偏好默认模式为 `aggressive`、每日上限 5 次且没有默认安静时段。`active` 未显式给出 `daily_limit` 时为 3，`conservative` 为 1，`today_silent` 为 0。进入当日静默会同时保留 `previous_mode`、`previous_daily_limit` 和次日恢复时间；读取偏好时若静默已到期，manager-api 原子、完整地恢复原模式与原每日上限并递增 `version`。安静时段必须同时给出 `quiet_start`、`quiet_end` 且不能相同。
 
 `conservative` 只执行关键事件属于设备端或服务端的策略执行职责；manager-api 只持久化偏好与完整事件审计，不在写入审计事件时按模式过滤。内部按 MAC 操作时必须且只能匹配一个现有设备；重复 MAC 会明确报错，不会任取其中一条记录。
 
-所有接口枚举使用小写值。主题仅允许 `reminder`、`calendar`、`weather`、`music`、`health`、`habit`、`system`。事件 payload 只允许 `title`、`message`、`reference_id`、`scheduled_at`、`action`、`source`；习惯 payload 只允许 `description`、`suggested_mode`、`suggested_time`、`topic`。payload 值只能是空值、字符串、数字或布尔值，字符串最多 512 个字符，不接收也不保存自由推理链。响应将 JSON 字段解析为对象或数组，不返回数据库中的原始 JSON 文本。
+所有接口枚举使用小写值。主题仅允许 `reminder`、`calendar`、`weather`、`music`、`health`、`habit`、`system`。事件 payload 只允许 `title`、`message`、`reference_id`、`scheduled_at`、`action`、`source`，每个值必须是非空字符串，`scheduled_at` 必须是 ISO 本地日期时间。习惯 payload 只允许 `description`、`suggested_mode`、`suggested_time`、`topic`：`description` 必须是非空短文本，`topic` 必须是上述小写主题，`suggested_mode` 只允许 `conservative`、`active`、`aggressive`，`suggested_time` 必须为 `HH:mm`。任一 payload 序列化后最多 512 字节，不接收也不保存自由推理链。响应将 JSON 字段解析为对象，不返回数据库中的原始 JSON 文本。

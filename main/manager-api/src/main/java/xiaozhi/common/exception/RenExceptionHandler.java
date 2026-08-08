@@ -2,14 +2,20 @@ package xiaozhi.common.exception;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.stream.Stream;
 
 import org.apache.shiro.authz.UnauthorizedException;
+import org.springframework.context.MessageSourceResolvable;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.ObjectError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
+
+import jakarta.validation.ConstraintViolationException;
 
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -53,13 +59,6 @@ public class RenExceptionHandler {
         return result;
     }
 
-    @ExceptionHandler(Exception.class)
-    public Result<Void> handleException(Exception ex) {
-        log.error(ex.getMessage(), ex);
-
-        return new Result<Void>().error();
-    }
-
     @ExceptionHandler(NoResourceFoundException.class)
     public Result<Void> handleNoResourceFoundException(NoResourceFoundException ex) {
         log.warn("Resource not found: {}", ex.getMessage());
@@ -69,17 +68,58 @@ public class RenExceptionHandler {
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public Result<Void> handleMethodArgumentNotValidException(MethodArgumentNotValidException ex) {
         List<ObjectError> allErrors = ex.getBindingResult().getAllErrors();
-        String errorMsg = allErrors.stream()
+        String errorMsg = firstSafeValidationMessage(allErrors.stream()
                 .filter(Objects::nonNull)
-                .map(err -> {
-                    String msg = err.getDefaultMessage();
-                    return (msg != null && !msg.trim().isEmpty()) ? msg : null;
-                })
-                .filter(Objects::nonNull)
-                .findFirst()
-                .orElse(MessageUtils.getMessage(ErrorCode.PARAM_VALUE_NULL));
+                .map(ObjectError::getDefaultMessage));
 
         return new Result<Void>().error(ErrorCode.PARAM_VALUE_NULL, errorMsg);
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public Result<Void> handleHttpMessageNotReadableException(HttpMessageNotReadableException ex) {
+        return new Result<Void>().error(ErrorCode.PARAM_JSON_INVALID, "请求参数格式无效");
+    }
+
+    @ExceptionHandler(ConstraintViolationException.class)
+    public Result<Void> handleConstraintViolationException(ConstraintViolationException ex) {
+        String errorMsg = firstSafeValidationMessage(ex.getConstraintViolations().stream()
+                .map(violation -> violation == null ? null : violation.getMessage()));
+        return new Result<Void>().error(ErrorCode.PARAM_VALUE_NULL, errorMsg);
+    }
+
+    @ExceptionHandler(HandlerMethodValidationException.class)
+    public Result<Void> handleHandlerMethodValidationException(HandlerMethodValidationException ex) {
+        Stream<String> parameterMessages = ex.getParameterValidationResults().stream()
+                .flatMap(result -> result.getResolvableErrors().stream())
+                .map(MessageSourceResolvable::getDefaultMessage);
+        Stream<String> crossParameterMessages = ex.getCrossParameterValidationResults().stream()
+                .map(MessageSourceResolvable::getDefaultMessage);
+        String errorMsg = firstSafeValidationMessage(Stream.concat(parameterMessages, crossParameterMessages));
+        return new Result<Void>().error(ErrorCode.PARAM_VALUE_NULL, errorMsg);
+    }
+
+    @ExceptionHandler(Exception.class)
+    public Result<Void> handleException(Exception ex) {
+        log.error(ex.getMessage(), ex);
+
+        return new Result<Void>().error();
+    }
+
+    private String firstSafeValidationMessage(Stream<String> messages) {
+        return messages.filter(Objects::nonNull)
+                .map(this::sanitizeValidationMessage)
+                .filter(message -> !message.isEmpty())
+                .findFirst()
+                .orElseGet(() -> MessageUtils.getMessage(ErrorCode.PARAM_VALUE_NULL));
+    }
+
+    private String sanitizeValidationMessage(String message) {
+        StringBuilder safe = new StringBuilder(Math.min(message.length(), 200));
+        for (int i = 0; i < message.length() && safe.length() < 200; i++) {
+            char value = message.charAt(i);
+            safe.append(Character.isISOControl(value) ? ' ' : value);
+        }
+        return safe.toString().trim();
     }
 
 }

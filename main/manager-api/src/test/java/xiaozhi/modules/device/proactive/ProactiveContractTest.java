@@ -46,6 +46,10 @@ class ProactiveContractTest {
             assertTrue(sql.contains("ADD UNIQUE KEY `uk_ai_device_proactive_event_device_event` (`device_id`, `event_id`)"));
             assertTrue(sql.contains("ADD KEY `idx_ai_device_proactive_event_dedupe` (`device_id`, `dedupe_key`)"));
         }
+        try (var stream = getClass().getResourceAsStream("/db/changelog/202608081700.sql")) {
+            String sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            assertTrue(sql.contains("ADD KEY `idx_ai_device_user_id_id` (`user_id`, `id`)"));
+        }
     }
 
     @Test

@@ -1,7 +1,11 @@
 package xiaozhi.modules.device.proactive;
 
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.Collections;
 import java.util.Date;
 import java.util.EnumSet;
@@ -108,7 +112,7 @@ public class ProactiveService {
     @Transactional
     public EventView upsertEvent(EventUpsert request) {
         DeviceEntity device = resolveByMac(request.getMacAddress());
-        validatePayload(request.getPayload(), EVENT_PAYLOAD_KEYS, "event payload");
+        validateEventPayload(request.getPayload());
         if (deviceDao.selectByIdForUpdate(device.getId()) == null) throw new RenException("设备不存在");
         ProactiveEventEntity existing = eventDao.selectByDeviceAndEventIdForUpdate(
                 device.getId(), request.getEventId());
@@ -155,7 +159,7 @@ public class ProactiveService {
     @Transactional
     public HabitView observeHabit(HabitObserve request) {
         DeviceEntity device = resolveByMac(request.getMacAddress());
-        validatePayload(request.getPayload(), HABIT_PAYLOAD_KEYS, "habit payload");
+        validateHabitPayload(request.getPayload());
         ProactiveHabitEntity entity = new ProactiveHabitEntity();
         entity.setDeviceId(device.getId());
         entity.setMacAddress(device.getMacAddress());
@@ -188,7 +192,7 @@ public class ProactiveService {
     public PageData<EventView> events(Long userId, String deviceId, Topic topic,
             DeliveryStatus status, EventType eventType, int page, int limit) {
         if (deviceId != null) requireOwned(userId, deviceId);
-        int safePage = requireRange(page, 1, 100_000, "page");
+        int safePage = requireRange(page, 1, 1_000, "page");
         int safeLimit = requireRange(limit, 1, 100, "limit");
         String topicName = topic == null ? null : topic.name();
         String statusName = status == null ? null : status.name();
@@ -300,19 +304,63 @@ public class ProactiveService {
         };
     }
 
-    private void validatePayload(Map<String, Object> payload, Set<String> allowedKeys, String name) {
+    private void validatePayloadKeysAndSize(Map<String, Object> payload, Set<String> allowedKeys, String name) {
         if (payload == null || !allowedKeys.containsAll(payload.keySet())) {
             throw new RenException(name + "包含不支持的键");
         }
-        for (Map.Entry<String, Object> entry : payload.entrySet()) {
-            Object value = entry.getValue();
-            if (value != null && !(value instanceof String || value instanceof Number || value instanceof Boolean)) {
-                throw new RenException(name + "仅允许标量值");
-            }
-            if (value instanceof String text && text.length() > 512) {
-                throw new RenException(name + "字段长度不能超过512");
+        if (writeJson(payload).getBytes(StandardCharsets.UTF_8).length > 512) {
+            throw new RenException(name + "总长度不能超过512字节");
+        }
+    }
+
+    private void validateEventPayload(Map<String, Object> payload) {
+        validatePayloadKeysAndSize(payload, EVENT_PAYLOAD_KEYS, "event payload");
+        validateOptionalText(payload, "title", 100, "event payload title");
+        validateOptionalText(payload, "message", 300, "event payload message");
+        validateOptionalText(payload, "reference_id", 128, "event payload reference_id");
+        validateOptionalText(payload, "action", 64, "event payload action");
+        validateOptionalText(payload, "source", 64, "event payload source");
+        if (payload.containsKey("scheduled_at")) {
+            String value = requireText(payload.get("scheduled_at"), 40, "event payload scheduled_at");
+            try {
+                LocalDateTime.parse(value, DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+            } catch (DateTimeParseException exception) {
+                throw new RenException("event payload scheduled_at必须为ISO本地日期时间", exception);
             }
         }
+    }
+
+    private void validateHabitPayload(Map<String, Object> payload) {
+        validatePayloadKeysAndSize(payload, HABIT_PAYLOAD_KEYS, "habit payload");
+        validateOptionalText(payload, "description", 255, "habit payload description");
+        if (payload.containsKey("topic")) {
+            Topic.fromWire(requireText(payload.get("topic"), 32, "habit payload topic"));
+        }
+        if (payload.containsKey("suggested_mode")) {
+            Mode mode = Mode.fromWire(requireText(payload.get("suggested_mode"), 24,
+                    "habit payload suggested_mode"));
+            if (mode == Mode.TODAY_SILENT) {
+                throw new RenException("habit payload suggested_mode不允许today_silent");
+            }
+        }
+        if (payload.containsKey("suggested_time")) {
+            String value = requireText(payload.get("suggested_time"), 5, "habit payload suggested_time");
+            if (!value.matches("(?:[01]\\d|2[0-3]):[0-5]\\d")) {
+                throw new RenException("habit payload suggested_time必须为HH:mm");
+            }
+        }
+    }
+
+    private void validateOptionalText(Map<String, Object> payload, String key, int maxLength, String name) {
+        if (payload.containsKey(key)) requireText(payload.get(key), maxLength, name);
+    }
+
+    private String requireText(Object value, int maxLength, String name) {
+        if (!(value instanceof String text) || StringUtils.isBlank(text)) {
+            throw new RenException(name + "必须为非空字符串");
+        }
+        if (text.length() > maxLength) throw new RenException(name + "长度超限");
+        return text;
     }
 
     private int requireRange(int value, int min, int max, String name) {

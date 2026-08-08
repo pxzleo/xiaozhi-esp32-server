@@ -69,7 +69,7 @@ public class DeviceProactiveController {
             @RequestParam(required = false) String topic,
             @RequestParam(required = false, name = "delivery_status") String deliveryStatus,
             @RequestParam(required = false, name = "event_type") String eventType,
-            @RequestParam(defaultValue = "1") @Min(1) @Max(100000) int page,
+            @RequestParam(defaultValue = "1") @Min(1) @Max(1000) int page,
             @RequestParam(defaultValue = "20") @Min(1) @Max(100) int limit) {
         return new Result<PageData<EventView>>().ok(service.events(SecurityUser.getUserId(), deviceId,
                 topic == null ? null : ProactiveEnums.parseWire(Topic.class, topic),

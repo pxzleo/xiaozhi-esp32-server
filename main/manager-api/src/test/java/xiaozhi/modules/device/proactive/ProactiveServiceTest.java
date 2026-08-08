@@ -28,9 +28,11 @@ import xiaozhi.modules.device.dao.DeviceDao;
 import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventStatusUpdate;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventUpsert;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.HabitObserve;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceUpdate;
 import xiaozhi.modules.device.proactive.ProactiveEnums.DeliveryStatus;
 import xiaozhi.modules.device.proactive.ProactiveEnums.EventType;
+import xiaozhi.modules.device.proactive.ProactiveEnums.HabitType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Mode;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Outcome;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Priority;
@@ -154,6 +156,77 @@ class ProactiveServiceTest {
     }
 
     @Test
+    void eventPayloadRejectsWrongTypeAndInvalidScheduledTime() {
+        EventUpsert wrongType = eventRequest();
+        wrongType.setPayload(Map.of("message", true));
+        EventUpsert invalidTime = eventRequest();
+        invalidTime.setPayload(Map.of("scheduled_at", "2026-99-40 25:61"));
+        EventUpsert oversized = eventRequest();
+        oversized.setPayload(Map.of(
+                "title", "t".repeat(100),
+                "message", "m".repeat(300),
+                "reference_id", "r".repeat(128)));
+
+        assertThrows(RenException.class, () -> service.upsertEvent(wrongType));
+        assertThrows(RenException.class, () -> service.upsertEvent(invalidTime));
+        assertThrows(RenException.class, () -> service.upsertEvent(oversized));
+    }
+
+    @Test
+    void eventPayloadAcceptsStringsAndIsoLocalDateTime() {
+        EventUpsert request = eventRequest();
+        request.setPayload(Map.of("message", "hello", "scheduled_at", "2026-08-08T09:30:00"));
+        ProactiveEventEntity stored = eventEntity(request);
+        stored.setPayload("{\"message\":\"hello\",\"scheduled_at\":\"2026-08-08T09:30:00\"}");
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1")).thenReturn(stored);
+
+        assertEquals("2026-08-08T09:30:00", service.upsertEvent(request).payload().get("scheduled_at"));
+    }
+
+    @Test
+    void habitPayloadRejectsInvalidEnumsTypesModesAndTimes() {
+        List<Map<String, Object>> invalidPayloads = List.of(
+                Map.of("topic", "MUSIC"),
+                Map.of("topic", "unknown"),
+                Map.of("suggested_mode", "today_silent"),
+                Map.of("description", 123),
+                Map.of("suggested_time", "24:00"));
+
+        for (Map<String, Object> payload : invalidPayloads) {
+            assertThrows(RenException.class, () -> service.observeHabit(habitRequest(payload)));
+        }
+    }
+
+    @Test
+    void habitPayloadAcceptsControlledSemanticValues() {
+        Map<String, Object> payload = Map.of(
+                "description", "工作日九点播放音乐",
+                "topic", "music",
+                "suggested_mode", "active",
+                "suggested_time", "09:00");
+        ProactiveHabitEntity stored = new ProactiveHabitEntity();
+        stored.setId(1L);
+        stored.setDeviceId("device-1");
+        stored.setMacAddress(device.getMacAddress());
+        stored.setHabitType(HabitType.TIME_PATTERN.name());
+        stored.setHabitKey("weekday-music");
+        stored.setEvidenceCount(3);
+        stored.setFirstSeenAt(new Date());
+        stored.setLastSeenAt(new Date());
+        stored.setSuggested(true);
+        stored.setAccepted(false);
+        stored.setDismissed(false);
+        stored.setPayload("{\"description\":\"工作日九点播放音乐\",\"topic\":\"music\","
+                + "\"suggested_mode\":\"active\",\"suggested_time\":\"09:00\"}");
+        when(habitDao.selectOne(any())).thenReturn(stored);
+
+        var view = service.observeHabit(habitRequest(payload));
+
+        assertEquals("music", view.payload().get("topic"));
+        verify(habitDao).observeAtomic(any(ProactiveHabitEntity.class));
+    }
+
+    @Test
     void statusUpdateUsesBothResolvedDeviceAndEventId() {
         EventStatusUpdate update = new EventStatusUpdate();
         update.setMacAddress(device.getMacAddress());
@@ -244,7 +317,7 @@ class ProactiveServiceTest {
     @Test
     void rejectsExtremePageBeforeOffsetCanOverflow() {
         assertThrows(RenException.class,
-                () -> service.events(7L, null, null, null, null, 100_001, 100));
+                () -> service.events(7L, null, null, null, null, 1_001, 100));
         verify(eventDao, never()).pageForUser(any(), any(), any(), any(), any(), anyInt(), anyLong());
     }
 
@@ -285,6 +358,17 @@ class ProactiveServiceTest {
         value.setCreatedAt(new Date());
         value.setDedupeKey("reminder-1");
         value.setRequiresResponse(true);
+        return value;
+    }
+
+    private HabitObserve habitRequest(Map<String, Object> payload) {
+        HabitObserve value = new HabitObserve();
+        value.setMacAddress(device.getMacAddress());
+        value.setHabitType(HabitType.TIME_PATTERN);
+        value.setHabitKey("weekday-music");
+        value.setEvidenceDelta(1);
+        value.setSeenAt(new Date());
+        value.setPayload(payload);
         return value;
     }
 
