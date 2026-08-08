@@ -5,6 +5,7 @@ import java.util.Date;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
@@ -35,4 +36,38 @@ public interface ProactivePreferenceDao extends BaseMapper<ProactivePreferenceEn
             WHERE device_id = #{deviceId} AND mode = 'TODAY_SILENT' AND silent_until <= #{now}
             """)
     int restoreExpiredSilent(@Param("deviceId") String deviceId, @Param("now") Date now);
+
+    @Update("""
+            UPDATE ai_device_proactive_preference
+            SET daily_limit = 0, version = version + 1, updated_at = #{now}
+            WHERE device_id = #{deviceId}
+              AND mode = 'AGGRESSIVE'
+              AND daily_limit = #{expectedDailyLimit}
+              AND daily_limit BETWEEN 1 AND 5
+              AND version = #{expectedVersion}
+            """)
+    int normalizeLegacyAggressiveLimit(@Param("deviceId") String deviceId,
+            @Param("expectedDailyLimit") Integer expectedDailyLimit,
+            @Param("expectedVersion") Integer expectedVersion, @Param("now") Date now);
+
+    @Update("""
+            UPDATE ai_device_proactive_preference
+            SET previous_daily_limit = 0, version = version + 1, updated_at = #{now}
+            WHERE device_id = #{deviceId}
+              AND mode = 'TODAY_SILENT'
+              AND previous_mode = 'AGGRESSIVE'
+              AND previous_daily_limit = #{expectedDailyLimit}
+              AND previous_daily_limit BETWEEN 1 AND 5
+              AND version = #{expectedVersion}
+            """)
+    int normalizeLegacyPreviousAggressiveLimit(@Param("deviceId") String deviceId,
+            @Param("expectedDailyLimit") Integer expectedDailyLimit,
+            @Param("expectedVersion") Integer expectedVersion, @Param("now") Date now);
+
+    @Select("""
+            SELECT * FROM ai_device_proactive_preference
+            WHERE device_id = #{deviceId}
+            FOR UPDATE
+            """)
+    ProactivePreferenceEntity selectByIdForUpdate(@Param("deviceId") String deviceId);
 }

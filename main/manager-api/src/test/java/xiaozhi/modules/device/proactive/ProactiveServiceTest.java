@@ -68,8 +68,11 @@ class ProactiveServiceTest {
     @Test
     void normalizesLegacyAggressivePreferenceToUnlimited() {
         ProactivePreferenceEntity preference = preference(Mode.AGGRESSIVE, 5);
+        ProactivePreferenceEntity normalized = preference(Mode.AGGRESSIVE, 0);
         when(preferenceDao.selectById("device-1")).thenReturn(preference);
-        when(preferenceDao.updateById(preference)).thenReturn(1);
+        when(preferenceDao.normalizeLegacyAggressiveLimit(eq("device-1"), eq(5), eq(0), any()))
+                .thenReturn(1);
+        when(preferenceDao.selectByIdForUpdate("device-1")).thenReturn(normalized);
 
         var view = service.getPreferenceByMac(device.getMacAddress());
 
@@ -77,7 +80,8 @@ class ProactiveServiceTest {
         assertEquals(0, view.dailyLimit());
         assertEquals(null, view.quietStart());
         verify(preferenceDao).insertDefault(eq("device-1"), eq(device.getMacAddress()), any());
-        verify(preferenceDao).updateById(preference);
+        verify(preferenceDao).normalizeLegacyAggressiveLimit(eq("device-1"), eq(5), eq(0), any());
+        verify(preferenceDao, never()).updateById(preference);
     }
 
     @Test
@@ -85,13 +89,37 @@ class ProactiveServiceTest {
         ProactivePreferenceEntity preference = preference(Mode.TODAY_SILENT, 0);
         preference.setPreviousMode(Mode.AGGRESSIVE.name());
         preference.setPreviousDailyLimit(4);
+        ProactivePreferenceEntity normalized = preference(Mode.TODAY_SILENT, 0);
+        normalized.setPreviousMode(Mode.AGGRESSIVE.name());
+        normalized.setPreviousDailyLimit(0);
         when(preferenceDao.selectById("device-1")).thenReturn(preference);
-        when(preferenceDao.updateById(preference)).thenReturn(1);
+        when(preferenceDao.normalizeLegacyPreviousAggressiveLimit(
+                eq("device-1"), eq(4), eq(0), any())).thenReturn(1);
+        when(preferenceDao.selectByIdForUpdate("device-1")).thenReturn(normalized);
 
         var view = service.getPreferenceByMac(device.getMacAddress());
 
         assertEquals(0, view.previousDailyLimit());
-        verify(preferenceDao).updateById(preference);
+        verify(preferenceDao).normalizeLegacyPreviousAggressiveLimit(
+                eq("device-1"), eq(4), eq(0), any());
+        verify(preferenceDao, never()).updateById(preference);
+    }
+
+    @Test
+    void concurrentPreferenceUpdateWinsOverLegacyNormalizationWithoutBeingOverwritten() {
+        ProactivePreferenceEntity legacy = preference(Mode.AGGRESSIVE, 5);
+        ProactivePreferenceEntity concurrent = preference(Mode.ACTIVE, 4);
+        concurrent.setVersion(1);
+        when(preferenceDao.selectById("device-1")).thenReturn(legacy);
+        when(preferenceDao.normalizeLegacyAggressiveLimit(
+                eq("device-1"), eq(5), eq(0), any())).thenReturn(0);
+        when(preferenceDao.selectByIdForUpdate("device-1")).thenReturn(concurrent);
+
+        var view = service.getPreferenceByMac(device.getMacAddress());
+
+        assertEquals(Mode.ACTIVE, view.mode());
+        assertEquals(4, view.dailyLimit());
+        verify(preferenceDao, never()).updateById(any(ProactivePreferenceEntity.class));
     }
 
     @Test

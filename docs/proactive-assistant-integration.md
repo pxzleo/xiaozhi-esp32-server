@@ -52,7 +52,7 @@ manager-web 在设备管理列表的单台设备操作区提供“主动助理�
 - 弹窗关闭、切换设备或同一通道发起新请求后，旧响应必须失效；偏好保存只能使用已成功加载且仍为当前设备的 `device_id`。保存失败保留当前表单以便重试，首次加载失败则清空不可信状态并禁用写操作。
 - 弹窗宽度受视口限制，筛选项可换行，表格在窄屏下允许横向滚动，确保移动端仍可访问主要操作。
 
-偏好默认模式为 `aggressive`、`daily_limit=0`，表示普通主动发言不受每日总额度限制，且积极模式不能配置成有限次数；没有默认安静时段。`active` 未显式给出 `daily_limit` 时为 5，允许用户在 1 至 5 内调低；`conservative` 固定为 1，`today_silent` 为 0。进入当日静默会同时保留 `previous_mode`、`previous_daily_limit` 和次日恢复时间；读取偏好时若静默已到期，manager-api 原子、完整地恢复原模式与原每日上限并递增 `version`。存量 `aggressive` 的 1 至 5 会在读取时安全规范化为 0；存量 `active` 的 1 至 3 保持原值。安静时段必须同时给出 `quiet_start`、`quiet_end` 且不能相同。
+偏好默认模式为 `aggressive`、`daily_limit=0`，表示普通主动发言不受每日总额度限制，且积极模式不能配置成有限次数；没有默认安静时段。`active` 未显式给出 `daily_limit` 时为 5，允许用户在 1 至 5 内调低；`conservative` 固定为 1，`today_silent` 为 0。进入当日静默会同时保留 `previous_mode`、`previous_daily_limit` 和次日恢复时间；读取偏好时若静默已到期，manager-api 原子、完整地恢复原模式与原每日上限并递增 `version`。存量 `aggressive` 的 1 至 5 会以模式、旧额度和版本为条件做窄字段 CAS 规范化为 0，再权威重读，避免覆盖并发偏好更新；存量 `active` 的 1 至 3 保持原值。安静时段必须同时给出 `quiet_start`、`quiet_end` 且不能相同。
 
 `conservative` 只执行关键事件属于设备端或服务端的策略执行职责；manager-api 只持久化偏好与完整事件审计，不在写入审计事件时按模式过滤。内部按 MAC 操作时必须且只能匹配一个现有设备；重复 MAC 会明确报错，不会任取其中一条记录。
 

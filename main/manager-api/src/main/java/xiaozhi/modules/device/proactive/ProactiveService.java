@@ -300,28 +300,33 @@ public class ProactiveService {
         preferenceDao.restoreExpiredSilent(device.getId(), now);
         ProactivePreferenceEntity entity = preferenceDao.selectById(device.getId());
         if (entity == null) throw new RenException("主动助理偏好读取失败");
-        normalizeLegacyAggressiveLimit(entity, now);
-        return entity;
+        return normalizeLegacyAggressiveLimit(entity, now);
     }
 
-    private void normalizeLegacyAggressiveLimit(ProactivePreferenceEntity entity, Date now) {
-        boolean changed = false;
-        if (Mode.AGGRESSIVE.name().equals(entity.getMode()) &&
-                !Integer.valueOf(0).equals(entity.getDailyLimit())) {
-            entity.setDailyLimit(0);
-            changed = true;
+    private ProactivePreferenceEntity normalizeLegacyAggressiveLimit(
+            ProactivePreferenceEntity entity, Date now) {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            boolean currentLegacy = Mode.AGGRESSIVE.name().equals(entity.getMode()) &&
+                    isLegacyAggressiveLimit(entity.getDailyLimit());
+            boolean previousLegacy = Mode.TODAY_SILENT.name().equals(entity.getMode()) &&
+                    Mode.AGGRESSIVE.name().equals(entity.getPreviousMode()) &&
+                    isLegacyAggressiveLimit(entity.getPreviousDailyLimit());
+            if (!currentLegacy && !previousLegacy) return entity;
+            if (currentLegacy) {
+                preferenceDao.normalizeLegacyAggressiveLimit(entity.getDeviceId(),
+                        entity.getDailyLimit(), entity.getVersion(), now);
+            } else {
+                preferenceDao.normalizeLegacyPreviousAggressiveLimit(entity.getDeviceId(),
+                        entity.getPreviousDailyLimit(), entity.getVersion(), now);
+            }
+            entity = preferenceDao.selectByIdForUpdate(entity.getDeviceId());
+            if (entity == null) throw new RenException("主动助理偏好读取失败");
         }
-        if (Mode.AGGRESSIVE.name().equals(entity.getPreviousMode()) &&
-                !Integer.valueOf(0).equals(entity.getPreviousDailyLimit())) {
-            entity.setPreviousDailyLimit(0);
-            changed = true;
-        }
-        if (!changed) return;
-        entity.setVersion(entity.getVersion() + 1);
-        entity.setUpdatedAt(now);
-        if (preferenceDao.updateById(entity) != 1) {
-            throw new RenException("旧版积极模式偏好规范化失败");
-        }
+        throw new RenException("旧版积极模式偏好规范化并发冲突");
+    }
+
+    private boolean isLegacyAggressiveLimit(Integer limit) {
+        return limit != null && limit >= 1 && limit <= 5;
     }
 
     private DeviceEntity resolveByMac(String macAddress) {

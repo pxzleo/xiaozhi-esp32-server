@@ -120,8 +120,42 @@ class ProactiveContractTest {
         Method restore = ProactivePreferenceDao.class.getMethod("restoreExpiredSilent",
                 String.class, java.util.Date.class);
         String restoreSql = restore.getAnnotation(Update.class).value()[0];
-        assertTrue(restoreSql.contains("WHEN previous_mode = 'AGGRESSIVE' THEN 0"));
+        assertTrue(restoreSql.contains("WHEN 'AGGRESSIVE' THEN 0"));
         assertTrue(restoreSql.contains("previous_daily_limit = NULL"));
+
+        Method normalize = ProactivePreferenceDao.class.getMethod("normalizeLegacyAggressiveLimit",
+                String.class, Integer.class, Integer.class, java.util.Date.class);
+        String normalizeSql = normalize.getAnnotation(Update.class).value()[0];
+        assertTrue(normalizeSql.contains("SET daily_limit = 0"));
+        assertTrue(normalizeSql.contains("version = version + 1"));
+        assertTrue(normalizeSql.contains("mode = 'AGGRESSIVE'"));
+        assertTrue(normalizeSql.contains("daily_limit = #{expectedDailyLimit}"));
+        assertTrue(normalizeSql.contains("daily_limit BETWEEN 1 AND 5"));
+        assertTrue(normalizeSql.contains("version = #{expectedVersion}"));
+        String normalizeSet = normalizeSql.substring(normalizeSql.indexOf("SET "),
+                normalizeSql.indexOf("\nWHERE"));
+        assertEquals("SET daily_limit = 0, version = version + 1, updated_at = #{now}",
+                normalizeSet);
+
+        Method normalizePrevious = ProactivePreferenceDao.class.getMethod(
+                "normalizeLegacyPreviousAggressiveLimit", String.class, Integer.class,
+                Integer.class, java.util.Date.class);
+        String normalizePreviousSql = normalizePrevious.getAnnotation(Update.class).value()[0];
+        assertTrue(normalizePreviousSql.contains("SET previous_daily_limit = 0"));
+        assertTrue(normalizePreviousSql.contains("mode = 'TODAY_SILENT'"));
+        assertTrue(normalizePreviousSql.contains("previous_mode = 'AGGRESSIVE'"));
+        assertTrue(normalizePreviousSql.contains("previous_daily_limit BETWEEN 1 AND 5"));
+        String normalizePreviousSet = normalizePreviousSql.substring(
+                normalizePreviousSql.indexOf("SET "), normalizePreviousSql.indexOf("\nWHERE"));
+        assertEquals("SET previous_daily_limit = 0, version = version + 1, updated_at = #{now}",
+                normalizePreviousSet);
+
+        Method lockedPreference = ProactivePreferenceDao.class.getMethod(
+                "selectByIdForUpdate", String.class);
+        String lockedPreferenceSql = lockedPreference.getAnnotation(
+                org.apache.ibatis.annotations.Select.class).value()[0];
+        assertTrue(lockedPreferenceSql.contains("device_id = #{deviceId}"));
+        assertTrue(lockedPreferenceSql.contains("FOR UPDATE"));
 
         Method lockedFind = ProactiveEventDao.class.getMethod("selectByDeviceAndEventIdForUpdate",
                 String.class, String.class);
