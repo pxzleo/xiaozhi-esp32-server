@@ -300,7 +300,28 @@ public class ProactiveService {
         preferenceDao.restoreExpiredSilent(device.getId(), now);
         ProactivePreferenceEntity entity = preferenceDao.selectById(device.getId());
         if (entity == null) throw new RenException("主动助理偏好读取失败");
+        normalizeLegacyAggressiveLimit(entity, now);
         return entity;
+    }
+
+    private void normalizeLegacyAggressiveLimit(ProactivePreferenceEntity entity, Date now) {
+        boolean changed = false;
+        if (Mode.AGGRESSIVE.name().equals(entity.getMode()) &&
+                !Integer.valueOf(0).equals(entity.getDailyLimit())) {
+            entity.setDailyLimit(0);
+            changed = true;
+        }
+        if (Mode.AGGRESSIVE.name().equals(entity.getPreviousMode()) &&
+                !Integer.valueOf(0).equals(entity.getPreviousDailyLimit())) {
+            entity.setPreviousDailyLimit(0);
+            changed = true;
+        }
+        if (!changed) return;
+        entity.setVersion(entity.getVersion() + 1);
+        entity.setUpdatedAt(now);
+        if (preferenceDao.updateById(entity) != 1) {
+            throw new RenException("旧版积极模式偏好规范化失败");
+        }
     }
 
     private DeviceEntity resolveByMac(String macAddress) {
@@ -333,8 +354,8 @@ public class ProactiveService {
     private int defaultLimit(Mode mode) {
         return switch (mode) {
             case CONSERVATIVE -> 1;
-            case ACTIVE -> 3;
-            case AGGRESSIVE -> 5;
+            case ACTIVE -> 5;
+            case AGGRESSIVE -> 0;
             case TODAY_SILENT -> 0;
         };
     }

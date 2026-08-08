@@ -33,8 +33,14 @@
               <div class="field-help">{{ $t(`proactive.modeHelp.${form.mode}`) }}</div>
             </el-form-item>
             <el-form-item :label="$t('proactive.dailyLimit')">
-              <el-input-number v-model="form.daily_limit" :min="1" :max="modeMaximum" />
-              <span class="inline-help">{{ $t('proactive.dailyLimitHelp', { max: modeMaximum }) }}</span>
+              <template v-if="form.mode === 'aggressive'">
+                <span class="unlimited-value">{{ $t('proactive.unlimited') }}</span>
+                <span class="inline-help">{{ $t('proactive.unlimitedHelp') }}</span>
+              </template>
+              <template v-else>
+                <el-input-number v-model="form.daily_limit" :min="1" :max="modeMaximum" />
+                <span class="inline-help">{{ $t('proactive.dailyLimitHelp', { max: modeMaximum }) }}</span>
+              </template>
             </el-form-item>
             <el-form-item :label="$t('proactive.quietHours')">
               <el-time-picker
@@ -219,7 +225,7 @@ export default {
       return this.preference.mode === 'today_silent';
     },
     modeMaximum() {
-      return { conservative: 1, active: 3, aggressive: 5 }[this.form.mode] || 1;
+      return { conservative: 1, active: 5, aggressive: 0 }[this.form.mode] ?? 1;
     },
   },
   watch: {

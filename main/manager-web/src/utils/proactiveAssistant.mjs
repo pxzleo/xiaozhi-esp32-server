@@ -50,7 +50,7 @@ export class DeviceRequestGate {
 }
 
 export function defaultDailyLimit(mode) {
-  return { conservative: 1, active: 3, aggressive: 5 }[mode] || 1;
+  return { conservative: 1, active: 5, aggressive: 0 }[mode] ?? 1;
 }
 
 export function belongsToDevice(value, deviceId) {
@@ -81,10 +81,12 @@ export function createPreferenceForm(preference = {}) {
   const effectiveLimit = preference.mode === 'today_silent'
     ? preference.previous_daily_limit
     : preference.daily_limit;
-  const mode = PROACTIVE_MODES.includes(effectiveMode) ? effectiveMode : 'conservative';
+  const mode = PROACTIVE_MODES.includes(effectiveMode) ? effectiveMode : 'aggressive';
   return {
     mode,
-    daily_limit: Number.isInteger(effectiveLimit)
+    daily_limit: mode === 'aggressive'
+      ? 0
+      : Number.isInteger(effectiveLimit)
       ? effectiveLimit
       : defaultDailyLimit(mode),
     quiet_start: normalizeTime(preference.quiet_start),
@@ -96,8 +98,11 @@ export function createPreferenceForm(preference = {}) {
 
 export function validatePreference(form) {
   if (!PROACTIVE_MODES.includes(form.mode)) return 'mode';
-  const maximum = { conservative: 1, active: 3, aggressive: 5 }[form.mode];
-  if (!Number.isInteger(form.daily_limit) || form.daily_limit < 1 || form.daily_limit > maximum) {
+  const maximum = { conservative: 1, active: 5, aggressive: 0 }[form.mode];
+  const validLimit = form.mode === 'aggressive'
+    ? form.daily_limit === 0
+    : Number.isInteger(form.daily_limit) && form.daily_limit >= 1 && form.daily_limit <= maximum;
+  if (!validLimit) {
     return 'daily_limit';
   }
   if (Boolean(form.quiet_start) !== Boolean(form.quiet_end) ||
@@ -111,7 +116,7 @@ export function validatePreference(form) {
 export function preferencePayload(form) {
   return {
     mode: form.mode,
-    daily_limit: form.daily_limit,
+    daily_limit: form.mode === 'aggressive' ? 0 : form.daily_limit,
     quiet_start: form.quiet_start || null,
     quiet_end: form.quiet_end || null,
     allowed_topics: [...form.allowed_topics],

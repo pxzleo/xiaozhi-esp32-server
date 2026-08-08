@@ -87,7 +87,7 @@ class ProactivePolicyTest(unittest.TestCase):
         )
 
     def test_clock_rollback_does_not_reset_newer_day_budget(self):
-        for index in range(3):
+        for index in range(5):
             claim_proactive_opportunity(
                 self.conn,
                 f"new-day-{index}",
@@ -128,6 +128,57 @@ class ProactivePolicyTest(unittest.TestCase):
         self.assertFalse(
             claim_proactive_opportunity(
                 self.conn, "two", cooldown_seconds=0, policy_topic="music", now=noon + 1
+            )
+        )
+
+    def test_aggressive_has_no_daily_budget_but_keeps_other_policy_gates(self):
+        set_connection_preferences(
+            self.conn,
+            {
+                "mode": "aggressive",
+                "daily_limit": 0,
+                "quiet_start": None,
+                "quiet_end": None,
+                "allowed_topics": [],
+                "blocked_topics": [],
+            },
+        )
+        for index in range(6):
+            self.assertTrue(
+                claim_proactive_opportunity(
+                    self.conn,
+                    f"aggressive-{index}",
+                    cooldown_seconds=0,
+                    now=100 + index,
+                )
+            )
+        self.assertFalse(
+            claim_proactive_opportunity(
+                self.conn, "aggressive-5", cooldown_seconds=60, now=106
+            )
+        )
+
+    def test_active_defaults_to_five_and_rejects_sixth_claim(self):
+        set_connection_preferences(
+            self.conn,
+            {
+                "mode": "active",
+                "daily_limit": 5,
+                "quiet_start": None,
+                "quiet_end": None,
+                "allowed_topics": [],
+                "blocked_topics": [],
+            },
+        )
+        for index in range(5):
+            self.assertTrue(
+                claim_proactive_opportunity(
+                    self.conn, f"active-{index}", cooldown_seconds=0, now=100 + index
+                )
+            )
+        self.assertFalse(
+            claim_proactive_opportunity(
+                self.conn, "active-5", cooldown_seconds=0, now=106
             )
         )
 

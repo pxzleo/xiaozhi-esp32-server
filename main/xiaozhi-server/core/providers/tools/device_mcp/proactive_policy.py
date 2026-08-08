@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 
-DEFAULT_DAILY_LIMIT = 3
+DEFAULT_DAILY_LIMIT = 5
 MAX_TRACKED_DEVICES = 1024
 _KNOWN_TOPICS = {"reminder", "calendar", "weather", "music", "health", "habit", "system"}
 
@@ -46,12 +46,15 @@ def set_connection_preferences(conn, preferences) -> dict:
         raise ValueError("积极主动偏好 daily_limit 无效")
     valid_limits = {
         "conservative": {1},
-        "active": {1, 2, 3},
-        "aggressive": {1, 2, 3, 4, 5},
+        "active": {1, 2, 3, 4, 5},
+        # 兼容 manager-api 规范化前读出的旧部署数据；绑定后统一为不限次数的 0。
+        "aggressive": {0, 1, 2, 3, 4, 5},
         "today_silent": {0},
     }
     if daily_limit not in valid_limits[mode]:
         raise ValueError("积极主动偏好 mode 与 daily_limit 不匹配")
+    if mode == "aggressive":
+        daily_limit = 0
     quiet_start = preferences.get("quiet_start")
     quiet_end = preferences.get("quiet_end")
     if (quiet_start is None) != (quiet_end is None):
@@ -155,7 +158,9 @@ def claim_proactive_opportunity(
             if isinstance(preferences, dict)
             else DEFAULT_DAILY_LIMIT
         )
-    if not isinstance(effective_limit, int) or isinstance(effective_limit, bool) or effective_limit < 1:
+    unlimited = isinstance(preferences, dict) and preferences.get("mode") == "aggressive"
+    if (not isinstance(effective_limit, int) or isinstance(effective_limit, bool) or
+            (effective_limit < 1 and not (unlimited and effective_limit == 0))):
         raise ValueError("主动机会参数无效")
     # 关键事件不消耗普通建议预算。
     if critical:
@@ -173,9 +178,9 @@ def claim_proactive_opportunity(
             state = _DevicePolicyState(day=day)
             _states[key] = state
         previous = state.topic_times.get(topic)
-        if state.used >= effective_limit:
-            return False
         if previous is not None and current - previous < cooldown_seconds:
+            return False
+        if not unlimited and state.used >= effective_limit:
             return False
         state.used += 1
         state.topic_times[topic] = current

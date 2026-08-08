@@ -69,6 +69,7 @@ test('normalizes server preference without exposing today_silent as a permanent 
   const form = createPreferenceForm({
     mode: 'today_silent',
     previous_mode: 'active',
+    previous_daily_limit: 3,
     daily_limit: 0,
     quiet_start: '22:30:00',
     quiet_end: '07:00:00',
@@ -82,11 +83,20 @@ test('normalizes server preference without exposing today_silent as a permanent 
 });
 
 test('validates limits, complete quiet windows and disjoint topics', () => {
-  const form = createPreferenceForm({ mode: 'active', daily_limit: 3 });
+  const form = createPreferenceForm({ mode: 'active', daily_limit: 5 });
   assert.equal(validatePreference(form), '');
-  assert.equal(validatePreference({ ...form, daily_limit: 4 }), 'daily_limit');
+  assert.equal(validatePreference({ ...form, daily_limit: 6 }), 'daily_limit');
   assert.equal(validatePreference({ ...form, quiet_start: '22:00' }), 'quiet_window');
   assert.equal(validatePreference({ ...form, allowed_topics: ['music'], blocked_topics: ['music'] }), 'topics');
+});
+
+test('aggressive is always unlimited and active defaults to five', () => {
+  assert.equal(createPreferenceForm({ mode: 'aggressive', daily_limit: 4 }).daily_limit, 0);
+  assert.equal(createPreferenceForm({ mode: 'active' }).daily_limit, 5);
+  const aggressive = createPreferenceForm({ mode: 'aggressive' });
+  assert.equal(validatePreference(aggressive), '');
+  assert.equal(validatePreference({ ...aggressive, daily_limit: 1 }), 'daily_limit');
+  assert.equal(preferencePayload(aggressive).daily_limit, 0);
 });
 
 test('builds an exact preference payload and omits empty event filters', () => {

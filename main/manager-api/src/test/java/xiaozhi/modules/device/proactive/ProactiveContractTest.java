@@ -64,13 +64,19 @@ class ProactiveContractTest {
             var validator = factory.getValidator();
             PreferenceUpdate request = new PreferenceUpdate();
             request.setMode(Mode.ACTIVE);
-            request.setDailyLimit(4);
+            request.setDailyLimit(6);
             request.setAllowedTopics(Set.of(Topic.MUSIC));
             request.setBlockedTopics(Set.of(Topic.MUSIC));
             assertFalse(validator.validate(request).isEmpty());
 
-            request.setDailyLimit(3);
+            request.setDailyLimit(5);
             request.setBlockedTopics(Set.of(Topic.WEATHER));
+            assertTrue(validator.validate(request).isEmpty());
+
+            request.setMode(Mode.AGGRESSIVE);
+            request.setDailyLimit(1);
+            assertFalse(validator.validate(request).isEmpty());
+            request.setDailyLimit(0);
             assertTrue(validator.validate(request).isEmpty());
         }
     }
@@ -114,7 +120,7 @@ class ProactiveContractTest {
         Method restore = ProactivePreferenceDao.class.getMethod("restoreExpiredSilent",
                 String.class, java.util.Date.class);
         String restoreSql = restore.getAnnotation(Update.class).value()[0];
-        assertTrue(restoreSql.contains("daily_limit = COALESCE(previous_daily_limit, 5)"));
+        assertTrue(restoreSql.contains("WHEN previous_mode = 'AGGRESSIVE' THEN 0"));
         assertTrue(restoreSql.contains("previous_daily_limit = NULL"));
 
         Method lockedFind = ProactiveEventDao.class.getMethod("selectByDeviceAndEventIdForUpdate",

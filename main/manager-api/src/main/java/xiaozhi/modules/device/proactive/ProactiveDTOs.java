@@ -64,8 +64,8 @@ public final class ProactiveDTOs {
             return switch (mode) {
                 case TODAY_SILENT -> dailyLimit == 0;
                 case CONSERVATIVE -> dailyLimit >= 1 && dailyLimit <= 1;
-                case ACTIVE -> dailyLimit >= 1 && dailyLimit <= 3;
-                case AGGRESSIVE -> dailyLimit >= 1 && dailyLimit <= 5;
+                case ACTIVE -> dailyLimit >= 1 && dailyLimit <= 5;
+                case AGGRESSIVE -> dailyLimit == 0;
             };
         }
 
