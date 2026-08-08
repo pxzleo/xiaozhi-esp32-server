@@ -1,6 +1,8 @@
 package xiaozhi.modules.device.proactive;
 
 import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -134,7 +136,7 @@ public class ProactiveMonitorService {
         DeviceEntity device = requireDevice(deviceId);
         Date now = new Date();
         ensureDefaults(device, now);
-        if (monitorDao.markProbed(deviceId) != 2) {
+        if (monitorDao.probeAndRebaselineIfOffline(deviceId) != 2) {
             throw new RenException("设备监测探测状态更新失败");
         }
         Map<MonitorType, ProactiveMonitorEntity> monitors = monitorMap(monitorDao.selectByDevice(deviceId));
@@ -163,10 +165,14 @@ public class ProactiveMonitorService {
                 if (authoritative == null) throw new RenException("已领取的监测任务不存在");
                 WorkerInputs inputs = inputsByDevice.computeIfAbsent(authoritative.getDeviceId(), id ->
                         workerInputs(requireDevice(id)));
+                MonitorType monitorType = MonitorType.valueOf(authoritative.getMonitorType());
+                WeatherCredentials credentials = monitorType == MonitorType.WEATHER
+                        ? inputs.weather().credentials() : WeatherCredentials.empty();
                 claimed.add(new MonitorTask(authoritative.getDeviceId(), authoritative.getMacAddress(),
-                        MonitorType.valueOf(authoritative.getMonitorType()), authoritative.getIntervalMinutes(),
+                        monitorType, authoritative.getIntervalMinutes(),
                         readMap(authoritative.getConfig()), readMap(authoritative.getState()),
-                        inputs.weather().value(), inputs.weather().error(),
+                        inputs.weather().location().value(), inputs.weather().location().error(),
+                        credentials.apiHost(), credentials.authType(), credentials.credential(), credentials.error(),
                         inputs.news().sources(), inputs.news().error(),
                         leaseOwner, token, authoritative.getLeaseUntil()));
             }
@@ -274,7 +280,7 @@ public class ProactiveMonitorService {
         ensureDefaults(device, new Date());
         Map<MonitorType, ProactiveMonitorEntity> map = monitorMap(monitorDao.selectByDevice(device.getId()));
         if (map.size() != 2) throw new RenException("设备监测配置读取失败");
-        WeatherLocation location = workerInputs(device).weather();
+        WeatherLocation location = workerInputs(device).weather().location();
         return new MonitorsView(device.getId(), weatherView(map.get(MonitorType.WEATHER)),
                 newsView(map.get(MonitorType.NEWS)), location.value(), location.error(),
                 classifierAvailability());
@@ -284,45 +290,123 @@ public class ProactiveMonitorService {
         List<AgentPluginMapping> plugins = StringUtils.isBlank(device.getAgentId())
                 ? List.of() : agentPluginMappingService
                         .proactiveMonitorPluginParamsByAgentId(device.getAgentId());
-        return new WorkerInputs(weatherLocation(device, plugins), newsSources(device, plugins));
+        return new WorkerInputs(weatherInputs(device, plugins), newsSources(device, plugins));
     }
 
-    private WeatherLocation weatherLocation(DeviceEntity device, List<AgentPluginMapping> plugins) {
+    private WeatherInputs weatherInputs(DeviceEntity device, List<AgentPluginMapping> plugins) {
         if (StringUtils.isBlank(device.getAgentId())) {
-            return new WeatherLocation(null, "agent_not_bound");
+            return new WeatherInputs(new WeatherLocation(null, "agent_not_bound"),
+                    WeatherCredentials.error("weather_credentials_missing"));
         }
         List<AgentPluginMapping> weatherPlugins = plugins.stream()
                 .filter(mapping -> "get_weather".equals(mapping.getProviderCode()))
                 .toList();
         if (weatherPlugins.isEmpty()) {
-            return new WeatherLocation(null, "weather_plugin_not_configured");
+            return new WeatherInputs(new WeatherLocation(null, "weather_plugin_not_configured"),
+                    WeatherCredentials.error("weather_credentials_missing"));
         }
         if (weatherPlugins.size() != 1) {
-            return new WeatherLocation(null, "weather_config_ambiguous");
+            return new WeatherInputs(new WeatherLocation(null, "weather_config_ambiguous"),
+                    WeatherCredentials.error("weather_credentials_invalid"));
         }
         String paramInfo = weatherPlugins.getFirst().getParamInfo();
         if (StringUtils.isBlank(paramInfo)) {
-            return new WeatherLocation(null, "weather_config_invalid");
+            return invalidWeatherInputs();
         }
         try (JsonParser parser = strictJsonParser(paramInfo)) {
             JsonNode config = objectMapper.readTree(parser);
             if (config == null || !config.isObject() || parser.nextToken() != null) {
-                return new WeatherLocation(null, "weather_config_invalid");
+                return invalidWeatherInputs();
             }
-            JsonNode location = config.get("default_location");
-            if (location == null || location.isNull()
-                    || location.isTextual() && location.textValue().isBlank()) {
-                return new WeatherLocation(null, "default_location_missing");
-            }
-            if (!location.isTextual()) return new WeatherLocation(null, "default_location_invalid");
-            String value = location.textValue().trim();
-            if (value.length() > 120) {
-                return new WeatherLocation(null, "default_location_invalid");
-            }
-            return new WeatherLocation(value, null);
+            return new WeatherInputs(weatherLocation(config), weatherCredentials(config));
         } catch (IOException exception) {
-            return new WeatherLocation(null, "weather_config_invalid");
+            return invalidWeatherInputs();
         }
+    }
+
+    private WeatherInputs invalidWeatherInputs() {
+        return new WeatherInputs(new WeatherLocation(null, "weather_config_invalid"),
+                WeatherCredentials.error("weather_credentials_invalid"));
+    }
+
+    private WeatherLocation weatherLocation(JsonNode config) {
+        JsonNode location = config.get("default_location");
+        if (location == null || location.isNull()
+                || location.isTextual() && location.textValue().isBlank()) {
+            return new WeatherLocation(null, "default_location_missing");
+        }
+        if (!location.isTextual()) return new WeatherLocation(null, "default_location_invalid");
+        String value = location.textValue().trim();
+        return value.length() <= 120 ? new WeatherLocation(value, null)
+                : new WeatherLocation(null, "default_location_invalid");
+    }
+
+    private WeatherCredentials weatherCredentials(JsonNode config) {
+        JsonNode hostNode = config.get("api_host");
+        if (hostNode == null || hostNode.isNull() || hostNode.isTextual() && hostNode.textValue().isBlank()) {
+            return WeatherCredentials.error("weather_credentials_missing");
+        }
+        if (!hostNode.isTextual()) return WeatherCredentials.error("weather_credentials_invalid");
+        String apiHost = normalizePublicHttpsHost(hostNode.textValue());
+        if (apiHost == null) return WeatherCredentials.error("weather_api_host_invalid");
+
+        JsonNode tokenNode = bearerCredentialNode(config);
+        if (tokenNode != null && !tokenNode.isNull() && !(tokenNode.isTextual()
+                && tokenNode.textValue().isBlank())) {
+            String token = credentialText(tokenNode);
+            return token == null ? WeatherCredentials.withHostError(apiHost, "weather_credentials_invalid")
+                    : new WeatherCredentials(apiHost, "bearer", token, null);
+        }
+        JsonNode apiKeyNode = config.get("api_key");
+        if (apiKeyNode == null || apiKeyNode.isNull()
+                || apiKeyNode.isTextual() && apiKeyNode.textValue().isBlank()) {
+            return WeatherCredentials.withHostError(apiHost, "weather_credentials_missing");
+        }
+        String apiKey = credentialText(apiKeyNode);
+        return apiKey == null ? WeatherCredentials.withHostError(apiHost, "weather_credentials_invalid")
+                : new WeatherCredentials(apiHost, "api_key", apiKey, null);
+    }
+
+    private JsonNode bearerCredentialNode(JsonNode config) {
+        JsonNode bearerToken = config.get("bearer_token");
+        if (bearerToken != null && !bearerToken.isNull()
+                && !(bearerToken.isTextual() && bearerToken.textValue().isBlank())) {
+            return bearerToken;
+        }
+        return config.get("token");
+    }
+
+    private String credentialText(JsonNode node) {
+        if (!node.isTextual()) return null;
+        String value = node.textValue().trim();
+        return value.isEmpty() || value.length() > 4096 || value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0
+                ? null : value;
+    }
+
+    private String normalizePublicHttpsHost(String rawHost) {
+        String value = rawHost.trim();
+        if (value.length() > 253) return null;
+        try {
+            URI uri = new URI(value.contains("://") ? value : "https://" + value);
+            String host = uri.getHost();
+            if (!"https".equalsIgnoreCase(uri.getScheme()) || StringUtils.isBlank(host)
+                    || uri.getRawUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null
+                    || !(StringUtils.isBlank(uri.getRawPath()) || "/".equals(uri.getRawPath()))
+                    || uri.getPort() != -1 && uri.getPort() != 443 || isPrivateHost(host)) {
+                return null;
+            }
+            return "https://" + host.toLowerCase() + (uri.getPort() == 443 ? ":443" : "");
+        } catch (URISyntaxException exception) {
+            return null;
+        }
+    }
+
+    private boolean isPrivateHost(String host) {
+        String normalized = host.toLowerCase();
+        return normalized.equals("localhost") || normalized.endsWith(".localhost")
+                || normalized.endsWith(".local") || normalized.endsWith(".internal")
+                || !normalized.contains(".") || normalized.indexOf(':') >= 0
+                || normalized.matches("[0-9.]+");
     }
 
     private NewsSources newsSources(DeviceEntity device, List<AgentPluginMapping> plugins) {
@@ -371,8 +455,22 @@ public class ProactiveMonitorService {
     }
 
     private record WeatherLocation(String value, String error) {}
+    private record WeatherCredentials(String apiHost, String authType, String credential, String error) {
+        private static WeatherCredentials error(String error) {
+            return new WeatherCredentials(null, null, null, error);
+        }
+
+        private static WeatherCredentials empty() {
+            return new WeatherCredentials(null, null, null, null);
+        }
+
+        private static WeatherCredentials withHostError(String apiHost, String error) {
+            return new WeatherCredentials(apiHost, null, null, error);
+        }
+    }
+    private record WeatherInputs(WeatherLocation location, WeatherCredentials credentials) {}
     private record NewsSources(List<String> sources, String error) {}
-    private record WorkerInputs(WeatherLocation weather, NewsSources news) {}
+    private record WorkerInputs(WeatherInputs weather, NewsSources news) {}
 
     private MonitorView<WeatherMonitorConfig> weatherView(ProactiveMonitorEntity entity) {
         return new MonitorView<>(MonitorType.WEATHER, entity.getEnabled(), entity.getIntervalMinutes(),

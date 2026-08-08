@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Set;
 
 import org.apache.ibatis.annotations.Insert;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 import org.junit.jupiter.api.Test;
 
@@ -176,6 +177,19 @@ class ProactiveContractTest {
         assertTrue(claimSql.contains("claim_token = #{claimToken}"));
         assertTrue(claimSql.contains("claimed_at < #{leaseCutoff}"));
         assertTrue(claimSql.contains("claimed_at IS NULL"));
-        assertTrue(claimSql.contains("device_id = #{deviceId} AND event_id = #{eventId}"));
+        assertTrue(claimSql.contains("e.device_id = #{deviceId} AND e.event_id = #{eventId}"));
+        assertTrue(claimSql.contains("LEFT JOIN ai_device_proactive_monitor m"));
+        assertTrue(claimSql.contains("WHEN 'WEATHER_ALERT' THEN 'WEATHER'"));
+        assertTrue(claimSql.contains("WHEN 'NEWS_ALERT' THEN 'NEWS'"));
+        assertTrue(claimSql.contains("m.enabled = 1"));
+        assertFalse(claimSql.contains("priority"));
+
+        Method monitorRead = ProactiveEventDao.class.getMethod(
+                "selectMonitorEventByMacAndEventId", String.class, String.class);
+        String monitorReadSql = monitorRead.getAnnotation(Select.class).value()[0];
+        assertTrue(monitorReadSql.contains("INNER JOIN ai_device_proactive_monitor m"));
+        assertTrue(monitorReadSql.contains("m.enabled = 1"));
+        assertTrue(monitorReadSql.contains("WHEN 'WEATHER_ALERT' THEN 'WEATHER'"));
+        assertTrue(monitorReadSql.contains("WHEN 'NEWS_ALERT' THEN 'NEWS'"));
     }
 }

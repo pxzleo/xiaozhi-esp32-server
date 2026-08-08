@@ -86,7 +86,8 @@ class ProactiveMonitorServiceTest {
         var news = monitor(MonitorType.NEWS, true, 10);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(news, weather));
         when(agentPluginMappingService.proactiveMonitorPluginParamsByAgentId("agent-1"))
-                .thenReturn(List.of(weatherPlugin("{\"default_location\":\"广州\",\"api_key\":\"secret\"}")));
+                .thenReturn(List.of(weatherPlugin("{\"default_location\":\"广州\","
+                        + "\"api_host\":\"api.qweather.example\",\"api_key\":\"secret\"}")));
         when(paramsService.getValue(Constant.PROACTIVE_CLASSIFIER_MODEL_ID, true)).thenReturn("model-1");
         when(llmService.isAvailable("model-1")).thenReturn(true);
 
@@ -181,8 +182,8 @@ class ProactiveMonitorServiceTest {
     }
 
     @Test
-    void pendingEnvelopeDoesNotExposePayloadAndMarksBothMonitorsProbed() {
-        when(monitorDao.markProbed("device-1")).thenReturn(2);
+    void pendingEnvelopeKeepsExistingEventAfterAtomicProbeWithoutLeakingPayload() {
+        when(monitorDao.probeAndRebaselineIfOffline("device-1")).thenReturn(2);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
                 monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(preference(Set.of(), Set.of()));
@@ -196,12 +197,13 @@ class ProactiveMonitorServiceTest {
         assertEquals("event-1", envelope.eventId());
         assertEquals(0, envelope.retryAfterSeconds());
         assertFalse(envelope.toString().contains("secret"));
-        verify(monitorDao).markProbed("device-1");
+        verify(monitorDao).probeAndRebaselineIfOffline("device-1");
+        verify(eventDao).selectPendingMonitorEvents(eq("device-1"), any(), any());
     }
 
     @Test
     void criticalWeatherBypassesSilenceButNewsNeverDoes() {
-        when(monitorDao.markProbed("device-1")).thenReturn(2);
+        when(monitorDao.probeAndRebaselineIfOffline("device-1")).thenReturn(2);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
                 monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
@@ -218,7 +220,7 @@ class ProactiveMonitorServiceTest {
 
     @Test
     void disabledWeatherRejectsEvenCriticalAlert() {
-        when(monitorDao.markProbed("device-1")).thenReturn(2);
+        when(monitorDao.probeAndRebaselineIfOffline("device-1")).thenReturn(2);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
                 monitor(MonitorType.WEATHER, false, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
@@ -239,7 +241,8 @@ class ProactiveMonitorServiceTest {
                 .thenReturn(1);
         when(monitorDao.selectForUpdate("device-1", "WEATHER")).thenReturn(weather);
         when(agentPluginMappingService.proactiveMonitorPluginParamsByAgentId("agent-1")).thenReturn(List.of(
-                weatherPlugin("{\"default_location\":\"广州\",\"api_key\":\"weather-secret\"}"),
+                weatherPlugin("{\"default_location\":\"广州\","
+                        + "\"api_host\":\"api.qweather.example\",\"api_key\":\"weather-secret\"}"),
                 newsPlugin("{\"url\":\"private-url\",\"news_sources\":"
                         + "\"澎湃新闻; 百度热搜 ;财联社;财联社\"}")));
 
@@ -250,11 +253,14 @@ class ProactiveMonitorServiceTest {
         assertEquals(databaseLeaseUntil, tasks.getFirst().leaseUntil());
         assertEquals("广州", tasks.getFirst().weatherLocation());
         assertNull(tasks.getFirst().weatherLocationError());
+        assertEquals("https://api.qweather.example", tasks.getFirst().weatherApiHost());
+        assertEquals("api_key", tasks.getFirst().weatherAuthType());
+        assertEquals("weather-secret", tasks.getFirst().weatherCredential());
+        assertNull(tasks.getFirst().weatherCredentialsError());
         assertEquals(List.of("澎湃新闻", "百度热搜", "财联社"), tasks.getFirst().newsSources());
         assertNull(tasks.getFirst().newsSourcesError());
-        String taskJson = assertDoesNotThrow(() -> new ObjectMapper().writeValueAsString(tasks.getFirst()));
-        assertFalse(taskJson.contains("weather-secret"));
-        assertFalse(taskJson.contains("private-url"));
+        assertFalse(tasks.getFirst().toString().contains("weather-secret"));
+        assertDoesNotThrow(() -> new ObjectMapper().writeValueAsString(tasks.getFirst()));
         MonitorComplete complete = new MonitorComplete();
         complete.setDeviceId("device-1");
         complete.setMonitorType(MonitorType.WEATHER);
@@ -265,6 +271,45 @@ class ProactiveMonitorServiceTest {
         when(monitorDao.completeCas(eq("device-1"), eq("WEATHER"), eq("worker-1"),
                 eq("wrong-token"), eq(true), any(), eq(null))).thenReturn(0);
         assertThrows(RenException.class, () -> service.complete(complete));
+    }
+
+    @Test
+    void internalTaskReportsMissingInvalidAndBearerWeatherCredentials() {
+        ProactiveMonitorEntity weather = monitor(MonitorType.WEATHER, true, 30);
+        weather.setLeaseUntil(new Date(System.currentTimeMillis() + 120_000L));
+        when(monitorDao.selectDueCandidates(1)).thenReturn(List.of(weather));
+        when(monitorDao.claimCas(eq("device-1"), eq("WEATHER"), eq("worker-1"), any()))
+                .thenReturn(1);
+        when(monitorDao.selectForUpdate("device-1", "WEATHER")).thenReturn(weather);
+        when(agentPluginMappingService.proactiveMonitorPluginParamsByAgentId("agent-1")).thenReturn(
+                List.of(weatherPlugin("{\"default_location\":\"广州\","
+                        + "\"api_host\":\"api.qweather.example\"}")),
+                List.of(weatherPlugin("{\"default_location\":\"广州\","
+                        + "\"api_host\":\"http://api.qweather.example\",\"api_key\":\"key\"}")),
+                List.of(weatherPlugin("{\"default_location\":\"广州\","
+                        + "\"api_host\":\"https://127.0.0.1\",\"api_key\":\"key\"}")),
+                List.of(weatherPlugin("{\"default_location\":\"广州\","
+                        + "\"api_host\":\"api.qweather.example\",\"api_key\":123}")),
+                List.of(weatherPlugin("{\"default_location\":\"广州\","
+                        + "\"api_host\":\"https://api.qweather.example/\","
+                        + "\"token\":\"jwt-secret\"}")));
+
+        var missing = service.claimDue("worker-1", 1).getFirst();
+        var insecureHost = service.claimDue("worker-1", 1).getFirst();
+        var privateHost = service.claimDue("worker-1", 1).getFirst();
+        var invalidKey = service.claimDue("worker-1", 1).getFirst();
+        var bearer = service.claimDue("worker-1", 1).getFirst();
+
+        assertEquals("https://api.qweather.example", missing.weatherApiHost());
+        assertEquals("weather_credentials_missing", missing.weatherCredentialsError());
+        assertEquals("weather_api_host_invalid", insecureHost.weatherCredentialsError());
+        assertEquals("weather_api_host_invalid", privateHost.weatherCredentialsError());
+        assertEquals("weather_credentials_invalid", invalidKey.weatherCredentialsError());
+        assertEquals("https://api.qweather.example", bearer.weatherApiHost());
+        assertEquals("bearer", bearer.weatherAuthType());
+        assertEquals("jwt-secret", bearer.weatherCredential());
+        assertNull(bearer.weatherCredentialsError());
+        assertFalse(bearer.toString().contains("jwt-secret"));
     }
 
     @Test
@@ -297,6 +342,10 @@ class ProactiveMonitorServiceTest {
 
         assertEquals(List.of("澎湃新闻", "百度热搜", "财联社"), defaults.newsSources());
         assertNull(defaults.newsSourcesError());
+        assertNull(defaults.weatherApiHost());
+        assertNull(defaults.weatherAuthType());
+        assertNull(defaults.weatherCredential());
+        assertNull(defaults.weatherCredentialsError());
         for (var fallback : List.of(missing, nullValue, blank)) {
             assertEquals(List.of("澎湃新闻", "百度热搜", "财联社"), fallback.newsSources());
             assertNull(fallback.newsSourcesError());
@@ -571,7 +620,7 @@ class ProactiveMonitorServiceTest {
 
     @Test
     void conservativeOnlyAllowsCriticalWeather() {
-        when(monitorDao.markProbed("device-1")).thenReturn(2);
+        when(monitorDao.probeAndRebaselineIfOffline("device-1")).thenReturn(2);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
                 monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(

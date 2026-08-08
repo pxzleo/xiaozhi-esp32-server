@@ -184,10 +184,18 @@ class ProactiveMonitorContractTest {
 
     @Test
     void leaseSqlContractUsesDatabaseClockAndCasPredicates() throws Exception {
-        Method probe = ProactiveMonitorDao.class.getMethod("markProbed", String.class);
+        Method probe = ProactiveMonitorDao.class.getMethod("probeAndRebaselineIfOffline", String.class);
         String probeSql = probe.getAnnotation(Update.class).value()[0];
         assertTrue(probeSql.contains("last_probe_at = CURRENT_TIMESTAMP"));
         assertTrue(probeSql.contains("updated_at = CURRENT_TIMESTAMP"));
+        assertTrue(probeSql.contains("last_probe_at IS NULL"));
+        assertTrue(probeSql.contains("last_probe_at <= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)"));
+        assertTrue(probeSql.contains("THEN JSON_OBJECT() ELSE state END"));
+        assertTrue(probeSql.contains("THEN CURRENT_TIMESTAMP ELSE next_check_at END"));
+        assertTrue(probeSql.contains("THEN NULL ELSE lease_token END"));
+        assertTrue(probeSql.contains("WHERE device_id = #{deviceId}"));
+        assertFalse(probeSql.contains("ai_device_proactive_event"));
+        assertFalse(probeSql.contains("monitor_type ="));
         assertFalse(probeSql.contains("#{now}"));
 
         Method candidates = ProactiveMonitorDao.class.getMethod("selectDueCandidates", int.class);
@@ -238,15 +246,23 @@ class ProactiveMonitorContractTest {
     }
 
     @Test
-    void monitorTaskExposesOnlyResolvedWorkerInputsInsteadOfPluginCredentials() {
+    void monitorTaskExposesServerOnlyResolvedWorkerInputsAndUserViewHasNoCredentials() {
         Set<String> fields = Arrays.stream(ProactiveDTOs.MonitorTask.class.getRecordComponents())
                 .map(java.lang.reflect.RecordComponent::getName)
                 .collect(java.util.stream.Collectors.toSet());
         assertTrue(fields.containsAll(Set.of("weatherLocation", "weatherLocationError",
+                "weatherApiHost", "weatherAuthType", "weatherCredential", "weatherCredentialsError",
                 "newsSources", "newsSourcesError")));
         assertFalse(fields.contains("apiKey"));
         assertFalse(fields.contains("provider"));
         assertFalse(fields.contains("pluginConfig"));
+        Set<String> userFields = Arrays.stream(ProactiveDTOs.MonitorsView.class.getRecordComponents())
+                .map(java.lang.reflect.RecordComponent::getName)
+                .collect(java.util.stream.Collectors.toSet());
+        assertFalse(userFields.contains("weatherApiHost"));
+        assertFalse(userFields.contains("weatherAuthType"));
+        assertFalse(userFields.contains("weatherCredential"));
+        assertFalse(userFields.contains("weatherCredentialsError"));
     }
 
     @Test

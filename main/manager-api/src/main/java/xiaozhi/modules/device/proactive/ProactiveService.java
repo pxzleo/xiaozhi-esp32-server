@@ -1,5 +1,7 @@
 package xiaozhi.modules.device.proactive;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -9,6 +11,7 @@ import java.time.format.DateTimeParseException;
 import java.util.Collections;
 import java.util.Date;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -48,7 +51,7 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 public class ProactiveService {
     private static final long CLAIM_LEASE_MILLIS = 180_000L;
     private static final Set<String> EVENT_PAYLOAD_KEYS = Set.of(
-            "title", "message", "reference_id", "scheduled_at", "action", "source");
+            "title", "message", "reference_id", "reference_url", "scheduled_at", "action", "source");
     private static final Set<String> HABIT_PAYLOAD_KEYS = Set.of(
             "description", "suggested_mode", "suggested_time", "topic");
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
@@ -184,7 +187,9 @@ public class ProactiveService {
         DeviceEntity device = resolveByMac(request.getMacAddress());
         Date now = new Date();
         Date leaseCutoff = new Date(now.getTime() - CLAIM_LEASE_MILLIS);
-        eventDao.claimPending(device.getId(), eventId, request.getClaimToken(), now, leaseCutoff);
+        if (eventDao.claimPending(device.getId(), eventId, request.getClaimToken(), now, leaseCutoff) != 1) {
+            return false;
+        }
         ProactiveEventEntity event = eventDao.selectByDeviceAndEventId(device.getId(), eventId);
         return event != null
                 && DeliveryStatus.CLAIMED.name().equals(event.getDeliveryStatus())
@@ -389,10 +394,18 @@ public class ProactiveService {
     }
 
     private void validateEventPayload(Map<String, Object> payload) {
-        validatePayloadKeysAndSize(payload, EVENT_PAYLOAD_KEYS, "event payload");
+        if (payload == null || !EVENT_PAYLOAD_KEYS.containsAll(payload.keySet())) {
+            throw new RenException("event payload包含不支持的键");
+        }
+        Map<String, Object> boundedPayload = new HashMap<>(payload);
+        boundedPayload.remove("reference_url");
+        if (writeJson(boundedPayload).getBytes(StandardCharsets.UTF_8).length > 512) {
+            throw new RenException("event payload除reference_url外总长度不能超过512字节");
+        }
         validateOptionalText(payload, "title", 100, "event payload title");
         validateOptionalText(payload, "message", 300, "event payload message");
         validateOptionalText(payload, "reference_id", 128, "event payload reference_id");
+        validateReferenceUrl(payload);
         validateOptionalText(payload, "action", 64, "event payload action");
         validateOptionalText(payload, "source", 64, "event payload source");
         if (payload.containsKey("scheduled_at")) {
@@ -402,6 +415,21 @@ public class ProactiveService {
             } catch (DateTimeParseException exception) {
                 throw new RenException("event payload scheduled_at必须为ISO本地日期时间", exception);
             }
+        }
+    }
+
+    private void validateReferenceUrl(Map<String, Object> payload) {
+        if (!payload.containsKey("reference_url")) return;
+        String value = requireText(payload.get("reference_url"), 2048, "event payload reference_url");
+        try {
+            URI uri = new URI(value);
+            String scheme = uri.getScheme();
+            if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))
+                    || StringUtils.isBlank(uri.getHost()) || uri.getRawUserInfo() != null) {
+                throw new RenException("event payload reference_url必须为不含用户信息的HTTP(S) URL");
+            }
+        } catch (URISyntaxException exception) {
+            throw new RenException("event payload reference_url必须为合法HTTP(S) URL", exception);
         }
     }
 

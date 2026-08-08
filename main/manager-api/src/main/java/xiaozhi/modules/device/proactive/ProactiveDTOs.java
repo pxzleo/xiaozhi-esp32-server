@@ -186,11 +186,22 @@ public final class ProactiveDTOs {
             Map<String, Object> config, Map<String, Object> state,
             @JsonProperty("weather_location") String weatherLocation,
             @JsonProperty("weather_location_error") String weatherLocationError,
+            @JsonProperty("weather_api_host") String weatherApiHost,
+            @JsonProperty("weather_auth_type") String weatherAuthType,
+            @JsonProperty("weather_credential") String weatherCredential,
+            @JsonProperty("weather_credentials_error") String weatherCredentialsError,
             @JsonProperty("news_sources") List<String> newsSources,
             @JsonProperty("news_sources_error") String newsSourcesError,
             @JsonProperty("lease_owner") String leaseOwner,
             @JsonProperty("lease_token") String leaseToken,
-            @JsonProperty("lease_until") Date leaseUntil) {}
+            @JsonProperty("lease_until") Date leaseUntil) {
+        /** server-secret响应；weatherCredential属于敏感值，禁止写入日志或转发到设备、Web。 */
+        @Override
+        public String toString() {
+            return "MonitorTask[deviceId=" + deviceId + ", monitorType=" + monitorType
+                    + ", weatherCredential=<redacted>]";
+        }
+    }
 
     @Data
     public static class MonitorComplete extends StrictRequest {

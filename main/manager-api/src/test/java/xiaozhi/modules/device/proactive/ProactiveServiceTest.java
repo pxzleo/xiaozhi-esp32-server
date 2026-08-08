@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -272,6 +273,51 @@ class ProactiveServiceTest {
     }
 
     @Test
+    void newsEventPreservesLongHttpsReferenceUrlForAuthoritativeRead() throws Exception {
+        String referenceUrl = "https://news.example.com/article?context=" + "a".repeat(1_600);
+        EventUpsert request = eventRequest();
+        request.setTopic(Topic.NEWS);
+        request.setEventType(EventType.NEWS_ALERT);
+        request.setPayload(Map.of("message", "重大新闻", "reference_url", referenceUrl));
+        ProactiveEventEntity stored = eventEntity(request);
+        stored.setPayload(new ObjectMapper().writeValueAsString(request.getPayload()));
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(null, stored);
+        when(eventDao.selectMonitorEventByMacAndEventId(device.getMacAddress(), "event-1"))
+                .thenReturn(stored);
+
+        assertEquals(referenceUrl, service.upsertEvent(request).payload().get("reference_url"));
+        verify(eventDao).insertIfAbsent(argThat(event -> event.getPayload().contains(referenceUrl)));
+        assertEquals(referenceUrl,
+                service.monitorEvent(device.getMacAddress(), "event-1").payload().get("reference_url"));
+    }
+
+    @Test
+    void legacyReferenceIdRemainsAccepted() {
+        EventUpsert request = eventRequest();
+        request.setPayload(Map.of("reference_id", "source-item-123"));
+        ProactiveEventEntity stored = eventEntity(request);
+        stored.setPayload("{\"reference_id\":\"source-item-123\"}");
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1")).thenReturn(stored);
+
+        assertEquals("source-item-123", service.upsertEvent(request).payload().get("reference_id"));
+    }
+
+    @Test
+    void newsReferenceUrlRejectsUnsafeSchemesCredentialsAndExcessLength() {
+        List<String> invalidUrls = List.of(
+                "javascript:alert(1)",
+                "https://user:password@news.example.com/article",
+                "https://news.example.com/" + "a".repeat(2_049));
+
+        for (String referenceUrl : invalidUrls) {
+            EventUpsert request = eventRequest();
+            request.setPayload(Map.of("reference_url", referenceUrl));
+            assertThrows(RenException.class, () -> service.upsertEvent(request));
+        }
+    }
+
+    @Test
     void habitPayloadRejectsInvalidEnumsTypesModesAndTimes() {
         List<Map<String, Object>> invalidPayloads = List.of(
                 Map.of("topic", "MUSIC"),
@@ -370,6 +416,8 @@ class ProactiveServiceTest {
         ProactiveEventEntity claimed = eventEntity(eventRequest());
         claimed.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
         claimed.setClaimToken("same-token");
+        when(eventDao.claimPending(eq("device-1"), eq("event-1"), eq("same-token"), any(), any()))
+                .thenReturn(1);
         when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(claimed);
 
         assertTrue(service.claimEvent("event-1", claim));
@@ -382,11 +430,35 @@ class ProactiveServiceTest {
         ProactiveEventEntity reclaimed = eventEntity(eventRequest());
         reclaimed.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
         reclaimed.setClaimToken("new-token");
+        when(eventDao.claimPending(eq("device-1"), eq("event-1"), eq("new-token"), any(), any()))
+                .thenReturn(1);
         when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(reclaimed);
 
         assertTrue(service.claimEvent("event-1", claim));
         verify(eventDao).claimPending(eq("device-1"), eq("event-1"), eq("new-token"),
                 any(), any());
+    }
+
+    @Test
+    void cachedPendingMonitorEventCannotBeClaimedAfterMonitorIsDisabled() {
+        for (Priority priority : List.of(Priority.NORMAL, Priority.CRITICAL)) {
+            EventClaim claim = claim("cached-" + priority.name().toLowerCase());
+            when(eventDao.claimPending(eq("device-1"), eq("event-1"),
+                    eq(claim.getClaimToken()), any(), any())).thenReturn(0);
+
+            assertFalse(service.claimEvent("event-1", claim));
+        }
+
+        verify(eventDao, never()).selectByDeviceAndEventId("device-1", "event-1");
+    }
+
+    @Test
+    void authoritativeMonitorReadRejectsEventAfterMonitorIsDisabled() {
+        when(eventDao.selectMonitorEventByMacAndEventId(device.getMacAddress(), "event-1"))
+                .thenReturn(null);
+
+        assertThrows(RenException.class,
+                () -> service.monitorEvent(device.getMacAddress(), "event-1"));
     }
 
     @Test

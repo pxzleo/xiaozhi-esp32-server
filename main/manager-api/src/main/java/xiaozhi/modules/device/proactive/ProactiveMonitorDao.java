@@ -55,11 +55,33 @@ public interface ProactiveMonitorDao {
 
     @Update("""
             UPDATE ai_device_proactive_monitor
-            SET last_probe_at = CURRENT_TIMESTAMP, version = version + 1,
+            SET state = CASE
+                    WHEN last_probe_at IS NULL
+                      OR last_probe_at <= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)
+                    THEN JSON_OBJECT() ELSE state END,
+                next_check_at = CASE
+                    WHEN last_probe_at IS NULL
+                      OR last_probe_at <= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)
+                    THEN CASE WHEN next_check_at IS NULL OR next_check_at > CURRENT_TIMESTAMP
+                         THEN CURRENT_TIMESTAMP ELSE next_check_at END
+                    ELSE next_check_at END,
+                lease_owner = CASE
+                    WHEN last_probe_at IS NULL
+                      OR last_probe_at <= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)
+                    THEN NULL ELSE lease_owner END,
+                lease_token = CASE
+                    WHEN last_probe_at IS NULL
+                      OR last_probe_at <= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)
+                    THEN NULL ELSE lease_token END,
+                lease_until = CASE
+                    WHEN last_probe_at IS NULL
+                      OR last_probe_at <= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)
+                    THEN NULL ELSE lease_until END,
+                last_probe_at = CURRENT_TIMESTAMP, version = version + 1,
                 updated_at = CURRENT_TIMESTAMP
             WHERE device_id = #{deviceId}
             """)
-    int markProbed(@Param("deviceId") String deviceId);
+    int probeAndRebaselineIfOffline(@Param("deviceId") String deviceId);
 
     @Select("""
             SELECT m.* FROM ai_device_proactive_monitor m
