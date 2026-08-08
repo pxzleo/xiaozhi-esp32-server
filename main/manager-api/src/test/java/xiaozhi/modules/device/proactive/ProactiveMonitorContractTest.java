@@ -93,25 +93,33 @@ class ProactiveMonitorContractTest {
     }
 
     @Test
-    void leaseSqlIsCasSafeBoundedAndRestrictedToRecentlyProbedDevices() throws Exception {
-        Method candidates = ProactiveMonitorDao.class.getMethod("selectDueCandidates",
-                java.util.Date.class, java.util.Date.class, int.class);
+    void leaseSqlContractUsesDatabaseClockAndCasPredicates() throws Exception {
+        Method candidates = ProactiveMonitorDao.class.getMethod("selectDueCandidates", int.class);
         String select = candidates.getAnnotation(Select.class).value()[0];
-        assertTrue(select.contains("last_probe_at >= #{activeCutoff}"));
+        assertTrue(select.contains("last_probe_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)"));
         assertTrue(select.contains("LIMIT #{limit}"));
-        assertTrue(select.contains("lease_until IS NULL OR m.lease_until <= #{now}"));
+        assertTrue(select.contains("lease_until IS NULL OR m.lease_until <= CURRENT_TIMESTAMP"));
+        assertFalse(select.contains("#{now}"));
+        assertFalse(select.contains("#{activeCutoff}"));
 
         Method claim = ProactiveMonitorDao.class.getMethod("claimCas", String.class, String.class,
-                String.class, String.class, java.util.Date.class, java.util.Date.class, java.util.Date.class);
+                String.class, String.class);
         String claimSql = claim.getAnnotation(Update.class).value()[0];
-        assertTrue(claimSql.contains("lease_until IS NULL OR lease_until <= #{now}"));
-        assertTrue(claimSql.contains("last_probe_at >= #{activeCutoff}"));
+        assertTrue(claimSql.contains("lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 120 SECOND)"));
+        assertTrue(claimSql.contains("lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP"));
+        assertTrue(claimSql.contains("last_probe_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)"));
+        assertTrue(claimSql.contains("updated_at = CURRENT_TIMESTAMP"));
+        assertFalse(claimSql.contains("#{leaseUntil}"));
+        assertFalse(claimSql.contains("#{now}"));
 
         Method complete = ProactiveMonitorDao.class.getMethod("completeCas", String.class, String.class,
-                String.class, String.class, boolean.class, String.class, String.class, java.util.Date.class);
+                String.class, String.class, boolean.class, String.class, String.class);
         String completeSql = complete.getAnnotation(Update.class).value()[0];
         assertTrue(completeSql.contains("lease_owner = #{leaseOwner} AND lease_token = #{leaseToken}"));
-        assertTrue(completeSql.contains("lease_until > #{now}"));
+        assertTrue(completeSql.contains("lease_until > CURRENT_TIMESTAMP"));
+        assertTrue(completeSql.contains("next_check_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL interval_minutes MINUTE)"));
+        assertTrue(completeSql.contains("updated_at = CURRENT_TIMESTAMP"));
+        assertFalse(completeSql.contains("#{now}"));
 
         Method configure = ProactiveMonitorDao.class.getMethod("updateConfiguration", String.class,
                 String.class, boolean.class, int.class, String.class, java.util.Date.class);

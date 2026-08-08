@@ -50,10 +50,10 @@ manager-api 请求体中的 `created_at`、`expires_at` 和 `seen_at` 使用 Uni
 
 外界监测内部接口继续位于 `/config/proactive/**` 并使用 server-secret：
 
-- `POST /config/proactive/monitors/claim`：每次最多领取 100 条到期任务，只选择 15 分钟内有设备探测的记录；数据库以 owner 和唯一 token 做 CAS，租约固定 120 秒，多实例只能有一个领取者成功。
-- `POST /config/proactive/monitors/complete`：只有匹配且未过期的 owner/token 可以更新 state、成功时间、下次检查时间和错误码并释放租约；用户 PUT 任一配置会立即使该 monitor 的现有租约失效，旧 worker 不得覆盖新配置对应的 state 或调度；状态 JSON 有大小上限，任意对象或数组层级都禁止 `reasoning`、`chain_of_thought` 字段。
+- `POST /config/proactive/monitors/claim`：每次最多领取 100 条到期任务，只选择 15 分钟内有设备探测的记录；数据库以 owner 和唯一 token 做 CAS，租约固定 120 秒，多实例只能有一个领取者成功。候选到期、活跃窗口、租约生成和 CAS 均以 MySQL `CURRENT_TIMESTAMP` 为唯一权威时钟，不使用各 JVM 墙钟。
+- `POST /config/proactive/monitors/complete`：只有数据库当前时间仍早于租约截止且匹配 owner/token 才能更新 state、成功时间、下次检查时间和错误码并释放租约；下次调度同样以 MySQL 当前时间计算。用户 PUT 任一配置会立即使该 monitor 的现有租约失效，旧 worker 不得覆盖新配置对应的 state 或调度；状态 JSON 有大小上限，任意对象或数组层级都禁止 `reasoning`、`chain_of_thought` 以及规范化后的 API key、authorization、token、password、secret、cookie 等敏感凭据字段，正常 `baseline`、`fingerprints` 不受影响。
 - `GET /config/proactive/monitor-events/{eventId}?mac_address=...`：按 MAC 与 event ID 读取权威天气或新闻事件；投递仍复用既有 180 秒 `/events/{eventId}/claim` 接口。
-- `POST /config/proactive/classifier/evaluate`：仅接受有界的新闻标题、来源和事实，使用全局独立分类模型，禁止回退设备智能体模型。固定分类契约使用 system 消息，序列化候选只作为独立的不可信 user JSON 数据；候选中的任何指令都不得改变角色或输出契约。模型只能返回单个严格 JSON 且禁止推理链；manager-api 同时校验 JSON 结构、索引完整性和字段范围，再把原始 JSON 文本交给调用方复核。
+- `POST /config/proactive/classifier/evaluate`：仅接受有界的新闻标题、来源和事实，使用全局独立分类模型，禁止回退设备智能体模型。固定分类契约使用 system 消息，序列化候选只作为独立的不可信 user JSON 数据；候选中的任何指令都不得改变角色或输出契约。模型只能返回一个完整 JSON 根对象，根对象后到 EOF 之间只能有空白；manager-api 校验 JSON 结构、整数且不越界的索引、索引完整性和字段范围，并只返回重新序列化的规范 JSON，绝不透传原始模型文本或尾随推理内容。
 
 超级管理员通过 `GET|PUT /proactive/classifier/model` 读取或保存独立 LLM model id，并通过 `POST /proactive/classifier/model/test` 检查可用性。未配置、非 LLM、未启用或缺少必要连接配置时明确返回不可用；任何接口都不得返回模型密钥。
 

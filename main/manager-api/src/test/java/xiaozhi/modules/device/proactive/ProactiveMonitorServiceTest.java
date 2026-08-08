@@ -144,15 +144,18 @@ class ProactiveMonitorServiceTest {
     @Test
     void onlySuccessfulLeaseCasProducesTaskAndCompletionRequiresToken() {
         ProactiveMonitorEntity weather = monitor(MonitorType.WEATHER, true, 30);
-        when(monitorDao.selectDueCandidates(any(), any(), eq(2))).thenReturn(List.of(weather));
-        when(monitorDao.claimCas(eq("device-1"), eq("WEATHER"), eq("worker-1"), any(),
-                any(), any(), any())).thenReturn(1);
+        Date databaseLeaseUntil = new Date(System.currentTimeMillis() + 120_000L);
+        weather.setLeaseUntil(databaseLeaseUntil);
+        when(monitorDao.selectDueCandidates(eq(2))).thenReturn(List.of(weather));
+        when(monitorDao.claimCas(eq("device-1"), eq("WEATHER"), eq("worker-1"), any()))
+                .thenReturn(1);
         when(monitorDao.selectForUpdate("device-1", "WEATHER")).thenReturn(weather);
 
         var tasks = service.claimDue("worker-1", 2);
 
         assertEquals(1, tasks.size());
         assertEquals("worker-1", tasks.getFirst().leaseOwner());
+        assertEquals(databaseLeaseUntil, tasks.getFirst().leaseUntil());
         MonitorComplete complete = new MonitorComplete();
         complete.setDeviceId("device-1");
         complete.setMonitorType(MonitorType.WEATHER);
@@ -161,7 +164,7 @@ class ProactiveMonitorServiceTest {
         complete.setSuccess(true);
         complete.setState(Map.of("baseline", "ok"));
         when(monitorDao.completeCas(eq("device-1"), eq("WEATHER"), eq("worker-1"),
-                eq("wrong-token"), eq(true), any(), eq(null), any())).thenReturn(0);
+                eq("wrong-token"), eq(true), any(), eq(null))).thenReturn(0);
         assertThrows(RenException.class, () -> service.complete(complete));
     }
 
@@ -178,7 +181,26 @@ class ProactiveMonitorServiceTest {
 
         assertThrows(RenException.class, () -> service.complete(complete));
         verify(monitorDao, never()).completeCas(any(), any(), any(), any(), any(Boolean.class),
-                any(), any(), any());
+                any(), any());
+    }
+
+    @Test
+    void nestedSensitiveStateKeysAreRejectedButNormalBaselinesRemainAllowed() {
+        List<String> forbidden = List.of("api_key", "Api-Key", "AUTHORIZATION", "token",
+                "access_token", "refresh-token", "PASSWORD", "secret", "cookie", "set_cookie",
+                "client_secret", "session-token", "dbPassword");
+        when(monitorDao.completeCas(any(), any(), any(), any(), eq(true), any(), eq(null)))
+                .thenReturn(1);
+        for (String key : forbidden) {
+            MonitorComplete rejected = successfulCompletion(Map.of("outer",
+                    List.of(Map.of("nested", Map.of(key, "must-not-persist")))));
+            assertThrows(RenException.class, () -> service.complete(rejected), key);
+        }
+        assertThrows(RenException.class, () -> service.complete(successfulCompletion(Map.of(
+                "native_array", new Object[] {Map.of("Api_Key", "must-not-persist")}))));
+        service.complete(successfulCompletion(Map.of(
+                "baseline", Map.of("fingerprints", List.of("abc", "def")))));
+        verify(monitorDao).completeCas(any(), any(), any(), any(), eq(true), any(), eq(null));
     }
 
     @Test
@@ -215,7 +237,7 @@ class ProactiveMonitorServiceTest {
         verify(monitorDao).updateConfiguration(eq("device-1"), eq("WEATHER"), eq(true), eq(45),
                 org.mockito.ArgumentMatchers.contains("\"precip_probability\":70"), any());
         verify(monitorDao).completeCas(eq("device-1"), eq("WEATHER"), eq("old-worker"),
-                eq("old-token"), eq(true), any(), eq(null), any());
+                eq("old-token"), eq(true), any(), eq(null));
     }
 
     @Test
@@ -283,6 +305,51 @@ class ProactiveMonitorServiceTest {
     }
 
     @Test
+    void classifierRejectsTrailingTextSecondJsonAndTrailingReasoning() {
+        ClassifierEvaluate request = classifierRequest();
+        String valid = validClassifierOutput("0");
+        when(paramsService.getValue(Constant.PROACTIVE_CLASSIFIER_MODEL_ID, true)).thenReturn("model-1");
+        when(llmService.isAvailable("model-1")).thenReturn(true);
+        when(llmService.generateStructured(any(), any(), eq("model-1"))).thenReturn(
+                valid + " trailing", valid + "{}", valid + "\n推理链：因为这是重大新闻");
+
+        assertThrows(RenException.class, () -> service.evaluate(request));
+        assertThrows(RenException.class, () -> service.evaluate(request));
+        assertThrows(RenException.class, () -> service.evaluate(request));
+    }
+
+    @Test
+    void classifierRequiresIntegralInRangeIndex() {
+        ClassifierEvaluate request = classifierRequest();
+        when(paramsService.getValue(Constant.PROACTIVE_CLASSIFIER_MODEL_ID, true)).thenReturn("model-1");
+        when(llmService.isAvailable("model-1")).thenReturn(true);
+        when(llmService.generateStructured(any(), any(), eq("model-1"))).thenReturn(
+                validClassifierOutput("0.5"), validClassifierOutput("1e-1"),
+                validClassifierOutput("2147483648"), validClassifierOutput("1"));
+
+        assertThrows(RenException.class, () -> service.evaluate(request));
+        assertThrows(RenException.class, () -> service.evaluate(request));
+        assertThrows(RenException.class, () -> service.evaluate(request));
+        assertThrows(RenException.class, () -> service.evaluate(request));
+    }
+
+    @Test
+    void classifierReturnsCanonicalValidatedJsonInsteadOfRawModelText() throws Exception {
+        ClassifierEvaluate request = classifierRequest();
+        String raw = " { \"items\" : [ { \"summary\" : \"摘要\", \"category\" : \"other\","
+                + " \"confidence\" : 0.8, \"important\" : false, \"index\" : 0 } ] } ";
+        when(paramsService.getValue(Constant.PROACTIVE_CLASSIFIER_MODEL_ID, true)).thenReturn("model-1");
+        when(llmService.isAvailable("model-1")).thenReturn(true);
+        when(llmService.generateStructured(any(), any(), eq("model-1"))).thenReturn(raw);
+
+        String canonical = service.evaluate(request).output();
+
+        assertFalse(canonical.equals(raw));
+        assertEquals(new ObjectMapper().readTree(raw), new ObjectMapper().readTree(canonical));
+        assertFalse(canonical.startsWith(" "));
+    }
+
+    @Test
     void conservativeOnlyAllowsCriticalWeather() {
         when(monitorDao.markProbed(eq("device-1"), any())).thenReturn(2);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
@@ -319,6 +386,32 @@ class ProactiveMonitorServiceTest {
         entity.setVersion(0);
         entity.setUpdatedAt(new Date());
         return entity;
+    }
+
+    private MonitorComplete successfulCompletion(Map<String, Object> state) {
+        MonitorComplete complete = new MonitorComplete();
+        complete.setDeviceId("device-1");
+        complete.setMonitorType(MonitorType.WEATHER);
+        complete.setLeaseOwner("worker-1");
+        complete.setLeaseToken("token-1");
+        complete.setSuccess(true);
+        complete.setState(state);
+        return complete;
+    }
+
+    private ClassifierEvaluate classifierRequest() {
+        ClassifierEvaluate request = new ClassifierEvaluate();
+        NewsCandidate candidate = new NewsCandidate();
+        candidate.setTitle("标题");
+        candidate.setSource("来源");
+        request.setCandidates(List.of(candidate));
+        return request;
+    }
+
+    private String validClassifierOutput(String index) {
+        return "{\"items\":[{\"index\":" + index
+                + ",\"important\":false,\"confidence\":0.8,"
+                + "\"category\":\"other\",\"summary\":\"摘要\"}]}";
     }
 
     private ProactiveEventEntity event(EventType type, Topic topic, Priority priority) {

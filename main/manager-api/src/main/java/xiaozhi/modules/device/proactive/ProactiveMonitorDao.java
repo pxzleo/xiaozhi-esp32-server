@@ -63,42 +63,42 @@ public interface ProactiveMonitorDao {
     @Select("""
             SELECT m.* FROM ai_device_proactive_monitor m
             WHERE m.enabled = 1
-              AND m.last_probe_at >= #{activeCutoff}
-              AND m.next_check_at <= #{now}
-              AND (m.lease_until IS NULL OR m.lease_until <= #{now})
+              AND m.last_probe_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)
+              AND m.next_check_at <= CURRENT_TIMESTAMP
+              AND (m.lease_until IS NULL OR m.lease_until <= CURRENT_TIMESTAMP)
             ORDER BY m.next_check_at, m.device_id, m.monitor_type
             LIMIT #{limit}
             """)
-    List<ProactiveMonitorEntity> selectDueCandidates(@Param("now") Date now,
-            @Param("activeCutoff") Date activeCutoff, @Param("limit") int limit);
+    List<ProactiveMonitorEntity> selectDueCandidates(@Param("limit") int limit);
 
     @Update("""
             UPDATE ai_device_proactive_monitor
-            SET lease_owner = #{leaseOwner}, lease_token = #{leaseToken}, lease_until = #{leaseUntil},
-                version = version + 1, updated_at = #{now}
+            SET lease_owner = #{leaseOwner}, lease_token = #{leaseToken},
+                lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 120 SECOND),
+                version = version + 1, updated_at = CURRENT_TIMESTAMP
             WHERE device_id = #{deviceId} AND monitor_type = #{monitorType}
-              AND enabled = 1 AND last_probe_at >= #{activeCutoff} AND next_check_at <= #{now}
-              AND (lease_until IS NULL OR lease_until <= #{now})
+              AND enabled = 1
+              AND last_probe_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 15 MINUTE)
+              AND next_check_at <= CURRENT_TIMESTAMP
+              AND (lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP)
             """)
     int claimCas(@Param("deviceId") String deviceId, @Param("monitorType") String monitorType,
-            @Param("leaseOwner") String leaseOwner, @Param("leaseToken") String leaseToken,
-            @Param("leaseUntil") Date leaseUntil, @Param("now") Date now,
-            @Param("activeCutoff") Date activeCutoff);
+            @Param("leaseOwner") String leaseOwner, @Param("leaseToken") String leaseToken);
 
     @Update("""
             UPDATE ai_device_proactive_monitor
             SET state = CAST(#{state} AS JSON),
-                last_success_at = CASE WHEN #{success} = 1 THEN #{now} ELSE last_success_at END,
-                next_check_at = DATE_ADD(#{now}, INTERVAL interval_minutes MINUTE),
+                last_success_at = CASE WHEN #{success} = 1 THEN CURRENT_TIMESTAMP ELSE last_success_at END,
+                next_check_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL interval_minutes MINUTE),
                 last_error_code = CASE WHEN #{success} = 1 THEN NULL ELSE #{errorCode} END,
                 lease_owner = NULL, lease_token = NULL, lease_until = NULL,
-                version = version + 1, updated_at = #{now}
+                version = version + 1, updated_at = CURRENT_TIMESTAMP
             WHERE device_id = #{deviceId} AND monitor_type = #{monitorType}
               AND lease_owner = #{leaseOwner} AND lease_token = #{leaseToken}
-              AND lease_until > #{now}
+              AND lease_until > CURRENT_TIMESTAMP
             """)
     int completeCas(@Param("deviceId") String deviceId, @Param("monitorType") String monitorType,
             @Param("leaseOwner") String leaseOwner, @Param("leaseToken") String leaseToken,
             @Param("success") boolean success, @Param("state") String state,
-            @Param("errorCode") String errorCode, @Param("now") Date now);
+            @Param("errorCode") String errorCode);
 }
