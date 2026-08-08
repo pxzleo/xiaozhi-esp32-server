@@ -1,9 +1,13 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from types import SimpleNamespace
 
 from core.providers.tools.device_mcp.proactive_policy import (
     claim_proactive_opportunity,
+    policy_allows,
     reset_proactive_policy_for_test,
+    set_connection_preferences,
 )
 
 
@@ -98,6 +102,65 @@ class ProactivePolicyTest(unittest.TestCase):
                 now=100,
             )
         )
+
+    def test_preferences_apply_mode_topics_quiet_and_limit(self):
+        set_connection_preferences(
+            self.conn,
+            {
+                "mode": "active",
+                "daily_limit": 1,
+                "quiet_start": "22:00:00",
+                "quiet_end": "07:00:00",
+                "allowed_topics": ["music"],
+                "blocked_topics": [],
+            },
+        )
+        noon = datetime(2026, 8, 8, 12, 0).timestamp()
+        night = datetime(2026, 8, 8, 23, 0).timestamp()
+        self.assertTrue(policy_allows(self.conn, "music", now=noon))
+        self.assertFalse(policy_allows(self.conn, "weather", now=noon))
+        self.assertFalse(policy_allows(self.conn, "music", now=night))
+        self.assertTrue(
+            claim_proactive_opportunity(
+                self.conn, "one", cooldown_seconds=0, policy_topic="music", now=noon
+            )
+        )
+        self.assertFalse(
+            claim_proactive_opportunity(
+                self.conn, "two", cooldown_seconds=0, policy_topic="music", now=noon + 1
+            )
+        )
+
+    def test_conservative_only_allows_critical(self):
+        set_connection_preferences(
+            self.conn,
+            {
+                "mode": "conservative",
+                "daily_limit": 1,
+                "quiet_start": None,
+                "quiet_end": None,
+                "allowed_topics": [],
+                "blocked_topics": [],
+            },
+        )
+        self.assertFalse(policy_allows(self.conn, "health"))
+        self.assertTrue(policy_allows(self.conn, "health", critical=True))
+
+    def test_concurrent_claim_has_single_winner(self):
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(
+                executor.map(
+                    lambda _index: claim_proactive_opportunity(
+                        self.conn,
+                        "same-topic",
+                        cooldown_seconds=60,
+                        daily_limit=5,
+                        now=100,
+                    ),
+                    range(8),
+                )
+            )
+        self.assertEqual(1, sum(results))
 
 
 if __name__ == "__main__":

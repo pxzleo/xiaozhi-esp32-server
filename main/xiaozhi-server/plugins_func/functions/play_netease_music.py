@@ -1,5 +1,6 @@
 import asyncio
 import difflib
+import hashlib
 import os
 import random
 import re
@@ -7,6 +8,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -1876,6 +1878,13 @@ def _enqueue_playback_end(conn):
             )
         )
         conn.dialogue.put(Message(role="assistant", content=suggestion))
+        from core.providers.tools.device_mcp.proactive_audit import (
+            schedule_server_suggestion_audit,
+        )
+
+        schedule_server_suggestion_audit(
+            conn, "music", "music queue completed", reference_id="music_continue"
+        )
     conn.tts.tts_text_queue.put(
         TTSMessageDTO(
             sentence_id=conn.sentence_id,
@@ -2264,6 +2273,19 @@ async def play_netease_music(
                     max_tracks,
                     prepare_timeout,
                 )
+            late_night_suggestion = _late_night_music_suggestion(conn)
+            if late_night_suggestion:
+                prompt = f"{prompt}。{late_night_suggestion}"
+                from core.providers.tools.device_mcp.proactive_audit import (
+                    schedule_server_suggestion_audit,
+                )
+
+                schedule_server_suggestion_audit(
+                    conn,
+                    "music",
+                    "late night music started",
+                    reference_id="music_late_night",
+                )
             _start_playback(
                 conn,
                 prompt,
@@ -2276,6 +2298,22 @@ async def play_netease_music(
                 f"网易云播放队列跳过 {len(skipped)} 首不可播放歌曲: {'; '.join(skipped)}"
             )
         _reset_music_failure_count(conn)
+        if action in ("category", "playlist", "favorites"):
+            from core.providers.tools.device_mcp.proactive_habits import (
+                schedule_habit_observation,
+            )
+
+            value_hash = hashlib.sha256(
+                f"{action}:{str(name).strip().casefold()}".encode("utf-8")
+            ).hexdigest()[:24]
+            schedule_habit_observation(
+                conn,
+                "music",
+                "content_preference",
+                f"music:{action}:{value_hash}",
+                {"description": "播放偏好的音乐内容", "topic": "music"},
+                allow_suggestion=False,
+            )
         return ActionResponse(
             action=Action.RECORD,
             result=f"已加入 {len(resolved)} 首歌曲",
@@ -2326,12 +2364,33 @@ def _music_failure_response(conn, message):
         "music_service_fault",
         cooldown_seconds=3600,
     ):
+        from core.providers.tools.device_mcp.proactive_audit import (
+            schedule_server_suggestion_audit,
+        )
+
+        schedule_server_suggestion_audit(
+            conn, "music", "music service failures", reference_id="music_service_fault"
+        )
         return f"{message}。音乐服务已经连续失败，要不要我帮你检查登录状态？"
     return message
 
 
 def _reset_music_failure_count(conn):
     conn._netease_consecutive_failures = 0
+
+
+def _late_night_music_suggestion(conn, now=None):
+    current = now or datetime.now()
+    minutes = current.hour * 60 + current.minute
+    if not (minutes >= 22 * 60 + 30 or minutes < 60):
+        return ""
+    night_date = current.date() - timedelta(days=1) if minutes < 60 else current.date()
+    nightly_topic = f"music_late_night_{night_date.isoformat()}"
+    if not claim_proactive_opportunity(
+        conn, nightly_topic, cooldown_seconds=20 * 3600, policy_topic="music"
+    ):
+        return ""
+    return "夜深了，要换成轻音乐，或者设一个停止提醒吗？"
 
 
 def _is_music_service_failure(error):

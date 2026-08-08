@@ -48,3 +48,17 @@
 `conservative` 只执行关键事件属于设备端或服务端的策略执行职责；manager-api 只持久化偏好与完整事件审计，不在写入审计事件时按模式过滤。内部按 MAC 操作时必须且只能匹配一个现有设备；重复 MAC 会明确报错，不会任取其中一条记录。
 
 所有接口枚举使用小写值。主题仅允许 `reminder`、`calendar`、`weather`、`music`、`health`、`habit`、`system`。事件 payload 只允许 `title`、`message`、`reference_id`、`scheduled_at`、`action`、`source`，每个值必须是非空字符串，`scheduled_at` 必须是 ISO 本地日期时间。习惯 payload 只允许 `description`、`suggested_mode`、`suggested_time`、`topic`：`description` 必须是非空短文本，`topic` 必须是上述小写主题，`suggested_mode` 只允许 `conservative`、`active`、`aggressive`，`suggested_time` 必须为 `HH:mm`。任一 payload 序列化后最多 512 字节，不接收也不保存自由推理链。响应将 JSON 字段解析为对象，不返回数据库中的原始 JSON 文本。
+
+### 服务端执行契约
+
+连接建立后，服务端按设备 MAC 异步读取偏好。manager-api 不可用时，critical 故障与恢复通知仍直接投递；其他建议使用 `active`、每日 3 次、无默认安静时段的本地安全值。`conservative` 只允许 critical，`today_silent` 屏蔽非 critical；其他模式同时受日上限、主题冷却、安静时段和 allow/block 主题约束。同设备并发领取在进程内原子完成。
+
+新主动事件按 `pending → delivered/failed` 异步审计。审计失败不阻断 critical 播报，后台日志只记录异常类型，不记录 payload、`label` 或 `details`。
+
+`notifications/device/health` 严格接受 `version=1` 与统一字段 `event_id/topic/priority/reason/created_at/expires_at/dedupe_key/requires_response`。`event_id` 和 `dedupe_key` 长度为 1–96，时间是 Unix 秒整数。`kind` 仅允许 `network_flapping/time_unsynchronized/ota_update_available/audio_decode_failed`；`severity` 仅允许 `info/warning/critical`，并映射 `priority=normal/high/critical`。未恢复的 critical 使用 `topic=health_critical`，其他使用 `topic=health`；故障/恢复的 reason 固定为 `device health`/`device health recovered`，`requires_response=false`。
+
+`details` 是严格单键对象：network 仅 `disconnects_in_5m` 数字字符串，time 仅 `uptime_seconds` 数字字符串，OTA 仅 `version` 安全短字符串，audio 仅 `error_code` 整数样字符串；恢复可使用空对象。播报只使用 kind/recovered 固定安全模板。critical 故障和恢复不受普通策略抑制，warning/info 仍受偏好限制。
+
+服务端仅在真实成功的日程创建、每日简报触发及用户发起的网易云 `category/playlist/favorites` 播放成功后观察受控习惯。证据达到 3 次后，只在策略允许时用确定性事件 ID 和固定短模板建议一次，不用 LLM 推断。22:30–01:00 用户主动开始音乐后每晚最多一次询问是否换轻音乐或设停止提醒。天气简报只对雨/高温/降温明确关键词追加一句固定行动建议，无地点或无数据不建议。
+
+`self.proactive.*` 由设备权威执行；成功结果的 `data` 立即更新当前连接并后台 PUT manager-api，失败重试一次且不改变设备成功播报。`self.schedule.complete/follow_up/dismiss` 成功后分别更新当前 follow-up outcome 为 `completed/acknowledged/dismissed`。

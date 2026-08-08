@@ -40,7 +40,16 @@ from core.auth import AuthenticationError
 from config.config_loader import get_private_config_from_api
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, create_connection_logger
-from config.manage_api_client import DeviceNotFoundException, DeviceBindException, generate_and_save_chat_title
+from config.manage_api_client import (
+    DeviceNotFoundException,
+    DeviceBindException,
+    generate_and_save_chat_title,
+    get_proactive_preference,
+)
+from core.providers.tools.device_mcp.proactive_policy import (
+    safe_local_preferences,
+    set_connection_preferences,
+)
 from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils.util import get_system_error_response
@@ -221,6 +230,7 @@ class ConnectionHandler:
         self.calling = False
         # 标记当前是否为来电接听模式
         self.incoming_call = None
+        self.proactive_preferences = safe_local_preferences()
 
     async def handle_connection(self, ws: websockets.ServerConnection):
         try:
@@ -241,6 +251,7 @@ class ConnectionHandler:
             )
 
             self.device_id = self.headers.get("device-id", None)
+            asyncio.create_task(self._load_proactive_preferences())
 
             # 认证通过,继续处理
             self.websocket = ws
@@ -980,6 +991,26 @@ class ConnectionHandler:
             self.executor.submit(self._initialize_components)
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"后台初始化失败: {e}")
+
+    async def _load_proactive_preferences(self):
+        """建连后异步读取设备偏好，失败时保留安全本地默认。"""
+        if not isinstance(self.device_id, str) or not self.device_id.strip():
+            self.logger.bind(tag=TAG).warning("未加载积极主动偏好：设备MAC缺失")
+            return
+        try:
+            preference = await get_proactive_preference(self.device_id)
+            set_connection_preferences(self, preference)
+            self.logger.bind(tag=TAG).info("已加载设备积极主动偏好")
+            from core.providers.tools.device_mcp.proactive_habits import (
+                schedule_candidate_suggestion,
+            )
+
+            schedule_candidate_suggestion(self)
+        except Exception as error:
+            self.proactive_preferences = safe_local_preferences()
+            self.logger.bind(tag=TAG).warning(
+                f"积极主动偏好加载失败，使用安全本地默认: {type(error).__name__}"
+            )
 
     async def _initialize_private_config_async(self):
         """从接口异步获取差异化配置（异步版本，不阻塞主循环）"""

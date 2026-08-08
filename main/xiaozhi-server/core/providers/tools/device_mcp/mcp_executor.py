@@ -6,7 +6,7 @@ if TYPE_CHECKING:
     from core.connection import ConnectionHandler
 from ..base import ToolType, ToolDefinition, ToolExecutor
 from plugins_func.register import Action, ActionResponse
-from .mcp_handler import call_mcp_tool
+from .mcp_handler import call_mcp_tool, handle_successful_device_tool_result
 
 
 class DeviceMCPExecutor(ToolExecutor):
@@ -44,8 +44,12 @@ class DeviceMCPExecutor(ToolExecutor):
             if isinstance(result, str):
                 try:
                     resultJson = json.loads(result)
-                except Exception as e:
+                except (TypeError, json.JSONDecodeError):
                     pass
+
+            actual_name = conn.mcp_client.name_mapping.get(tool_name, tool_name)
+            if isinstance(resultJson, dict):
+                handle_successful_device_tool_result(conn, actual_name, resultJson)
 
             # 视觉大模型不经过二次LLM处理
             if (

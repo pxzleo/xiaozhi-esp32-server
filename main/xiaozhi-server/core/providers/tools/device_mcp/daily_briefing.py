@@ -4,6 +4,7 @@ import asyncio
 import re
 
 from config.logger import setup_logging
+from core.providers.tools.device_mcp.proactive_policy import claim_proactive_opportunity
 from plugins_func.functions.get_news_from_newsnow import (
     CHANNEL_MAP,
     fetch_news_from_api,
@@ -20,6 +21,24 @@ MAX_NEWS_ITEMS = 3
 MAX_BRIEFING_LENGTH = 420
 TAG = __name__
 logger = setup_logging()
+
+
+def weather_action_suggestion(conn, weather_text):
+    """只根据已取得的天气文本中的明确关键词生成固定建议。"""
+    if not isinstance(weather_text, str) or not weather_text:
+        return ""
+    rule = None
+    if any(word in weather_text for word in ("暴雨", "大雨", "中雨", "小雨", "阵雨", "有雨")):
+        rule = ("weather_rain", "今天可能有雨，出门记得带伞。")
+    elif any(word in weather_text for word in ("高温", "酷热", "炎热")):
+        rule = ("weather_heat", "今天天气较热，记得补水。")
+    elif any(word in weather_text for word in ("降温", "寒潮", "骤降")):
+        rule = ("weather_cooling", "今天有降温，出门记得添衣。")
+    if rule and claim_proactive_opportunity(
+        conn, rule[0], cooldown_seconds=12 * 3600, policy_topic="weather"
+    ):
+        return rule[1]
+    return ""
 
 
 class BriefingProviderError(RuntimeError):
@@ -95,6 +114,20 @@ async def build_daily_briefing(conn, sections, location):
     for section, result in zip(sections, results):
         if isinstance(result, str) and result:
             available.append(result)
+            if section == "weather" and location:
+                suggestion = weather_action_suggestion(conn, result)
+                if suggestion:
+                    available.append(suggestion)
+                    from core.providers.tools.device_mcp.proactive_audit import (
+                        schedule_server_suggestion_audit,
+                    )
+
+                    schedule_server_suggestion_audit(
+                        conn,
+                        "weather",
+                        "weather keyword action",
+                        reference_id="daily_briefing_weather",
+                    )
         elif isinstance(result, BaseException):
             logger.bind(tag=TAG).warning(
                 f"每日简报{section}模块失败: {type(result).__name__}"

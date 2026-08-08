@@ -1,6 +1,7 @@
 import os
 import base64
 from typing import Optional, Dict
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -15,6 +16,18 @@ class DeviceBindException(Exception):
     def __init__(self, bind_code):
         self.bind_code = bind_code
         super().__init__(f"设备绑定异常，绑定码: {bind_code}")
+
+
+class ManageApiError(RuntimeError):
+    """manager-api 请求或业务处理失败。"""
+
+
+class ManageApiTimeoutError(ManageApiError):
+    """manager-api 请求超时。"""
+
+
+class ManageApiBusinessError(ManageApiError):
+    """manager-api 返回非成功业务码。"""
 
 
 class ManageApiClient:
@@ -99,7 +112,9 @@ class ManageApiClient:
             elif result.get("code") == 10042:
                 raise DeviceBindException(result.get("msg"))
             elif result.get("code") != 0:
-                raise Exception(f"API返回错误: {result.get('msg', '未知错误')}")
+                raise ManageApiBusinessError(
+                    f"manager-api业务错误: {result.get('msg', '未知错误')}"
+                )
 
             # 返回成功数据
             return result.get("data") if result.get("code") == 0 else None
@@ -145,7 +160,9 @@ class ManageApiClient:
                     await asyncio.sleep(cls.retry_delay)
                     continue
                 else:
-                    # 不重试，直接抛出异常
+                    # 不重试，直接抛出明确的类型。
+                    if isinstance(e, httpx.TimeoutException):
+                        raise ManageApiTimeoutError("manager-api请求超时") from e
                     raise
 
     @classmethod
@@ -161,6 +178,68 @@ class ManageApiClient:
         cls._async_clients.clear()
         cls._instance = None
 
+
+def _require_manager_client() -> ManageApiClient:
+    client = ManageApiClient._instance
+    if client is None:
+        raise ManageApiError("manager-api客户端未初始化")
+    return client
+
+
+async def get_proactive_preference(mac_address: str) -> Dict:
+    """读取设备积极主动偏好。"""
+    return await _require_manager_client()._execute_async_request(
+        "GET", f"/config/proactive/preferences/{quote(mac_address, safe='')}"
+    )
+
+
+async def update_proactive_preference(mac_address: str, preference: Dict) -> Dict:
+    """同步设备端已成功更新的积极主动偏好。"""
+    return await _require_manager_client()._execute_async_request(
+        "PUT",
+        f"/config/proactive/preferences/{quote(mac_address, safe='')}",
+        json=preference,
+    )
+
+
+async def create_proactive_event(event: Dict) -> Dict:
+    """幂等写入积极主动事件审计。"""
+    return await _require_manager_client()._execute_async_request(
+        "POST", "/config/proactive/events", json=event
+    )
+
+
+async def update_proactive_event_status(
+    event_id: str, mac_address: str, delivery_status: str, outcome: str = "none"
+) -> Dict:
+    """更新事件投递状态。"""
+    return await _require_manager_client()._execute_async_request(
+        "PUT",
+        f"/config/proactive/events/{quote(event_id, safe='')}/status",
+        json={
+            "mac_address": mac_address,
+            "delivery_status": delivery_status,
+            "outcome": outcome,
+        },
+    )
+
+
+async def observe_proactive_habit(observation: Dict) -> Dict:
+    """提交一次受控的习惯证据。"""
+    return await _require_manager_client()._execute_async_request(
+        "POST", "/config/proactive/habits/observe", json=observation
+    )
+
+
+async def get_proactive_habit_candidates(mac_address: str) -> list:
+    """读取已达阈值且尚未处理的习惯候选。"""
+    query = urlencode({"mac_address": mac_address})
+    data = await _require_manager_client()._execute_async_request(
+        "GET", f"/config/proactive/habits/candidates?{query}"
+    )
+    if not isinstance(data, list):
+        raise ManageApiBusinessError("manager-api习惯候选响应格式错误")
+    return data
 
 async def get_server_config() -> Optional[Dict]:
     """获取服务器基础配置"""

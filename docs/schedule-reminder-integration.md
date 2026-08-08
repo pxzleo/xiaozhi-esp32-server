@@ -61,3 +61,15 @@ MCP 消息仍由后台任务处理，但任务入口必须捕获并记录异常�
 ## 设备职责
 
 设备负责本地时间解释、日程持久化、到点触发、重启恢复、停止和稍后提醒。服务端只负责把动态工具提供给主 LLM、转发工具调用、处理权威设备响应，以及校验并播报到点通知。设备与服务端必须共同遵守上述版本化通知契约。
+
+## 完成跟进通知
+
+设备对已触发的普通提醒发起完成确认时，发送 `notifications/schedule/follow_up`：
+
+```json
+{"jsonrpc":"2.0","method":"notifications/schedule/follow_up","params":{"version":1,"event_id":"follow-up-7-1","topic":"follow_up","priority":"normal","reason":"schedule follow up","created_at":1786170600,"expires_at":1786174200,"dedupe_key":"schedule-follow-up-7-1","requires_response":true,"follow_up":true,"source_id":7,"label":"喝水","speak":true}}
+```
+
+请求不得有额外字段；`source_id` 是正整数，`label` 去空白后为 1–80 个 Unicode 字符，`topic=follow_up`、`follow_up=true`、`requires_response=true`、`speak=true`。服务端不调用 LLM，固定播报“刚才提醒的 `{label}` 完成了吗？”，并沿用现有 TTS 和自动收听链。同连接重复 `event_id` 只处理一次；无效通知日志不包含 `label`。
+
+跟进事件按统一主动事件契约审计。设备 `self.schedule.complete/follow_up/dismiss` 成功后，服务端分别将当前事件 outcome 更新为 `completed/acknowledged/dismissed`。普通闹铃/提醒仍不恢复音乐，每日简报的独立恢复逻辑不受影响。
