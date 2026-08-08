@@ -15,6 +15,7 @@ from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
 from core.utils.dialogue import Message
 from core.utils.auth import AuthToken
 from core.utils.util import get_vision_url, sanitize_tool_name
+from core.providers.tools.device_mcp.daily_briefing import build_daily_briefing
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 TAG = __name__
 logger = setup_logging()
 SCHEDULE_TRIGGERED_METHOD = "notifications/schedule/triggered"
+ASSISTANT_TRIGGERED_METHOD = "notifications/assistant/triggered"
 PROACTIVE_TTS_READY_TIMEOUT_SECONDS = 2
 DEVICE_REMINDER_TTS_WAIT_SECONDS = 15
 _LOCAL_DATETIME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
@@ -263,6 +265,11 @@ async def handle_mcp_message(
                 conn, payload.get("params"), notification_state
             )
             return
+        if method == ASSISTANT_TRIGGERED_METHOD:
+            await _handle_assistant_triggered_notification(
+                conn, payload.get("params"), notification_state
+            )
+            return
         if isinstance(method, str) and method.startswith("notifications/"):
             logger.bind(tag=TAG).warning("拒绝未知的设备MCP通知")
             return
@@ -354,6 +361,81 @@ async def _handle_schedule_triggered_notification(
     await _speak_proactive_notification(
         conn, text, notification_name, notification_state
     )
+
+
+async def _handle_assistant_triggered_notification(
+    conn, params, notification_state=None
+):
+    if not isinstance(params, dict):
+        logger.bind(tag=TAG).warning("主动助理通知参数格式错误")
+        return
+    version = params.get("version")
+    schedule_id = params.get("id")
+    event_id = params.get("event_id")
+    triggered_at = params.get("triggered_at")
+    sections = params.get("sections")
+    location = params.get("location")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        logger.bind(tag=TAG).warning("主动助理通知版本无效")
+        return
+    if (
+        not isinstance(schedule_id, int)
+        or isinstance(schedule_id, bool)
+        or schedule_id <= 0
+    ):
+        logger.bind(tag=TAG).warning("主动助理通知ID无效")
+        return
+    if params.get("workflow") != "daily_briefing":
+        logger.bind(tag=TAG).warning("主动助理工作流无效")
+        return
+    if not isinstance(triggered_at, str) or not _LOCAL_DATETIME_PATTERN.fullmatch(
+        triggered_at
+    ):
+        logger.bind(tag=TAG).warning("主动助理触发时间格式错误")
+        return
+    try:
+        datetime.strptime(triggered_at, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        logger.bind(tag=TAG).warning("主动助理触发时间无效")
+        return
+    normalized_timestamp = triggered_at.replace("-", "").replace(":", "")
+    expected_event_id = f"{schedule_id}-{normalized_timestamp}"
+    if event_id != expected_event_id:
+        logger.bind(tag=TAG).warning("主动助理事件ID无效")
+        return
+    if (
+        not isinstance(sections, list)
+        or not sections
+        or len(sections) > 2
+        or any(not isinstance(section, str) for section in sections)
+        or len(set(sections)) != len(sections)
+        or any(section not in ("weather", "news") for section in sections)
+    ):
+        logger.bind(tag=TAG).warning("主动助理模块无效")
+        return
+    if not isinstance(location, str) or len(location.strip()) > 40:
+        logger.bind(tag=TAG).warning("主动助理地点无效")
+        return
+    location = location.strip()
+    if "weather" in sections and not location:
+        logger.bind(tag=TAG).warning("天气简报缺少地点")
+        return
+    if params.get("speak") is not True:
+        logger.bind(tag=TAG).warning("主动助理通知未要求语音播报")
+        return
+
+    seen = getattr(conn, "_assistant_briefing_events", None)
+    if seen is None:
+        seen = set()
+        conn._assistant_briefing_events = seen
+    if event_id in seen:
+        logger.bind(tag=TAG).info("忽略重复的主动助理事件")
+        return
+    if len(seen) >= 64:
+        seen.clear()
+    seen.add(event_id)
+    text = await build_daily_briefing(conn, sections, location)
+    await _speak_proactive_notification(conn, text, "每日简报", notification_state)
 
 
 async def _speak_proactive_notification(

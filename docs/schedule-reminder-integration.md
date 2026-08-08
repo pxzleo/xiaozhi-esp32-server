@@ -1,5 +1,7 @@
 # 设备本地日程提醒接入
 
+天气/新闻主动简报使用独立白名单通知，见 [proactive-assistant-integration.md](proactive-assistant-integration.md)。
+
 本文记录小智服务端与设备本地日程提醒的边界和通知契约。设备端的持久化、定时触发、停止与稍后提醒行为，以设备项目的 `docs/schedule-reminder.md` 为配套规范。
 
 ## 架构边界
