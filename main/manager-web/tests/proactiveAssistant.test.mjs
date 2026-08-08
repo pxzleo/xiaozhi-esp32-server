@@ -17,13 +17,17 @@ import {
   listBelongsToDevice,
   monitorPreset,
   monitorClassifierStatus,
+  monitorGlobalStatus,
   monitorsPayload,
   preferencePayload,
   recoverMonitorsFailure,
+  recoverExternalMonitoringFailure,
   recoverPreferenceFailure,
   validateMonitors,
   validatePreference,
   validClassifierModelId,
+  externalMonitoringSetting,
+  externalMonitoringEditable,
 } from '../src/utils/proactiveAssistant.mjs';
 
 test('exposes claimed events in the delivery status filter', () => {
@@ -131,6 +135,23 @@ test('uses the owner-safe classifier availability embedded in the monitor respon
   assert.equal(monitorClassifierStatus({ classifier: { configured: false, available: true, error: null } }),
     'unknown');
   assert.equal(monitorClassifierStatus({}), 'unknown');
+});
+
+test('strictly reads the global monitoring gate without granting admin access to device views', () => {
+  assert.equal(monitorGlobalStatus({ external_monitoring_enabled: true }), 'enabled');
+  assert.equal(monitorGlobalStatus({ external_monitoring_enabled: false }), 'disabled');
+  assert.equal(monitorGlobalStatus({}), 'unknown');
+  assert.equal(externalMonitoringSetting({ enabled: true }), true);
+  assert.equal(externalMonitoringSetting({ enabled: false }), false);
+  assert.equal(externalMonitoringSetting({ enabled: 'false' }), null);
+});
+
+test('preserves the administrator global switch after a save failure', () => {
+  const current = { enabled: true, loaded: true };
+  assert.equal(recoverExternalMonitoringFailure(current), current);
+  assert.equal(externalMonitoringEditable(true, false), true);
+  assert.equal(externalMonitoringEditable(true, true), false);
+  assert.equal(externalMonitoringEditable(false, false), false);
 });
 
 test('normalizes and strictly validates the dedicated classifier model id', () => {

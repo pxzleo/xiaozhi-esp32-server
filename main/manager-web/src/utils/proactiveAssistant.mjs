@@ -177,6 +177,23 @@ export function monitorClassifierStatus(monitors) {
   return classifier.available ? 'available' : 'unavailable';
 }
 
+export function monitorGlobalStatus(monitors) {
+  if (typeof monitors?.external_monitoring_enabled !== 'boolean') return 'unknown';
+  return monitors.external_monitoring_enabled ? 'enabled' : 'disabled';
+}
+
+export function externalMonitoringSetting(value) {
+  return value && typeof value.enabled === 'boolean' ? value.enabled : null;
+}
+
+export function recoverExternalMonitoringFailure(current) {
+  return current;
+}
+
+export function externalMonitoringEditable(loaded, saving) {
+  return loaded === true && saving === false;
+}
+
 function validInteger(value, minimum, maximum) {
   return Number.isInteger(value) && value >= minimum && value <= maximum;
 }

@@ -92,6 +92,10 @@
           <el-alert v-if="monitorsError" :title="monitorsError" type="error" :closable="false" show-icon />
           <el-form :model="monitorForm" label-width="170px" size="small">
             <div class="monitor-heading">{{ $t('proactive.monitor.common') }}</div>
+            <el-form-item :label="$t('proactive.monitor.globalStatus')">
+              <el-tag :type="monitorGlobalStatusType">{{ monitorGlobalStatusText }}</el-tag>
+              <div class="field-help">{{ $t('proactive.monitor.globalStatusHelp') }}</div>
+            </el-form-item>
             <el-form-item :label="$t('proactive.monitor.weatherEnabled')">
               <el-switch v-model="monitorForm.weather.enabled" />
             </el-form-item>
@@ -303,6 +307,7 @@ import {
   listBelongsToDevice,
   monitorPreset,
   monitorClassifierStatus,
+  monitorGlobalStatus,
   monitorsPayload,
   preferencePayload,
   recoverMonitorsFailure,
@@ -381,6 +386,14 @@ export default {
       return this.$t(status === 'available'
         ? 'proactive.monitor.classifierAvailable'
         : 'proactive.monitor.classifierUnavailable');
+    },
+    monitorGlobalStatusType() {
+      const status = monitorGlobalStatus(this.monitors);
+      if (status === 'enabled') return 'success';
+      return status === 'disabled' ? 'info' : 'danger';
+    },
+    monitorGlobalStatusText() {
+      return this.$t(`proactive.monitor.globalStatus.${monitorGlobalStatus(this.monitors)}`);
     },
   },
   watch: {

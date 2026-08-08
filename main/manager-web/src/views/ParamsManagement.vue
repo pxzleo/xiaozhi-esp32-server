@@ -5,6 +5,28 @@
       <div class="content-panel">
         <div class="content-area">
           <el-card class="classifier-card" shadow="never">
+            <div class="external-monitoring-setting">
+              <div class="classifier-header">
+                <div>
+                  <h3>{{ $t('paramManagement.externalMonitoringTitle') }}</h3>
+                  <p>{{ $t('paramManagement.externalMonitoringDescription') }}</p>
+                </div>
+                <el-tag :type="externalMonitoringStatusType">
+                  {{ externalMonitoringStatusText }}
+                </el-tag>
+              </div>
+              <el-alert v-if="externalMonitoringError" :title="externalMonitoringError" type="error" :closable="false" show-icon />
+              <div class="external-monitoring-controls" v-loading="externalMonitoringLoading">
+                <el-switch v-model="externalMonitoringEnabled" :disabled="!externalMonitoringEditable"
+                  :active-text="$t('paramManagement.externalMonitoringEnable')"
+                  :inactive-text="$t('paramManagement.externalMonitoringDisable')" />
+                <CustomButton type="confirm" :loading="externalMonitoringSaving"
+                  :disabled="!externalMonitoringEditable" @click="saveExternalMonitoring">
+                  {{ $t('paramManagement.externalMonitoringSave') }}
+                </CustomButton>
+              </div>
+              <div class="classifier-help">{{ $t('paramManagement.externalMonitoringNoDeviceMutation') }}</div>
+            </div>
             <div class="classifier-header">
               <div>
                 <h3>{{ $t('paramManagement.classifierTitle') }}</h3>
@@ -127,7 +149,13 @@ import VersionFooter from "@/components/VersionFooter.vue";
 import CustomButton from "@/components/CustomButton.vue";
 import CustomTable from "@/components/CustomTable.vue";
 import CustomDialog from "@/components/CustomDialog.vue";
-import { classifierModelId, validClassifierModelId } from '@/utils/proactiveAssistant.mjs';
+import {
+  classifierModelId,
+  externalMonitoringSetting,
+  externalMonitoringEditable,
+  recoverExternalMonitoringFailure,
+  validClassifierModelId,
+} from '@/utils/proactiveAssistant.mjs';
 
 export default {
   components: { HeaderBar, ParamDialog, VersionFooter, CustomButton, CustomTable, CustomDialog },
@@ -160,7 +188,13 @@ export default {
       classifierSaving: false,
       classifierTesting: false,
       classifierError: '',
-      classifierModelsError: ''
+      classifierModelsError: '',
+      externalMonitoringEnabled: false,
+      externalMonitoringPersisted: false,
+      externalMonitoringLoaded: false,
+      externalMonitoringLoading: false,
+      externalMonitoringSaving: false,
+      externalMonitoringError: ''
     };
   },
   created() {
@@ -168,9 +202,76 @@ export default {
     this.fetchParams();
     this.loadClassifierModels();
     this.loadClassifierModel();
+    this.loadExternalMonitoring();
 
   },
+  computed: {
+    externalMonitoringEditable() {
+      return externalMonitoringEditable(this.externalMonitoringLoaded, this.externalMonitoringSaving);
+    },
+    externalMonitoringStatusType() {
+      if (!this.externalMonitoringLoaded) return 'warning';
+      return this.externalMonitoringPersisted ? 'success' : 'info';
+    },
+    externalMonitoringStatusText() {
+      if (this.externalMonitoringLoading) return this.$t('paramManagement.externalMonitoringLoading');
+      if (!this.externalMonitoringLoaded) return this.$t('paramManagement.externalMonitoringUnknown');
+      return this.$t(this.externalMonitoringPersisted
+        ? 'paramManagement.externalMonitoringEnabled'
+        : 'paramManagement.externalMonitoringDisabled');
+    },
+  },
   methods: {
+    loadExternalMonitoring() {
+      this.externalMonitoringLoading = true;
+      this.externalMonitoringLoaded = false;
+      this.externalMonitoringError = '';
+      Api.proactive.getExternalMonitoringSetting(response => {
+        const enabled = externalMonitoringSetting(response && response.data ? response.data.data : null);
+        this.externalMonitoringLoading = false;
+        if (enabled === null) {
+          this.externalMonitoringError = this.$t('paramManagement.externalMonitoringLoadFailed');
+          return;
+        }
+        this.externalMonitoringEnabled = enabled;
+        this.externalMonitoringPersisted = enabled;
+        this.externalMonitoringLoaded = true;
+      }, error => {
+        this.externalMonitoringLoading = false;
+        this.externalMonitoringError = this.classifierErrorMessage(
+          error, 'paramManagement.externalMonitoringLoadFailed');
+      });
+    },
+    saveExternalMonitoring() {
+      if (!this.externalMonitoringEditable) return;
+      const current = recoverExternalMonitoringFailure({
+        enabled: this.externalMonitoringEnabled,
+        loaded: this.externalMonitoringLoaded,
+      });
+      this.externalMonitoringSaving = true;
+      this.externalMonitoringError = '';
+      Api.proactive.updateExternalMonitoringSetting({ enabled: current.enabled }, response => {
+        const enabled = externalMonitoringSetting(response && response.data ? response.data.data : null);
+        this.externalMonitoringSaving = false;
+        if (enabled === null) {
+          this.externalMonitoringEnabled = current.enabled;
+          this.externalMonitoringLoaded = current.loaded;
+          this.externalMonitoringError = this.$t('paramManagement.externalMonitoringSaveFailed');
+          return;
+        }
+        this.externalMonitoringEnabled = enabled;
+        this.externalMonitoringPersisted = enabled;
+        this.externalMonitoringLoaded = true;
+        this.$message.success(this.$t('paramManagement.externalMonitoringSaveSuccess'));
+      }, error => {
+        this.externalMonitoringSaving = false;
+        this.externalMonitoringEnabled = current.enabled;
+        this.externalMonitoringLoaded = current.loaded;
+        this.externalMonitoringError = this.classifierErrorMessage(
+          error, 'paramManagement.externalMonitoringSaveFailed');
+        this.$message.error(this.externalMonitoringError);
+      });
+    },
     classifierErrorMessage(error, fallbackKey) {
       return error && error.data && error.data.msg ? error.data.msg : this.$t(fallbackKey);
     },
@@ -562,6 +663,20 @@ export default {
   flex: 0 0 auto;
   margin: 14px 20px 0;
   border-color: #e4e7ed;
+}
+
+.external-monitoring-setting {
+  margin-bottom: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #ebeef5;
+}
+
+.external-monitoring-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 12px;
 }
 
 .classifier-header {

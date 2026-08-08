@@ -37,6 +37,12 @@ export default {
   testClassifierModel(callback, failCallback) {
     return send('/proactive/classifier/model/test', 'POST', undefined, callback, failCallback);
   },
+  getExternalMonitoringSetting(callback, failCallback) {
+    return send('/proactive/settings/external-monitoring', 'GET', undefined, callback, failCallback);
+  },
+  updateExternalMonitoringSetting(data, callback, failCallback) {
+    return send('/proactive/settings/external-monitoring', 'PUT', data, callback, failCallback);
+  },
   getPreference(deviceId, callback, failCallback) {
     return send(`/device/proactive/preferences/${encodeURIComponent(deviceId)}`, 'GET', undefined, callback, failCallback);
   },
