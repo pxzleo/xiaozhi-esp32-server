@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Set;
 
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
@@ -19,7 +21,9 @@ import xiaozhi.modules.device.proactive.ProactiveDTOs.MonitorsUpdate;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.NewsMonitorConfig;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.WeatherMonitorConfig;
 import xiaozhi.modules.device.proactive.ProactiveEnums.EventType;
+import xiaozhi.modules.device.proactive.ProactiveEnums.NewsCategory;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
+import xiaozhi.modules.device.proactive.ProactiveEnums.WeatherHazardType;
 import xiaozhi.modules.security.config.ShiroConfig;
 
 class ProactiveMonitorContractTest {
@@ -43,6 +47,36 @@ class ProactiveMonitorContractTest {
                 "dedupe_hours":24,"scope":"domestic_and_international"}}}
                 """;
         assertThrows(Exception.class, () -> new ObjectMapper().readValue(json, MonitorsUpdate.class));
+    }
+
+    @Test
+    void monitorHazardsAndNewsCategoriesUseClosedWireEnums() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        assertEquals(Set.of("rainstorm", "thunderstorm", "hail", "blizzard", "high_wind",
+                "high_temperature", "low_temperature", "temperature_drop"),
+                Arrays.stream(WeatherHazardType.values()).map(WeatherHazardType::wireValue)
+                        .collect(java.util.stream.Collectors.toSet()));
+        assertEquals(Set.of("public_safety", "natural_disaster", "major_policy",
+                "international_conflict", "major_economy", "major_technology"),
+                Arrays.stream(NewsCategory.values()).map(NewsCategory::wireValue)
+                        .collect(java.util.stream.Collectors.toSet()));
+        String valid = """
+                {"weather":{"enabled":true,"interval_minutes":30,"config":{
+                "source":"agent_plugin","hazard_types":["rainstorm","temperature_drop"],
+                "official_min_severity":"warning","precip_probability":70,"wind_speed_kmh":62,
+                "high_temp_c":35,"low_temp_c":0,"temp_drop_24h_c":8,"forecast_hours":6,
+                "cooldown_minutes":720}},"news":{"enabled":true,"interval_minutes":10,"config":{
+                "source_mode":"agent_plugin","sources":[],"categories":["public_safety","major_technology"],
+                "confidence":0.85,"cooldown_minutes":120,"dedupe_hours":24,
+                "scope":"domestic_and_international"}}}
+                """;
+        MonitorsUpdate parsed = mapper.readValue(valid, MonitorsUpdate.class);
+        assertEquals("rainstorm", parsed.getWeather().getConfig().getHazardTypes().getFirst().wireValue());
+        assertEquals("public_safety", parsed.getNews().getConfig().getCategories().getFirst().wireValue());
+        assertThrows(Exception.class, () -> mapper.readValue(
+                valid.replace("rainstorm", "typhoon"), MonitorsUpdate.class));
+        assertThrows(Exception.class, () -> mapper.readValue(
+                valid.replace("public_safety", "celebrity_gossip"), MonitorsUpdate.class));
     }
 
     @Test

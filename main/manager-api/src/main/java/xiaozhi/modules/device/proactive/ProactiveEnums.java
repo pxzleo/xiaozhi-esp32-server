@@ -62,4 +62,18 @@ public final class ProactiveEnums {
         WEATHER, NEWS;
         @JsonCreator public static MonitorType fromWire(String value) { return parseWire(MonitorType.class, value); }
     }
+    public enum WeatherHazardType implements WireEnum {
+        RAINSTORM, THUNDERSTORM, HAIL, BLIZZARD, HIGH_WIND, HIGH_TEMPERATURE,
+        LOW_TEMPERATURE, TEMPERATURE_DROP;
+        @JsonCreator public static WeatherHazardType fromWire(String value) {
+            return parseWire(WeatherHazardType.class, value);
+        }
+    }
+    public enum NewsCategory implements WireEnum {
+        PUBLIC_SAFETY, NATURAL_DISASTER, MAJOR_POLICY, INTERNATIONAL_CONFLICT,
+        MAJOR_ECONOMY, MAJOR_TECHNOLOGY;
+        @JsonCreator public static NewsCategory fromWire(String value) {
+            return parseWire(NewsCategory.class, value);
+        }
+    }
 }

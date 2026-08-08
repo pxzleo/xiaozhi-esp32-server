@@ -1,10 +1,13 @@
 package xiaozhi.modules.device.proactive;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -24,6 +27,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import xiaozhi.common.constant.Constant;
 import xiaozhi.common.exception.RenException;
+import xiaozhi.modules.agent.entity.AgentPluginMapping;
+import xiaozhi.modules.agent.service.AgentPluginMappingService;
 import xiaozhi.modules.device.dao.DeviceDao;
 import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.ClassifierEvaluate;
@@ -39,6 +44,8 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Mode;
 import xiaozhi.modules.device.proactive.ProactiveEnums.MonitorType;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Priority;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
+import xiaozhi.modules.device.proactive.ProactiveEnums.NewsCategory;
+import xiaozhi.modules.device.proactive.ProactiveEnums.WeatherHazardType;
 import xiaozhi.modules.llm.service.LLMService;
 import xiaozhi.modules.sys.service.SysParamsService;
 
@@ -49,6 +56,7 @@ class ProactiveMonitorServiceTest {
     private ProactiveService proactiveService;
     private SysParamsService paramsService;
     private LLMService llmService;
+    private AgentPluginMappingService agentPluginMappingService;
     private ProactiveMonitorService service;
     private DeviceEntity device;
 
@@ -60,12 +68,14 @@ class ProactiveMonitorServiceTest {
         proactiveService = mock(ProactiveService.class);
         paramsService = mock(SysParamsService.class);
         llmService = mock(LLMService.class);
+        agentPluginMappingService = mock(AgentPluginMappingService.class);
         service = new ProactiveMonitorService(deviceDao, monitorDao, eventDao, proactiveService,
-                new ObjectMapper(), paramsService, llmService);
+                new ObjectMapper(), paramsService, llmService, agentPluginMappingService);
         device = new DeviceEntity();
         device.setId("device-1");
         device.setMacAddress("11:22:33:44:55:66");
         device.setUserId(7L);
+        device.setAgentId("agent-1");
         when(deviceDao.selectById("device-1")).thenReturn(device);
     }
 
@@ -74,6 +84,10 @@ class ProactiveMonitorServiceTest {
         var weather = monitor(MonitorType.WEATHER, true, 30);
         var news = monitor(MonitorType.NEWS, true, 10);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(news, weather));
+        when(agentPluginMappingService.agentPluginParamsByAgentId("agent-1"))
+                .thenReturn(List.of(weatherPlugin("{\"default_location\":\"广州\",\"api_key\":\"secret\"}")));
+        when(paramsService.getValue(Constant.PROACTIVE_CLASSIFIER_MODEL_ID, true)).thenReturn("model-1");
+        when(llmService.isAvailable("model-1")).thenReturn(true);
 
         var view = service.getMonitors(7L, "device-1");
 
@@ -84,12 +98,79 @@ class ProactiveMonitorServiceTest {
         assertTrue(view.news().enabled());
         assertEquals(10, view.news().intervalMinutes());
         assertEquals(0.85, view.news().config().getConfidence());
+        assertEquals("广州", view.weatherLocation());
+        assertNull(view.weatherLocationError());
+        assertTrue(view.classifier().configured());
+        assertTrue(view.classifier().available());
+        assertNull(view.classifier().error());
+        String json = assertDoesNotThrow(() -> new ObjectMapper().writeValueAsString(view));
+        assertFalse(json.contains("model-1"));
+        assertFalse(json.contains("api_key"));
+        assertFalse(json.contains("secret"));
+    }
+
+    @Test
+    void monitorViewUsesAuthoritativeAgentWeatherLocationAndExplicitConfigErrors() {
+        when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
+                monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
+        when(agentPluginMappingService.agentPluginParamsByAgentId("agent-1"))
+                .thenReturn(List.of(weatherPlugin("{\"default_location\":\"  深圳  \"}")),
+                        List.of(weatherPlugin("{\"default_location\":null}")),
+                        List.of(weatherPlugin("not-json")),
+                        List.of(weatherPlugin("{\"default_location\":\"广州\"} trailing")),
+                        List.of(weatherPlugin("{\"default_location\":\"广州\"} {\"other\":true}")));
+
+        var configured = service.getMonitors(7L, "device-1");
+        var missing = service.getMonitors(7L, "device-1");
+        var invalid = service.getMonitors(7L, "device-1");
+        var trailing = service.getMonitors(7L, "device-1");
+        var secondRoot = service.getMonitors(7L, "device-1");
+
+        assertEquals("深圳", configured.weatherLocation());
+        assertNull(configured.weatherLocationError());
+        assertNull(missing.weatherLocation());
+        assertEquals("default_location_missing", missing.weatherLocationError());
+        assertEquals("weather_config_invalid", invalid.weatherLocationError());
+        assertEquals("weather_config_invalid", trailing.weatherLocationError());
+        assertEquals("weather_config_invalid", secondRoot.weatherLocationError());
+        assertFalse(configured.classifier().configured());
+        assertEquals("not_configured", configured.classifier().error());
+    }
+
+    @Test
+    void monitorViewDoesNotGuessLocationFromBaselineOrExposeClassifierIdentity() throws Exception {
+        ProactiveMonitorEntity weather = monitor(MonitorType.WEATHER, true, 30);
+        weather.setState("{\"baseline\":{\"location_id\":\"baseline-city\"}}");
+        weather.setLastErrorCode("WEATHER_LOCATION_RESOLUTION_FAILED");
+        when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
+                weather, monitor(MonitorType.NEWS, true, 10)));
+        when(agentPluginMappingService.agentPluginParamsByAgentId("agent-1")).thenReturn(List.of());
+        when(paramsService.getValue(Constant.PROACTIVE_CLASSIFIER_MODEL_ID, true)).thenReturn("private-model");
+        when(llmService.isAvailable("private-model")).thenReturn(false);
+
+        var view = service.getMonitors(7L, "device-1");
+        weather.setLastErrorCode("WEATHER_API_UNAUTHORIZED");
+        var apiErrorView = service.getMonitors(7L, "device-1");
+
+        assertNull(view.weatherLocation());
+        assertEquals("weather_plugin_not_configured", view.weatherLocationError());
+        assertEquals("WEATHER_LOCATION_RESOLUTION_FAILED", view.weather().lastErrorCode());
+        assertEquals("WEATHER_API_UNAUTHORIZED", apiErrorView.weather().lastErrorCode());
+        assertEquals("weather_plugin_not_configured", apiErrorView.weatherLocationError());
+        assertTrue(view.classifier().configured());
+        assertFalse(view.classifier().available());
+        assertEquals("unavailable", view.classifier().error());
+        String json = new ObjectMapper().writeValueAsString(view);
+        assertFalse(json.contains("private-model"));
+        assertFalse(json.contains("provider"));
     }
 
     @Test
     void deniesMonitorReadForAnotherOwner() {
         assertEquals("设备不存在", assertThrows(RenException.class,
                 () -> service.getMonitors(8L, "device-1")).getMsg());
+        verify(agentPluginMappingService, never()).agentPluginParamsByAgentId(any());
+        verify(paramsService, never()).getValue(Constant.PROACTIVE_CLASSIFIER_MODEL_ID, true);
     }
 
     @Test
@@ -265,10 +346,12 @@ class ProactiveMonitorServiceTest {
         weatherSetting.setEnabled(true);
         weatherSetting.setIntervalMinutes(45);
         weatherSetting.setConfig(new WeatherMonitorConfig());
+        weatherSetting.getConfig().setHazardTypes(List.of(WeatherHazardType.RAINSTORM));
         MonitorSetting<NewsMonitorConfig> newsSetting = new MonitorSetting<>();
         newsSetting.setEnabled(true);
         newsSetting.setIntervalMinutes(15);
         newsSetting.setConfig(new NewsMonitorConfig());
+        newsSetting.getConfig().setCategories(List.of(NewsCategory.PUBLIC_SAFETY));
         MonitorsUpdate update = new MonitorsUpdate();
         update.setWeather(weatherSetting);
         update.setNews(newsSetting);
@@ -284,7 +367,10 @@ class ProactiveMonitorServiceTest {
         stale.setState(validWeatherState());
         assertThrows(RenException.class, () -> service.complete(stale));
         verify(monitorDao).updateConfiguration(eq("device-1"), eq("WEATHER"), eq(true), eq(45),
-                org.mockito.ArgumentMatchers.contains("\"precip_probability\":70"), any());
+                argThat(json -> json.contains("\"precip_probability\":70")
+                        && json.contains("\"hazard_types\":[\"rainstorm\"]")), any());
+        verify(monitorDao).updateConfiguration(eq("device-1"), eq("NEWS"), eq(true), eq(15),
+                argThat(json -> json.contains("\"categories\":[\"public_safety\"]")), any());
         verify(monitorDao).completeCas(eq("device-1"), eq("WEATHER"), eq("old-worker"),
                 eq("old-token"), eq(true), any(), eq(null));
     }
@@ -451,6 +537,15 @@ class ProactiveMonitorServiceTest {
     private Map<String, Object> validWeatherState() {
         return Map.of("schema_version", 1, "fingerprints", List.of("weather:abc"),
                 "baseline", Map.of("captured_at", "2026-08-08T12:00:00Z"));
+    }
+
+    private AgentPluginMapping weatherPlugin(String paramInfo) {
+        AgentPluginMapping mapping = new AgentPluginMapping();
+        mapping.setAgentId("agent-1");
+        mapping.setPluginId("SYSTEM_PLUGIN_WEATHER");
+        mapping.setProviderCode("get_weather");
+        mapping.setParamInfo(paramInfo);
+        return mapping;
     }
 
     private ClassifierEvaluate classifierRequest() {

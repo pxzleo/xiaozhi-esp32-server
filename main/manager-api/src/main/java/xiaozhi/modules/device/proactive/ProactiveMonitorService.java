@@ -27,9 +27,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import xiaozhi.common.constant.Constant;
 import xiaozhi.common.exception.RenException;
+import xiaozhi.modules.agent.entity.AgentPluginMapping;
+import xiaozhi.modules.agent.service.AgentPluginMappingService;
 import xiaozhi.modules.device.dao.DeviceDao;
 import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.ClassifierEvaluate;
+import xiaozhi.modules.device.proactive.ProactiveDTOs.ClassifierAvailabilityView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.ClassifierModelView;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.ClassifierResult;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.MonitorComplete;
@@ -84,10 +87,12 @@ public class ProactiveMonitorService {
     private final ObjectMapper objectMapper;
     private final SysParamsService sysParamsService;
     private final LLMService llmService;
+    private final AgentPluginMappingService agentPluginMappingService;
 
     public ProactiveMonitorService(DeviceDao deviceDao, ProactiveMonitorDao monitorDao,
             ProactiveEventDao eventDao, ProactiveService proactiveService, ObjectMapper objectMapper,
-            SysParamsService sysParamsService, LLMService llmService) {
+            SysParamsService sysParamsService, LLMService llmService,
+            AgentPluginMappingService agentPluginMappingService) {
         this.deviceDao = deviceDao;
         this.monitorDao = monitorDao;
         this.eventDao = eventDao;
@@ -95,6 +100,7 @@ public class ProactiveMonitorService {
         this.objectMapper = objectMapper;
         this.sysParamsService = sysParamsService;
         this.llmService = llmService;
+        this.agentPluginMappingService = agentPluginMappingService;
     }
 
     @Transactional
@@ -252,9 +258,59 @@ public class ProactiveMonitorService {
         ensureDefaults(device, new Date());
         Map<MonitorType, ProactiveMonitorEntity> map = monitorMap(monitorDao.selectByDevice(device.getId()));
         if (map.size() != 2) throw new RenException("设备监测配置读取失败");
+        WeatherLocation location = weatherLocation(device);
         return new MonitorsView(device.getId(), weatherView(map.get(MonitorType.WEATHER)),
-                newsView(map.get(MonitorType.NEWS)));
+                newsView(map.get(MonitorType.NEWS)), location.value(), location.error(),
+                classifierAvailability());
     }
+
+    private WeatherLocation weatherLocation(DeviceEntity device) {
+        if (StringUtils.isBlank(device.getAgentId())) {
+            return new WeatherLocation(null, "agent_not_bound");
+        }
+        List<AgentPluginMapping> weatherPlugins = agentPluginMappingService
+                .agentPluginParamsByAgentId(device.getAgentId()).stream()
+                .filter(mapping -> "get_weather".equals(mapping.getProviderCode()))
+                .toList();
+        if (weatherPlugins.isEmpty()) {
+            return new WeatherLocation(null, "weather_plugin_not_configured");
+        }
+        if (weatherPlugins.size() != 1) {
+            return new WeatherLocation(null, "weather_config_ambiguous");
+        }
+        String paramInfo = weatherPlugins.getFirst().getParamInfo();
+        if (StringUtils.isBlank(paramInfo)) {
+            return new WeatherLocation(null, "weather_config_invalid");
+        }
+        try (JsonParser parser = objectMapper.createParser(paramInfo)) {
+            JsonNode config = objectMapper.readTree(parser);
+            if (config == null || !config.isObject() || parser.nextToken() != null) {
+                return new WeatherLocation(null, "weather_config_invalid");
+            }
+            JsonNode location = config.get("default_location");
+            if (location == null || location.isNull()
+                    || location.isTextual() && location.textValue().isBlank()) {
+                return new WeatherLocation(null, "default_location_missing");
+            }
+            if (!location.isTextual()) return new WeatherLocation(null, "default_location_invalid");
+            String value = location.textValue().trim();
+            if (value.length() > 120) {
+                return new WeatherLocation(null, "default_location_invalid");
+            }
+            return new WeatherLocation(value, null);
+        } catch (IOException exception) {
+            return new WeatherLocation(null, "weather_config_invalid");
+        }
+    }
+
+    private ClassifierAvailabilityView classifierAvailability() {
+        String modelId = configuredModelId();
+        if (modelId == null) return new ClassifierAvailabilityView(false, false, "not_configured");
+        boolean available = llmService.isAvailable(modelId);
+        return new ClassifierAvailabilityView(true, available, available ? null : "unavailable");
+    }
+
+    private record WeatherLocation(String value, String error) {}
 
     private MonitorView<WeatherMonitorConfig> weatherView(ProactiveMonitorEntity entity) {
         return new MonitorView<>(MonitorType.WEATHER, entity.getEnabled(), entity.getIntervalMinutes(),

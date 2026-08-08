@@ -28,6 +28,8 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Outcome;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Priority;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 import xiaozhi.modules.device.proactive.ProactiveEnums.MonitorType;
+import xiaozhi.modules.device.proactive.ProactiveEnums.NewsCategory;
+import xiaozhi.modules.device.proactive.ProactiveEnums.WeatherHazardType;
 
 public final class ProactiveDTOs {
     private ProactiveDTOs() {}
@@ -87,7 +89,7 @@ public final class ProactiveDTOs {
         @NotBlank @Pattern(regexp = "agent_plugin", message = "weather source必须为agent_plugin")
         private String source = "agent_plugin";
         @JsonProperty("hazard_types") @NotNull @Size(max = 16)
-        private List<@NotBlank @Size(max = 32) String> hazardTypes = List.of();
+        private List<@NotNull WeatherHazardType> hazardTypes = List.of();
         @JsonProperty("official_min_severity") @NotBlank
         @Pattern(regexp = "advisory|watch|warning|emergency")
         private String officialMinSeverity = "warning";
@@ -120,7 +122,7 @@ public final class ProactiveDTOs {
         @NotNull @Size(max = 16)
         private List<@NotBlank @Size(max = 200) String> sources = List.of();
         @NotNull @Size(max = 16)
-        private List<@NotBlank @Size(max = 64) String> categories = List.of();
+        private List<@NotNull NewsCategory> categories = List.of();
         @DecimalMin("0.50") @DecimalMax("1.00")
         private double confidence = 0.85;
         @JsonProperty("cooldown_minutes") @Min(1) @Max(10080)
@@ -156,7 +158,12 @@ public final class ProactiveDTOs {
 
     public record MonitorsView(@JsonProperty("device_id") String deviceId,
             MonitorView<WeatherMonitorConfig> weather,
-            MonitorView<NewsMonitorConfig> news) {}
+            MonitorView<NewsMonitorConfig> news,
+            @JsonProperty("weather_location") String weatherLocation,
+            @JsonProperty("weather_location_error") String weatherLocationError,
+            @JsonProperty("classifier") ClassifierAvailabilityView classifier) {}
+
+    public record ClassifierAvailabilityView(boolean configured, boolean available, String error) {}
 
     public record PendingEnvelope(boolean pending,
             @JsonProperty("event_id") String eventId, Topic topic, Priority priority,
