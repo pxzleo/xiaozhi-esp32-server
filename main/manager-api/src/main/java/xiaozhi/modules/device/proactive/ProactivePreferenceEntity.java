@@ -21,6 +21,7 @@ public class ProactivePreferenceEntity {
     private String allowedTopics;
     private String blockedTopics;
     private String previousMode;
+    private Integer previousDailyLimit;
     private Date silentUntil;
     private Integer version;
     private Date createdAt;

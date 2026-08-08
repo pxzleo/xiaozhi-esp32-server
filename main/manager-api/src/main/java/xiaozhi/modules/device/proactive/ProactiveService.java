@@ -8,11 +8,13 @@ import java.util.EnumSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.dao.DuplicateKeyException;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -93,6 +95,7 @@ public class ProactiveService {
         Date now = new Date();
         if (!Mode.TODAY_SILENT.name().equals(entity.getMode())) {
             entity.setPreviousMode(entity.getMode());
+            entity.setPreviousDailyLimit(entity.getDailyLimit());
         }
         entity.setMode(Mode.TODAY_SILENT.name());
         entity.setDailyLimit(0);
@@ -107,6 +110,11 @@ public class ProactiveService {
     public EventView upsertEvent(EventUpsert request) {
         DeviceEntity device = resolveByMac(request.getMacAddress());
         validatePayload(request.getPayload(), EVENT_PAYLOAD_KEYS, "event payload");
+        ProactiveEventEntity existing = eventDao.selectByDeviceAndEventId(device.getId(), request.getEventId());
+        if (existing != null) {
+            verifyIdempotentEvent(existing, request);
+            return toEvent(existing);
+        }
         Date now = new Date();
         ProactiveEventEntity entity = new ProactiveEventEntity();
         entity.setDeviceId(device.getId());
@@ -124,10 +132,17 @@ public class ProactiveService {
         entity.setDeliveryStatus(DeliveryStatus.PENDING.name());
         entity.setOutcome(Outcome.NONE.name());
         entity.setUpdatedAt(now);
-        eventDao.insertIdempotent(entity);
-        ProactiveEventEntity stored = eventDao.selectIdempotent(
-                device.getId(), request.getEventId(), request.getDedupeKey());
-        if (stored == null) throw new RenException("event_id已属于其他设备");
+        try {
+            eventDao.insert(entity);
+        } catch (DuplicateKeyException exception) {
+            ProactiveEventEntity concurrent = eventDao.selectByDeviceAndEventId(
+                    device.getId(), request.getEventId());
+            if (concurrent == null) throw new RenException("主动事件写入冲突", exception);
+            verifyIdempotentEvent(concurrent, request);
+            return toEvent(concurrent);
+        }
+        ProactiveEventEntity stored = eventDao.selectByDeviceAndEventId(device.getId(), request.getEventId());
+        if (stored == null) throw new RenException("主动事件写入失败");
         return toEvent(stored);
     }
 
@@ -138,7 +153,7 @@ public class ProactiveService {
                 request.getOutcome().name(), new Date()) != 1) {
             throw new RenException("主动事件不存在");
         }
-        ProactiveEventEntity event = eventDao.selectIdempotent(device.getId(), eventId, "__not_a_key__");
+        ProactiveEventEntity event = eventDao.selectByDeviceAndEventId(device.getId(), eventId);
         return toEvent(event);
     }
 
@@ -178,13 +193,13 @@ public class ProactiveService {
     public PageData<EventView> events(Long userId, String deviceId, Topic topic,
             DeliveryStatus status, EventType eventType, int page, int limit) {
         if (deviceId != null) requireOwned(userId, deviceId);
-        int safePage = requireRange(page, 1, Integer.MAX_VALUE, "page");
+        int safePage = requireRange(page, 1, 100_000, "page");
         int safeLimit = requireRange(limit, 1, 100, "limit");
         String topicName = topic == null ? null : topic.name();
         String statusName = status == null ? null : status.name();
         String typeName = eventType == null ? null : eventType.name();
         List<EventView> list = eventDao.pageForUser(userId, deviceId, topicName, statusName, typeName,
-                safeLimit, (safePage - 1) * safeLimit).stream().map(this::toEvent).toList();
+                safeLimit, ((long) safePage - 1L) * safeLimit).stream().map(this::toEvent).toList();
         long total = eventDao.countForUser(userId, deviceId, topicName, statusName, typeName);
         return new PageData<>(list, total);
     }
@@ -215,6 +230,7 @@ public class ProactiveService {
         ProactivePreferenceEntity entity = preferenceEntity(device);
         Mode mode = request.getMode();
         String priorMode = entity.getMode();
+        Integer priorDailyLimit = entity.getDailyLimit();
         int limit = request.getDailyLimit() == null ? defaultLimit(mode) : request.getDailyLimit();
         entity.setMode(mode.name());
         entity.setDailyLimit(limit);
@@ -223,11 +239,15 @@ public class ProactiveService {
         entity.setAllowedTopics(writeJson(request.getAllowedTopics() == null ? Set.of() : request.getAllowedTopics()));
         entity.setBlockedTopics(writeJson(request.getBlockedTopics() == null ? Set.of() : request.getBlockedTopics()));
         if (mode == Mode.TODAY_SILENT) {
-            if (StringUtils.isBlank(entity.getPreviousMode())) entity.setPreviousMode(priorMode);
+            if (StringUtils.isBlank(entity.getPreviousMode())) {
+                entity.setPreviousMode(priorMode);
+                entity.setPreviousDailyLimit(priorDailyLimit);
+            }
             entity.setSilentUntil(Date.from(LocalDate.now().plusDays(1)
                     .atStartOfDay(ZoneId.systemDefault()).toInstant()));
         } else {
             entity.setPreviousMode(null);
+            entity.setPreviousDailyLimit(null);
             entity.setSilentUntil(null);
         }
         entity.setVersion(entity.getVersion() + 1);
@@ -251,10 +271,11 @@ public class ProactiveService {
 
     private DeviceEntity resolveByMac(String macAddress) {
         if (StringUtils.isBlank(macAddress)) throw new RenException("mac_address不能为空");
-        DeviceEntity device = deviceDao.selectOne(new LambdaQueryWrapper<DeviceEntity>()
-                .eq(DeviceEntity::getMacAddress, macAddress).last("LIMIT 1"));
-        if (device == null) throw new RenException("设备不存在");
-        return device;
+        List<DeviceEntity> devices = deviceDao.selectList(new LambdaQueryWrapper<DeviceEntity>()
+                .eq(DeviceEntity::getMacAddress, macAddress).last("LIMIT 2"));
+        if (devices.isEmpty()) throw new RenException("设备不存在");
+        if (devices.size() > 1) throw new RenException("MAC对应多设备");
+        return devices.getFirst();
     }
 
     private DeviceEntity requireOwned(Long userId, String deviceId) {
@@ -312,6 +333,24 @@ public class ProactiveService {
         }
     }
 
+    private void verifyIdempotentEvent(ProactiveEventEntity stored, EventUpsert request) {
+        boolean equal = Objects.equals(stored.getTopic(), request.getTopic().name())
+                && Objects.equals(stored.getPriority(), request.getPriority().name())
+                && Objects.equals(stored.getReason(), request.getReason())
+                && Objects.equals(stored.getEventType(), request.getEventType().name())
+                && Objects.equals(readMap(stored.getPayload()), request.getPayload())
+                && sameSecond(stored.getCreatedAt(), request.getCreatedAt())
+                && sameSecond(stored.getExpiresAt(), request.getExpiresAt())
+                && Objects.equals(stored.getDedupeKey(), request.getDedupeKey())
+                && Objects.equals(stored.getRequiresResponse(), request.getRequiresResponse());
+        if (!equal) throw new RenException("event_id已存在但事件内容不一致");
+    }
+
+    private boolean sameSecond(Date left, Date right) {
+        if (left == null || right == null) return left == right;
+        return left.getTime() / 1000L == right.getTime() / 1000L;
+    }
+
     private Map<String, Object> readMap(String value) {
         if (StringUtils.isBlank(value)) return Map.of();
         try {
@@ -338,7 +377,7 @@ public class ProactiveService {
                 entity.getDailyLimit(), entity.getQuietStart(), entity.getQuietEnd(),
                 readTopics(entity.getAllowedTopics()), readTopics(entity.getBlockedTopics()),
                 StringUtils.isBlank(entity.getPreviousMode()) ? null : Mode.valueOf(entity.getPreviousMode()),
-                entity.getSilentUntil(), entity.getVersion(), entity.getUpdatedAt());
+                entity.getPreviousDailyLimit(), entity.getSilentUntil(), entity.getVersion(), entity.getUpdatedAt());
     }
 
     private EventView toEvent(ProactiveEventEntity entity) {

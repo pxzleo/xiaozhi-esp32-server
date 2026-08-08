@@ -131,6 +131,7 @@ public final class ProactiveDTOs {
             @JsonProperty("allowed_topics") Set<Topic> allowedTopics,
             @JsonProperty("blocked_topics") Set<Topic> blockedTopics,
             @JsonProperty("previous_mode") Mode previousMode,
+            @JsonProperty("previous_daily_limit") Integer previousDailyLimit,
             @JsonProperty("silent_until") Date silentUntil,
             int version,
             @JsonProperty("updated_at") Date updatedAt) {}

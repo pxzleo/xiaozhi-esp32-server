@@ -22,9 +22,10 @@ public interface ProactivePreferenceDao extends BaseMapper<ProactivePreferenceEn
 
     @Update("""
             UPDATE ai_device_proactive_preference
-            SET mode = COALESCE(previous_mode, 'AGGRESSIVE'), daily_limit = CASE previous_mode
-                    WHEN 'CONSERVATIVE' THEN 1 WHEN 'ACTIVE' THEN 3 ELSE 5 END,
-                previous_mode = NULL, silent_until = NULL, version = version + 1, updated_at = #{now}
+            SET mode = COALESCE(previous_mode, 'AGGRESSIVE'),
+                daily_limit = COALESCE(previous_daily_limit, 5),
+                previous_mode = NULL, previous_daily_limit = NULL, silent_until = NULL,
+                version = version + 1, updated_at = #{now}
             WHERE device_id = #{deviceId} AND mode = 'TODAY_SILENT' AND silent_until <= #{now}
             """)
     int restoreExpiredSilent(@Param("deviceId") String deviceId, @Param("now") Date now);

@@ -3,7 +3,6 @@ package xiaozhi.modules.device.proactive;
 import java.util.Date;
 import java.util.List;
 
-import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -13,25 +12,12 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 
 @Mapper
 public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
-    @Insert("""
-            INSERT INTO ai_device_proactive_event
-                (device_id, mac_address, event_id, topic, priority, reason, event_type, payload,
-                 created_at, expires_at, dedupe_key, requires_response, delivery_status, outcome, updated_at)
-            VALUES (#{e.deviceId}, #{e.macAddress}, #{e.eventId}, #{e.topic}, #{e.priority}, #{e.reason},
-                    #{e.eventType}, CAST(#{e.payload} AS JSON), #{e.createdAt}, #{e.expiresAt}, #{e.dedupeKey},
-                    #{e.requiresResponse}, #{e.deliveryStatus}, #{e.outcome}, #{e.updatedAt})
-            ON DUPLICATE KEY UPDATE
-                updated_at = IF(device_id = VALUES(device_id), VALUES(updated_at), updated_at)
-            """)
-    int insertIdempotent(@Param("e") ProactiveEventEntity event);
-
     @Select("""
             SELECT * FROM ai_device_proactive_event
-            WHERE device_id = #{deviceId} AND (event_id = #{eventId} OR dedupe_key = #{dedupeKey})
-            ORDER BY id LIMIT 1
+            WHERE device_id = #{deviceId} AND event_id = #{eventId}
             """)
-    ProactiveEventEntity selectIdempotent(@Param("deviceId") String deviceId,
-            @Param("eventId") String eventId, @Param("dedupeKey") String dedupeKey);
+    ProactiveEventEntity selectByDeviceAndEventId(@Param("deviceId") String deviceId,
+            @Param("eventId") String eventId);
 
     @Update("""
             UPDATE ai_device_proactive_event
@@ -59,7 +45,7 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
     List<ProactiveEventEntity> pageForUser(@Param("userId") Long userId,
             @Param("deviceId") String deviceId, @Param("topic") String topic,
             @Param("status") String status, @Param("eventType") String eventType,
-            @Param("limit") int limit, @Param("offset") int offset);
+            @Param("limit") int limit, @Param("offset") long offset);
 
     @Select("""
             <script>

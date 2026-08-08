@@ -31,7 +31,7 @@
 内部接口：
 
 - `GET /config/proactive/preferences/{macAddress}`、`PUT /config/proactive/preferences/{macAddress}`：读取或更新设备偏好。
-- `POST /config/proactive/events`：按全局唯一 `event_id` 以及设备内唯一 `(device_id, dedupe_key)` 幂等写入事件。
+- `POST /config/proactive/events`：按设备内唯一 `(device_id, event_id)` 幂等写入事件；相同 `event_id` 的重试必须与已存审计内容完全一致，否则明确报错。不同设备可以使用相同 `event_id`。`dedupe_key` 仅供策略层关联和去重，不是审计唯一键，因此同一故障及其恢复事件可以分别留痕。
 - `PUT /config/proactive/events/{eventId}/status`：请求体必须带 `mac_address`，按设备与事件共同更新投递状态。
 - `POST /config/proactive/habits/observe`：按 `(device_id, habit_type, habit_key)` 原子累加证据；证据达到 3 次后进入候选。
 - `GET /config/proactive/habits/candidates?mac_address=...`：列出尚未接受或忽略的建议候选。
@@ -40,9 +40,11 @@
 
 - `GET /device/proactive/preferences`、`GET|PUT /device/proactive/preferences/{deviceId}`：列出本人设备或管理单个设备偏好。
 - `PUT /device/proactive/preferences/{deviceId}/today-silent`：静默至服务端所在时区的次日零点。
-- `GET /device/proactive/events`：分页参数为 `page`（从 1 开始）和 `limit`（1 至 100），可选 `device_id`、`topic`、`delivery_status`、`event_type` 过滤；未给 `device_id` 时只查询本人全部绑定设备。
+- `GET /device/proactive/events`：分页参数为 `page`（1 至 100000）和 `limit`（1 至 100），可选 `device_id`、`topic`、`delivery_status`、`event_type` 过滤；未给 `device_id` 时只查询本人全部绑定设备。
 - `GET /device/proactive/habits`、`DELETE /device/proactive/habits/{habitId}`：列出本人设备的习惯或删除指定候选；列表可选 `device_id`。
 
-偏好默认模式为 `aggressive`、每日上限 5 次且没有默认安静时段。`active` 未显式给出 `daily_limit` 时为 3，`conservative` 为 1 且只用于关键事件，`today_silent` 为 0。进入当日静默会保留 `previous_mode` 和次日恢复时间；读取偏好时若静默已到期，manager-api 原子恢复原模式并递增 `version`。安静时段必须同时给出 `quiet_start`、`quiet_end` 且不能相同。
+偏好默认模式为 `aggressive`、每日上限 5 次且没有默认安静时段。`active` 未显式给出 `daily_limit` 时为 3，`conservative` 为 1，`today_silent` 为 0。进入当日静默会同时保留 `previous_mode`、`previous_daily_limit` 和次日恢复时间；读取偏好时若静默已到期，manager-api 原子、完整地恢复原模式与原每日上限并递增 `version`。安静时段必须同时给出 `quiet_start`、`quiet_end` 且不能相同。
+
+`conservative` 只执行关键事件属于设备端或服务端的策略执行职责；manager-api 只持久化偏好与完整事件审计，不在写入审计事件时按模式过滤。内部按 MAC 操作时必须且只能匹配一个现有设备；重复 MAC 会明确报错，不会任取其中一条记录。
 
 所有接口枚举使用小写值。主题仅允许 `reminder`、`calendar`、`weather`、`music`、`health`、`habit`、`system`。事件 payload 只允许 `title`、`message`、`reference_id`、`scheduled_at`、`action`、`source`；习惯 payload 只允许 `description`、`suggested_mode`、`suggested_time`、`topic`。payload 值只能是空值、字符串、数字或布尔值，字符串最多 512 个字符，不接收也不保存自由推理链。响应将 JSON 字段解析为对象或数组，不返回数据库中的原始 JSON 文本。

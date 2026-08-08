@@ -33,6 +33,14 @@ class ProactiveContractTest {
             assertTrue(sql.contains("UNIQUE KEY `uk_ai_device_proactive_habit` (`device_id`, `habit_type`, `habit_key`)"));
             assertFalse(sql.toLowerCase().contains("chain_of_thought"));
         }
+        try (var stream = getClass().getResourceAsStream("/db/changelog/202608081500.sql")) {
+            String sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            assertTrue(sql.contains("ADD COLUMN `previous_daily_limit`"));
+            assertTrue(sql.contains("DROP INDEX `uk_ai_device_proactive_preference_mac`"));
+            assertTrue(sql.contains("ADD KEY `idx_ai_device_proactive_preference_mac`"));
+            assertTrue(sql.contains("ADD UNIQUE KEY `uk_ai_device_proactive_event_device_event` (`device_id`, `event_id`)"));
+            assertTrue(sql.contains("ADD KEY `idx_ai_device_proactive_event_dedupe` (`device_id`, `dedupe_key`)"));
+        }
     }
 
     @Test
@@ -79,5 +87,17 @@ class ProactiveContractTest {
                 String.class, String.class, java.util.Date.class);
         String eventSql = status.getAnnotation(Update.class).value()[0];
         assertTrue(eventSql.contains("device_id = #{deviceId} AND event_id = #{eventId}"));
+
+        Method findEvent = ProactiveEventDao.class.getMethod("selectByDeviceAndEventId",
+                String.class, String.class);
+        String findSql = findEvent.getAnnotation(org.apache.ibatis.annotations.Select.class).value()[0];
+        assertTrue(findSql.contains("device_id = #{deviceId} AND event_id = #{eventId}"));
+        assertFalse(findSql.contains(" OR "));
+
+        Method restore = ProactivePreferenceDao.class.getMethod("restoreExpiredSilent",
+                String.class, java.util.Date.class);
+        String restoreSql = restore.getAnnotation(Update.class).value()[0];
+        assertTrue(restoreSql.contains("daily_limit = COALESCE(previous_daily_limit, 5)"));
+        assertTrue(restoreSql.contains("previous_daily_limit = NULL"));
     }
 }
