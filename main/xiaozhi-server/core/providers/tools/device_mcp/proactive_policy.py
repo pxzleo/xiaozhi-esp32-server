@@ -15,7 +15,7 @@ _KNOWN_TOPICS = {"reminder", "calendar", "weather", "music", "health", "habit", 
 class _DevicePolicyState:
     day: str
     used: int = 0
-    topic_times: dict[str, float] = field(default_factory=dict)
+    topic_deadlines: dict[str, float] = field(default_factory=dict)
 
 
 _states: dict[str, _DevicePolicyState] = {}
@@ -177,13 +177,19 @@ def claim_proactive_opportunity(
         elif state.day < day:
             state.day = day
             state.used = 0
-        previous = state.topic_times.get(topic)
-        if previous is not None and current - previous < cooldown_seconds:
+        expired_topics = [
+            tracked_topic
+            for tracked_topic, deadline in state.topic_deadlines.items()
+            if deadline <= current
+        ]
+        for tracked_topic in expired_topics:
+            del state.topic_deadlines[tracked_topic]
+        if topic in state.topic_deadlines:
             return False
         if not unlimited and state.used >= effective_limit:
             return False
         state.used += 1
-        state.topic_times[topic] = current
+        state.topic_deadlines[topic] = current + cooldown_seconds
         return True
 
 

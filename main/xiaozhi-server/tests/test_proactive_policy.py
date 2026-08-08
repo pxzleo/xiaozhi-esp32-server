@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from types import SimpleNamespace
 
+from core.providers.tools.device_mcp import proactive_policy
+
 from core.providers.tools.device_mcp.proactive_policy import (
     claim_proactive_opportunity,
     policy_allows,
@@ -127,6 +129,55 @@ class ProactivePolicyTest(unittest.TestCase):
         self.assertFalse(claim_proactive_opportunity(
             self.conn, "habit", cooldown_seconds=120, now=before_midnight + 33))
 
+    def test_expired_unique_topics_are_reclaimed_across_many_days(self):
+        set_connection_preferences(
+            self.conn,
+            {
+                "mode": "aggressive",
+                "daily_limit": 0,
+                "quiet_start": None,
+                "quiet_end": None,
+                "allowed_topics": [],
+                "blocked_topics": [],
+            },
+        )
+        first_day = datetime(2026, 8, 8, 12, 0).timestamp()
+        for day in range(5):
+            current = first_day + day * 24 * 3600
+            for index in range(200):
+                self.assertTrue(claim_proactive_opportunity(
+                    self.conn,
+                    f"dynamic-{day}-{index}",
+                    cooldown_seconds=3600,
+                    now=current,
+                ))
+            state = proactive_policy._states["device-a"]
+            self.assertEqual(200, len(state.topic_deadlines))
+
+    def test_each_topic_uses_its_own_cooldown_deadline(self):
+        set_connection_preferences(
+            self.conn,
+            {
+                "mode": "aggressive",
+                "daily_limit": 0,
+                "quiet_start": None,
+                "quiet_end": None,
+                "allowed_topics": [],
+                "blocked_topics": [],
+            },
+        )
+        now = datetime(2026, 8, 8, 12, 0).timestamp()
+        self.assertTrue(claim_proactive_opportunity(
+            self.conn, "short", cooldown_seconds=10, now=now))
+        self.assertTrue(claim_proactive_opportunity(
+            self.conn, "long", cooldown_seconds=100, now=now))
+        self.assertTrue(claim_proactive_opportunity(
+            self.conn, "short", cooldown_seconds=10, now=now + 11))
+        self.assertFalse(claim_proactive_opportunity(
+            self.conn, "long", cooldown_seconds=10, now=now + 11))
+        self.assertTrue(claim_proactive_opportunity(
+            self.conn, "long", cooldown_seconds=10, now=now + 101))
+
     def test_mock_like_device_attribute_does_not_become_shared_key(self):
         first = SimpleNamespace(headers={})
         second = SimpleNamespace(headers={})
@@ -203,7 +254,7 @@ class ProactivePolicyTest(unittest.TestCase):
                 claim_proactive_opportunity(
                     self.conn,
                     f"aggressive-{index}",
-                    cooldown_seconds=0,
+                    cooldown_seconds=60,
                     now=100 + index,
                 )
             )
