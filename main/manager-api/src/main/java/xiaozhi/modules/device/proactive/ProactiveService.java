@@ -308,10 +308,7 @@ public class ProactiveService {
         for (int attempt = 0; attempt < 2; attempt++) {
             boolean currentLegacy = Mode.AGGRESSIVE.name().equals(entity.getMode()) &&
                     isLegacyAggressiveLimit(entity.getDailyLimit());
-            boolean previousLegacy = Mode.TODAY_SILENT.name().equals(entity.getMode()) &&
-                    Mode.AGGRESSIVE.name().equals(entity.getPreviousMode()) &&
-                    isLegacyAggressiveLimit(entity.getPreviousDailyLimit());
-            if (!currentLegacy && !previousLegacy) return entity;
+            if (!hasLegacyAggressiveLimit(entity)) return entity;
             if (currentLegacy) {
                 preferenceDao.normalizeLegacyAggressiveLimit(entity.getDeviceId(),
                         entity.getDailyLimit(), entity.getVersion(), now);
@@ -321,8 +318,17 @@ public class ProactiveService {
             }
             entity = preferenceDao.selectByIdForUpdate(entity.getDeviceId());
             if (entity == null) throw new RenException("主动助理偏好读取失败");
+            if (!hasLegacyAggressiveLimit(entity)) return entity;
         }
         throw new RenException("旧版积极模式偏好规范化并发冲突");
+    }
+
+    private boolean hasLegacyAggressiveLimit(ProactivePreferenceEntity entity) {
+        return (Mode.AGGRESSIVE.name().equals(entity.getMode()) &&
+                isLegacyAggressiveLimit(entity.getDailyLimit())) ||
+                (Mode.TODAY_SILENT.name().equals(entity.getMode()) &&
+                Mode.AGGRESSIVE.name().equals(entity.getPreviousMode()) &&
+                isLegacyAggressiveLimit(entity.getPreviousDailyLimit()));
     }
 
     private boolean isLegacyAggressiveLimit(Integer limit) {

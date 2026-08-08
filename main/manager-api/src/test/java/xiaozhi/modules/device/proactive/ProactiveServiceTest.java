@@ -123,6 +123,33 @@ class ProactiveServiceTest {
     }
 
     @Test
+    void retriesChangedLegacyVersionAndReturnsAfterSecondCasSucceeds() {
+        ProactivePreferenceEntity initial = preference(Mode.AGGRESSIVE, 5);
+        ProactivePreferenceEntity concurrentlyChanged = preference(Mode.AGGRESSIVE, 4);
+        concurrentlyChanged.setVersion(1);
+        ProactivePreferenceEntity normalized = preference(Mode.AGGRESSIVE, 0);
+        normalized.setVersion(2);
+        when(preferenceDao.selectById("device-1")).thenReturn(initial);
+        when(preferenceDao.normalizeLegacyAggressiveLimit(
+                eq("device-1"), eq(5), eq(0), any())).thenReturn(0);
+        when(preferenceDao.normalizeLegacyAggressiveLimit(
+                eq("device-1"), eq(4), eq(1), any())).thenReturn(1);
+        when(preferenceDao.selectByIdForUpdate("device-1"))
+                .thenReturn(concurrentlyChanged, normalized);
+
+        var view = service.getPreferenceByMac(device.getMacAddress());
+
+        assertEquals(Mode.AGGRESSIVE, view.mode());
+        assertEquals(0, view.dailyLimit());
+        assertEquals(2, view.version());
+        verify(preferenceDao).normalizeLegacyAggressiveLimit(
+                eq("device-1"), eq(5), eq(0), any());
+        verify(preferenceDao).normalizeLegacyAggressiveLimit(
+                eq("device-1"), eq(4), eq(1), any());
+        verify(preferenceDao, times(2)).selectByIdForUpdate("device-1");
+    }
+
+    @Test
     void activeUsesFiveWhenDailyLimitIsOmitted() {
         ProactivePreferenceEntity preference = preference(Mode.CONSERVATIVE, 1);
         when(preferenceDao.selectById("device-1")).thenReturn(preference);
