@@ -46,14 +46,14 @@ manager-api 请求体中的 `created_at`、`expires_at` 和 `seen_at` 使用 Uni
 - `GET /device/proactive/events`：分页参数为 `page`（1 至 1000）和 `limit`（1 至 100），可选 `device_id`、`topic`、`delivery_status`、`event_type` 过滤；未给 `device_id` 时只查询本人全部绑定设备。
 - `GET /device/proactive/habits`、`DELETE /device/proactive/habits/{habitId}`：列出本人设备的习惯或删除指定候选；列表可选 `device_id`。
 - `GET|PUT /device/proactive/monitors/{deviceId}`：原子读取或同时更新本人设备的天气、新闻监测配置。天气默认 30 分钟、新闻默认 10 分钟，两类默认启用；配置字段严格校验，未知字段拒绝，普通监测首次运行以空 `state` 建立基线。
-- `GET /device/proactive/pending`：设备使用 `Device-Id`、`Client-Id` 和 Bearer HMAC 令牌鉴权。每次探测更新两类监测的 `last_probe_at`，只返回一个未过期、可领取的 `weather_alert/news_alert` 安全信封，不返回 payload 或 reason；无事件时返回 `pending=false,retry_after_seconds=300`。禁用监测、今日静默、安静时段和主题 allow/block 会抑制普通事件；仅 critical 天气绕过，新闻永不绕过；`conservative` 也只允许 critical 天气。
+- `GET /device/proactive/pending`：设备使用 `Device-Id`、`Client-Id` 和 Bearer HMAC 令牌鉴权。每次探测更新两类监测的 `last_probe_at`，只返回一个未过期、可领取的 `weather_alert/news_alert` 安全信封，不返回 payload 或 reason；无事件时返回 `pending=false,retry_after_seconds=300`。用户关闭某类 monitor 后该类事件一律拒绝，critical 天气也不能绕过关闭开关；在 monitor 已启用的前提下，仅 critical 天气可以绕过今日静默、安静时段、模式和主题 allow/block，新闻永不绕过；`conservative` 也只允许已启用的 critical 天气。
 
 外界监测内部接口继续位于 `/config/proactive/**` 并使用 server-secret：
 
 - `POST /config/proactive/monitors/claim`：每次最多领取 100 条到期任务，只选择 15 分钟内有设备探测的记录；数据库以 owner 和唯一 token 做 CAS，租约固定 120 秒，多实例只能有一个领取者成功。
-- `POST /config/proactive/monitors/complete`：只有匹配且未过期的 owner/token 可以更新 state、成功时间、下次检查时间和错误码并释放租约；状态 JSON 有大小上限且禁止推理链字段。
+- `POST /config/proactive/monitors/complete`：只有匹配且未过期的 owner/token 可以更新 state、成功时间、下次检查时间和错误码并释放租约；用户 PUT 任一配置会立即使该 monitor 的现有租约失效，旧 worker 不得覆盖新配置对应的 state 或调度；状态 JSON 有大小上限，任意对象或数组层级都禁止 `reasoning`、`chain_of_thought` 字段。
 - `GET /config/proactive/monitor-events/{eventId}?mac_address=...`：按 MAC 与 event ID 读取权威天气或新闻事件；投递仍复用既有 180 秒 `/events/{eventId}/claim` 接口。
-- `POST /config/proactive/classifier/evaluate`：仅接受有界的新闻标题、来源和事实，使用全局独立分类模型，禁止回退设备智能体模型。提示词要求单个严格 JSON 且禁止推理链；manager-api 同时校验 JSON 结构、索引完整性和字段范围，再把原始 JSON 文本交给调用方复核。
+- `POST /config/proactive/classifier/evaluate`：仅接受有界的新闻标题、来源和事实，使用全局独立分类模型，禁止回退设备智能体模型。固定分类契约使用 system 消息，序列化候选只作为独立的不可信 user JSON 数据；候选中的任何指令都不得改变角色或输出契约。模型只能返回单个严格 JSON 且禁止推理链；manager-api 同时校验 JSON 结构、索引完整性和字段范围，再把原始 JSON 文本交给调用方复核。
 
 超级管理员通过 `GET|PUT /proactive/classifier/model` 读取或保存独立 LLM model id，并通过 `POST /proactive/classifier/model/test` 检查可用性。未配置、非 LLM、未启用或缺少必要连接配置时明确返回不可用；任何接口都不得返回模型密钥。
 

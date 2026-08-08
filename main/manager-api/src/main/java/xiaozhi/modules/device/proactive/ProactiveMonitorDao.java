@@ -45,9 +45,7 @@ public interface ProactiveMonitorDao {
             SET enabled = #{enabled}, interval_minutes = #{intervalMinutes},
                 config = CAST(#{config} AS JSON), version = version + 1, updated_at = #{now},
                 next_check_at = CASE WHEN #{enabled} = 1 THEN LEAST(next_check_at, #{now}) ELSE next_check_at END,
-                lease_owner = CASE WHEN #{enabled} = 0 THEN NULL ELSE lease_owner END,
-                lease_token = CASE WHEN #{enabled} = 0 THEN NULL ELSE lease_token END,
-                lease_until = CASE WHEN #{enabled} = 0 THEN NULL ELSE lease_until END
+                lease_owner = NULL, lease_token = NULL, lease_until = NULL
             WHERE device_id = #{deviceId} AND monitor_type = #{monitorType}
             """)
     int updateConfiguration(@Param("deviceId") String deviceId,

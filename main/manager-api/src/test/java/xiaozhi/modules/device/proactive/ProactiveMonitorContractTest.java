@@ -61,6 +61,28 @@ class ProactiveMonitorContractTest {
     }
 
     @Test
+    void explicitNullWeatherNumbersAreRejectedInsteadOfBecomingZero() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        String base = """
+                {"source":"agent_plugin","hazard_types":[],"official_min_severity":"warning",
+                "precip_probability":70,"wind_speed_kmh":62,"high_temp_c":35,"low_temp_c":0,
+                "temp_drop_24h_c":8,"forecast_hours":6,"cooldown_minutes":720}
+                """;
+        try (var factory = jakarta.validation.Validation.buildDefaultValidatorFactory()) {
+            var validator = factory.getValidator();
+            for (String field : java.util.List.of("precip_probability", "wind_speed_kmh",
+                    "high_temp_c", "low_temp_c", "temp_drop_24h_c", "forecast_hours",
+                    "cooldown_minutes")) {
+                String json = base.replace("\"" + field + "\":"
+                        + valueOf(base, field), "\"" + field + "\":null");
+                WeatherMonitorConfig config = mapper.readValue(json, WeatherMonitorConfig.class);
+                assertTrue(validator.validate(config).stream()
+                        .anyMatch(v -> v.getPropertyPath().toString().equals(fieldToProperty(field))), field);
+            }
+        }
+    }
+
+    @Test
     void migrationCreatesCompositeKeyCascadeEmptyBaselineAndTwoDefaults() throws Exception {
         String sql = Files.readString(Path.of("src/main/resources/db/changelog/202608082100.sql"));
         assertTrue(sql.contains("PRIMARY KEY (`device_id`, `monitor_type`)"));
@@ -90,6 +112,13 @@ class ProactiveMonitorContractTest {
         String completeSql = complete.getAnnotation(Update.class).value()[0];
         assertTrue(completeSql.contains("lease_owner = #{leaseOwner} AND lease_token = #{leaseToken}"));
         assertTrue(completeSql.contains("lease_until > #{now}"));
+
+        Method configure = ProactiveMonitorDao.class.getMethod("updateConfiguration", String.class,
+                String.class, boolean.class, int.class, String.class, java.util.Date.class);
+        String configureSql = configure.getAnnotation(Update.class).value()[0];
+        assertTrue(configureSql.contains("lease_owner = NULL"));
+        assertTrue(configureSql.contains("lease_token = NULL"));
+        assertTrue(configureSql.contains("lease_until = NULL"));
     }
 
     @Test
@@ -113,5 +142,24 @@ class ProactiveMonitorContractTest {
         assertEquals("device", chains.get("/device/proactive/pending"));
         assertTrue(new java.util.ArrayList<>(chains.keySet()).indexOf("/device/proactive/pending")
                 < new java.util.ArrayList<>(chains.keySet()).indexOf("/**"));
+    }
+
+    private static String valueOf(String json, String field) {
+        var matcher = java.util.regex.Pattern.compile("\\\"" + field + "\\\":(-?\\d+)").matcher(json);
+        assertTrue(matcher.find());
+        return matcher.group(1);
+    }
+
+    private static String fieldToProperty(String field) {
+        StringBuilder result = new StringBuilder();
+        boolean upper = false;
+        for (char c : field.toCharArray()) {
+            if (c == '_') upper = true;
+            else {
+                result.append(upper ? Character.toUpperCase(c) : c);
+                upper = false;
+            }
+        }
+        return result.toString();
     }
 }

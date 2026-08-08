@@ -14,10 +14,12 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.RestClientException;
 
 import cn.hutool.json.JSONArray;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import cn.hutool.json.JSONException;
 import lombok.extern.slf4j.Slf4j;
 import xiaozhi.modules.llm.service.LLMService;
 import xiaozhi.modules.model.entity.ModelConfigEntity;
@@ -172,14 +174,54 @@ public class OpenAIStyleLLMServiceImpl implements LLMService {
         if (!isAvailable(modelId)) {
             throw new IllegalStateException("指定模型不可用");
         }
-        String output = generateSummary(input, promptTemplate, modelId);
-        if ("LLM服务不可用，无法生成总结".equals(output)
-                || "未找到可用的LLM模型配置".equals(output)
-                || "LLM配置不完整，无法生成总结".equals(output)
-                || "生成总结失败，请稍后重试".equals(output)) {
-            throw new IllegalStateException("指定模型调用失败: " + output);
+        ModelConfigEntity modelConfig = modelConfigService.getModelByIdFromCache(modelId);
+        if (modelConfig == null || modelConfig.getConfigJson() == null) {
+            throw new IllegalStateException("指定模型配置不存在");
         }
-        return output;
+        JSONObject config = modelConfig.getConfigJson();
+        String baseUrl = config.getStr("base_url");
+        String apiKey = config.getStr("api_key");
+        String modelName = config.getStr("model_name");
+        if (StringUtils.isAnyBlank(baseUrl, apiKey, modelName)) {
+            throw new IllegalStateException("指定模型配置已变化或不完整");
+        }
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", modelName);
+        requestBody.put("messages", structuredMessages(promptTemplate, input));
+        requestBody.put("temperature", 0);
+        requestBody.put("max_tokens", Math.max(1, Math.min(config.getInt("max_tokens", 2000), 2000)));
+        applyThinkingDisabled(baseUrl, requestBody);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(apiKey);
+        String apiUrl = baseUrl.endsWith("/chat/completions") ? baseUrl
+                : baseUrl + (baseUrl.endsWith("/") ? "" : "/") + "chat/completions";
+        try {
+            ResponseEntity<String> response = restTemplate.exchange(apiUrl, HttpMethod.POST,
+                    new HttpEntity<>(requestBody, headers), String.class);
+            JSONObject body = JSONUtil.parseObj(response.getBody());
+            JSONArray choices = body.getJSONArray("choices");
+            if (!response.getStatusCode().is2xxSuccessful() || choices == null || choices.isEmpty()) {
+                throw new IllegalStateException("指定模型返回无有效结果");
+            }
+            JSONObject choice = choices.getJSONObject(0);
+            JSONObject message = choice == null ? null : choice.getJSONObject("message");
+            String output = message == null ? null : message.getStr("content");
+            if (StringUtils.isBlank(output)) throw new IllegalStateException("指定模型返回内容为空");
+            return output;
+        } catch (RestClientException | JSONException exception) {
+            throw new IllegalStateException("指定模型调用失败", exception);
+        }
+    }
+
+    static List<Map<String, Object>> structuredMessages(String systemPrompt, String untrustedJson) {
+        if (StringUtils.isAnyBlank(systemPrompt, untrustedJson)) {
+            throw new IllegalArgumentException("结构化任务指令和数据不能为空");
+        }
+        return List.of(
+                Map.of("role", "system", "content", systemPrompt),
+                Map.of("role", "user", "content", untrustedJson));
     }
 
     @Override

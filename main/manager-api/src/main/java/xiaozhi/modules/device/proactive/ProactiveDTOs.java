@@ -91,23 +91,25 @@ public final class ProactiveDTOs {
         @JsonProperty("official_min_severity") @NotBlank
         @Pattern(regexp = "advisory|watch|warning|emergency")
         private String officialMinSeverity = "warning";
-        @JsonProperty("precip_probability") @Min(0) @Max(100)
-        private int precipProbability = 70;
-        @JsonProperty("wind_speed_kmh") @Min(0) @Max(300)
-        private int windSpeedKmh = 62;
-        @JsonProperty("high_temp_c") @Min(-50) @Max(60)
-        private int highTempC = 35;
-        @JsonProperty("low_temp_c") @Min(-50) @Max(60)
-        private int lowTempC = 0;
-        @JsonProperty("temp_drop_24h_c") @Min(0) @Max(60)
-        private int tempDrop24hC = 8;
-        @JsonProperty("forecast_hours") @Min(1) @Max(168)
-        private int forecastHours = 6;
-        @JsonProperty("cooldown_minutes") @Min(1) @Max(10080)
-        private int cooldownMinutes = 720;
+        @JsonProperty("precip_probability") @NotNull @Min(0) @Max(100)
+        private Integer precipProbability = 70;
+        @JsonProperty("wind_speed_kmh") @NotNull @Min(0) @Max(300)
+        private Integer windSpeedKmh = 62;
+        @JsonProperty("high_temp_c") @NotNull @Min(-50) @Max(60)
+        private Integer highTempC = 35;
+        @JsonProperty("low_temp_c") @NotNull @Min(-50) @Max(60)
+        private Integer lowTempC = 0;
+        @JsonProperty("temp_drop_24h_c") @NotNull @Min(0) @Max(60)
+        private Integer tempDrop24hC = 8;
+        @JsonProperty("forecast_hours") @NotNull @Min(1) @Max(168)
+        private Integer forecastHours = 6;
+        @JsonProperty("cooldown_minutes") @NotNull @Min(1) @Max(10080)
+        private Integer cooldownMinutes = 720;
 
         @AssertTrue(message = "low_temp_c必须小于high_temp_c")
-        public boolean isTemperatureRangeValid() { return lowTempC < highTempC; }
+        public boolean isTemperatureRangeValid() {
+            return lowTempC == null || highTempC == null || lowTempC < highTempC;
+        }
     }
 
     @Data
