@@ -22,13 +22,36 @@ class IntentProvider(IntentProviderBase):
     def __init__(self, config):
         super().__init__(config)
         self.llm = None
-        self.promot = ""
         # 导入全局缓存管理器
         from core.utils.cache.manager import cache_manager, CacheType
 
         self.cache_manager = cache_manager
         self.CacheType = CacheType
         self.history_count = 4  # 默认使用最近4条对话记录
+
+    def _tool_prompt(self, conn: "ConnectionHandler"):
+        functions = list(conn.func_handler.get_functions() or [])
+        if hasattr(conn, "mcp_client"):
+            mcp_tools = conn.mcp_client.get_available_tools()
+            if mcp_tools:
+                functions.extend(mcp_tools)
+        functions_by_name = {}
+        for function in functions:
+            name = function.get("function", {}).get("name", "")
+            if name:
+                functions_by_name[name] = function
+        functions = [functions_by_name[name] for name in sorted(functions_by_name)]
+        serialized = json.dumps(
+            functions, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        fingerprint = hashlib.sha256(serialized.encode()).hexdigest()
+        return self.get_intent_system_prompt(functions), fingerprint
+
+    @staticmethod
+    def _intent_cache_key(device_id: str, text: str, tool_fingerprint: str) -> str:
+        return hashlib.md5(
+            f"{device_id}\0{tool_fingerprint}\0{text}".encode()
+        ).hexdigest()
 
     def get_intent_system_prompt(self, functions_list: str) -> str:
         """
@@ -154,8 +177,8 @@ class IntentProvider(IntentProviderBase):
         model_info = getattr(self.llm, "model_name", str(self.llm.__class__.__name__))
         logger.bind(tag=TAG).debug(f"使用意图识别模型: {model_info}")
 
-        # 计算缓存键
-        cache_key = hashlib.md5((conn.device_id + text).encode()).hexdigest()
+        prompt, tool_fingerprint = self._tool_prompt(conn)
+        cache_key = self._intent_cache_key(conn.device_id, text, tool_fingerprint)
 
         # 检查缓存
         cached_intent = self.cache_manager.get(self.CacheType.INTENT, cache_key)
@@ -166,20 +189,9 @@ class IntentProvider(IntentProviderBase):
             )
             return cached_intent
 
-        if self.promot == "":
-            functions = conn.func_handler.get_functions()
-            if hasattr(conn, "mcp_client"):
-                mcp_tools = conn.mcp_client.get_available_tools()
-                if mcp_tools is not None and len(mcp_tools) > 0:
-                    if functions is None:
-                        functions = []
-                    functions.extend(mcp_tools)
-
-            self.promot = self.get_intent_system_prompt(functions)
-
         music_config = initialize_music_handler(conn)
         music_file_names = music_config["music_file_names"]
-        prompt_music = f"{self.promot}\n<musicNames>{music_file_names}\n</musicNames>"
+        prompt_music = f"{prompt}\n<musicNames>{music_file_names}\n</musicNames>"
 
         home_assistant_cfg = conn.config["plugins"].get("home_assistant")
         if home_assistant_cfg:

@@ -10,12 +10,65 @@ from core.connection import ConnectionHandler
 from core.handle.sendAudioHandle import sendAudioMessage, send_tts_message
 from core.handle.textHandler.mcpMessageHandler import McpTextMessageHandler
 from core.providers.tts.dto.dto import SentenceType
+from core.providers.intent.intent_llm.intent_llm import IntentProvider
 from core.providers.tools.device_mcp.mcp_executor import DeviceMCPExecutor
 from core.providers.tools.device_mcp.mcp_handler import MCPClient, handle_mcp_message
 from plugins_func.register import Action
 
 
 class NeteaseMcpNotificationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_intent_prompt_and_cache_are_scoped_by_current_tool_set(self):
+        intent = IntentProvider.__new__(IntentProvider)
+        with_login = MCPClient()
+        await with_login.add_tool(
+            {
+                "name": "self.netease_music.login",
+                "description": "query login",
+                "inputSchema": {"type": "object", "properties": {}},
+            }
+        )
+        base_functions = [{"type": "function", "function": {"name": "base"}}]
+        base_handler = SimpleNamespace(get_functions=lambda: base_functions)
+        conn_without = SimpleNamespace(func_handler=base_handler)
+        conn_with = SimpleNamespace(func_handler=base_handler, mcp_client=with_login)
+
+        prompt_without, fingerprint_without = intent._tool_prompt(conn_without)
+        prompt_with, fingerprint_with = intent._tool_prompt(conn_with)
+        duplicate_handler = SimpleNamespace(
+            get_functions=lambda: list(reversed(base_functions + with_login.get_available_tools()))
+        )
+        prompt_duplicate, fingerprint_duplicate = intent._tool_prompt(
+            SimpleNamespace(func_handler=duplicate_handler, mcp_client=with_login)
+        )
+
+        self.assertNotIn("self_netease_music_login", prompt_without)
+        self.assertIn("self_netease_music_login", prompt_with)
+        self.assertEqual(1, prompt_duplicate.count("函数名: self_netease_music_login"))
+        self.assertEqual(prompt_with, prompt_duplicate)
+        self.assertEqual(fingerprint_with, fingerprint_duplicate)
+        self.assertNotEqual(fingerprint_without, fingerprint_with)
+        old_key = intent._intent_cache_key("device", "我登录了吗", fingerprint_without)
+        new_key = intent._intent_cache_key("device", "我登录了吗", fingerprint_with)
+        self.assertNotEqual(old_key, new_key)
+
+    async def test_login_tool_description_requires_status_check_before_account_claims(self):
+        client = MCPClient()
+
+        await client.add_tool({
+            "name": "self.netease_music.login",
+            "description": "Log in to NetEase Cloud Music on this device.",
+            "inputSchema": {"type": "object", "properties": {}},
+        })
+
+        description = client.tools["self_netease_music_login"]["description"]
+        self.assertIn("查询当前登录状态", description)
+        self.assertIn("会员权益", description)
+        self.assertIn("必须先调用", description)
+        self.assertIn("不得猜测", description)
+        self.assertIn("歌曲下载失败", description)
+        self.assertIn("版权限制", description)
+        self.assertIn("设备通用状态", description)
+
     async def test_logout_tool_description_includes_qr_session_cancellation(self):
         client = MCPClient()
 

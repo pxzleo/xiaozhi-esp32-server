@@ -91,14 +91,21 @@ def schedule_netease_briefing_resume(
 
 
 def _device_tool_description(name: str, description: str) -> str:
-    if name != "self.netease_music.logout":
-        return description
-    return (
-        f"{description}\n"
-        "当用户要求关闭或隐藏网易云登录二维码、取消本次扫码时，也必须调用本工具。"
-        "本工具会取消当前扫码会话并关闭二维码；不要调整屏幕亮度，"
-        "也不要在未调用本工具时声称二维码已经关闭。"
-    )
+    if name == "self.netease_music.login":
+        return (
+            f"{description}\n"
+            "本工具也用于查询当前登录状态。用户询问是否已登录、表示自己有会员权益，"
+            "或需要判断歌曲不可播放是否与账号登录有关时，必须先调用本工具核实；"
+            "不得猜测账号未登录，也不得把歌曲下载失败、版权限制或设备通用状态当作登录证据。"
+        )
+    if name == "self.netease_music.logout":
+        return (
+            f"{description}\n"
+            "当用户要求关闭或隐藏网易云登录二维码、取消本次扫码时，也必须调用本工具。"
+            "本工具会取消当前扫码会话并关闭二维码；不要调整屏幕亮度，"
+            "也不要在未调用本工具时声称二维码已经关闭。"
+        )
+    return description
 
 
 class MCPClient:
