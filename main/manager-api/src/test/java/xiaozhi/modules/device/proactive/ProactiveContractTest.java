@@ -36,6 +36,11 @@ class ProactiveContractTest {
         try (var stream = getClass().getResourceAsStream("/db/changelog/202608081500.sql")) {
             String sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
             assertTrue(sql.contains("ADD COLUMN `previous_daily_limit`"));
+            assertTrue(sql.contains("WHERE `mode` = 'TODAY_SILENT' AND `previous_daily_limit` IS NULL"));
+            assertTrue(sql.contains("WHEN 'CONSERVATIVE' THEN 1"));
+            assertTrue(sql.contains("WHEN 'ACTIVE' THEN 3"));
+            assertTrue(sql.contains("WHEN 'AGGRESSIVE' THEN 5"));
+            assertTrue(sql.contains("ELSE 5"));
             assertTrue(sql.contains("DROP INDEX `uk_ai_device_proactive_preference_mac`"));
             assertTrue(sql.contains("ADD KEY `idx_ai_device_proactive_preference_mac`"));
             assertTrue(sql.contains("ADD UNIQUE KEY `uk_ai_device_proactive_event_device_event` (`device_id`, `event_id`)"));
@@ -99,5 +104,16 @@ class ProactiveContractTest {
         String restoreSql = restore.getAnnotation(Update.class).value()[0];
         assertTrue(restoreSql.contains("daily_limit = COALESCE(previous_daily_limit, 5)"));
         assertTrue(restoreSql.contains("previous_daily_limit = NULL"));
+
+        Method lockedFind = ProactiveEventDao.class.getMethod("selectByDeviceAndEventIdForUpdate",
+                String.class, String.class);
+        String lockedFindSql = lockedFind.getAnnotation(org.apache.ibatis.annotations.Select.class).value()[0];
+        assertTrue(lockedFindSql.contains("device_id = #{deviceId} AND event_id = #{eventId}"));
+        assertTrue(lockedFindSql.contains("FOR UPDATE"));
+        assertFalse(lockedFindSql.contains(" OR "));
+
+        Method insertIfAbsent = ProactiveEventDao.class.getMethod("insertIfAbsent", ProactiveEventEntity.class);
+        String insertSql = insertIfAbsent.getAnnotation(Insert.class).value()[0];
+        assertTrue(insertSql.contains("ON DUPLICATE KEY UPDATE id = id"));
     }
 }

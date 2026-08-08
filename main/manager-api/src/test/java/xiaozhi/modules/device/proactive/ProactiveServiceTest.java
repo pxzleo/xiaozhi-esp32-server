@@ -57,6 +57,7 @@ class ProactiveServiceTest {
         device.setUserId(7L);
         when(deviceDao.selectList(any())).thenReturn(List.of(device));
         when(deviceDao.selectById("device-1")).thenReturn(device);
+        when(deviceDao.selectByIdForUpdate("device-1")).thenReturn(device);
     }
 
     @Test
@@ -120,14 +121,29 @@ class ProactiveServiceTest {
     void eventUpsertIsIdempotentAndResponseContainsParsedControlledJson() {
         EventUpsert request = eventRequest();
         ProactiveEventEntity stored = eventEntity(request);
-        when(eventDao.selectByDeviceAndEventId("device-1", request.getEventId()))
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", request.getEventId()))
                 .thenReturn(stored);
 
         var view = service.upsertEvent(request);
 
-        verify(eventDao, never()).insert(any(ProactiveEventEntity.class));
+        verify(eventDao, never()).insertIfAbsent(any(ProactiveEventEntity.class));
+        verify(deviceDao).selectByIdForUpdate("device-1");
         assertEquals("hello", view.payload().get("message"));
         assertFalse(view.payload().containsKey("reasoning"));
+    }
+
+    @Test
+    void concurrentIdenticalInsertNoOpReadsAuthoritativeRowAndSucceeds() {
+        EventUpsert request = eventRequest();
+        ProactiveEventEntity authoritative = eventEntity(request);
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(null, authoritative);
+
+        var view = service.upsertEvent(request);
+
+        assertEquals("event-1", view.eventId());
+        verify(eventDao).insertIfAbsent(any(ProactiveEventEntity.class));
+        verify(eventDao, times(2)).selectByDeviceAndEventIdForUpdate("device-1", "event-1");
     }
 
     @Test
@@ -159,12 +175,12 @@ class ProactiveServiceTest {
         EventUpsert request = eventRequest();
         ProactiveEventEntity stored = eventEntity(request);
         stored.setReason("different reason");
-        when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(stored);
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1")).thenReturn(stored);
 
         RenException error = assertThrows(RenException.class, () -> service.upsertEvent(request));
 
         assertEquals("event_id已存在但事件内容不一致", error.getMsg());
-        verify(eventDao, never()).insert(any(ProactiveEventEntity.class));
+        verify(eventDao, never()).insertIfAbsent(any(ProactiveEventEntity.class));
     }
 
     @Test
@@ -173,6 +189,7 @@ class ProactiveServiceTest {
         other.setId("device-2");
         other.setMacAddress("AA:BB:CC:DD:EE:FF");
         other.setUserId(8L);
+        when(deviceDao.selectByIdForUpdate("device-2")).thenReturn(other);
         EventUpsert first = eventRequest();
         EventUpsert second = eventRequest();
         second.setMacAddress(other.getMacAddress());
@@ -181,13 +198,13 @@ class ProactiveServiceTest {
         secondStored.setDeviceId(other.getId());
         secondStored.setMacAddress(other.getMacAddress());
         when(deviceDao.selectList(any())).thenReturn(List.of(device), List.of(other));
-        when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(null, firstStored);
-        when(eventDao.selectByDeviceAndEventId("device-2", "event-1")).thenReturn(null, secondStored);
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1")).thenReturn(null, firstStored);
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-2", "event-1")).thenReturn(null, secondStored);
 
         service.upsertEvent(first);
         service.upsertEvent(second);
 
-        verify(eventDao, times(2)).insert(any(ProactiveEventEntity.class));
+        verify(eventDao, times(2)).insertIfAbsent(any(ProactiveEventEntity.class));
     }
 
     @Test
@@ -202,13 +219,13 @@ class ProactiveServiceTest {
         recovery.setEventType(EventType.SYSTEM);
         ProactiveEventEntity faultStored = eventEntity(fault);
         ProactiveEventEntity recoveryStored = eventEntity(recovery);
-        when(eventDao.selectByDeviceAndEventId("device-1", "fault-1")).thenReturn(null, faultStored);
-        when(eventDao.selectByDeviceAndEventId("device-1", "recovery-1")).thenReturn(null, recoveryStored);
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "fault-1")).thenReturn(null, faultStored);
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "recovery-1")).thenReturn(null, recoveryStored);
 
         service.upsertEvent(fault);
         service.upsertEvent(recovery);
 
-        verify(eventDao, times(2)).insert(any(ProactiveEventEntity.class));
+        verify(eventDao, times(2)).insertIfAbsent(any(ProactiveEventEntity.class));
     }
 
     @Test

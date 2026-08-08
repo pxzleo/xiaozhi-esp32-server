@@ -14,7 +14,6 @@ import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.dao.DuplicateKeyException;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -110,7 +109,9 @@ public class ProactiveService {
     public EventView upsertEvent(EventUpsert request) {
         DeviceEntity device = resolveByMac(request.getMacAddress());
         validatePayload(request.getPayload(), EVENT_PAYLOAD_KEYS, "event payload");
-        ProactiveEventEntity existing = eventDao.selectByDeviceAndEventId(device.getId(), request.getEventId());
+        if (deviceDao.selectByIdForUpdate(device.getId()) == null) throw new RenException("设备不存在");
+        ProactiveEventEntity existing = eventDao.selectByDeviceAndEventIdForUpdate(
+                device.getId(), request.getEventId());
         if (existing != null) {
             verifyIdempotentEvent(existing, request);
             return toEvent(existing);
@@ -132,17 +133,11 @@ public class ProactiveService {
         entity.setDeliveryStatus(DeliveryStatus.PENDING.name());
         entity.setOutcome(Outcome.NONE.name());
         entity.setUpdatedAt(now);
-        try {
-            eventDao.insert(entity);
-        } catch (DuplicateKeyException exception) {
-            ProactiveEventEntity concurrent = eventDao.selectByDeviceAndEventId(
-                    device.getId(), request.getEventId());
-            if (concurrent == null) throw new RenException("主动事件写入冲突", exception);
-            verifyIdempotentEvent(concurrent, request);
-            return toEvent(concurrent);
-        }
-        ProactiveEventEntity stored = eventDao.selectByDeviceAndEventId(device.getId(), request.getEventId());
+        eventDao.insertIfAbsent(entity);
+        ProactiveEventEntity stored = eventDao.selectByDeviceAndEventIdForUpdate(
+                device.getId(), request.getEventId());
         if (stored == null) throw new RenException("主动事件写入失败");
+        verifyIdempotentEvent(stored, request);
         return toEvent(stored);
     }
 

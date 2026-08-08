@@ -7,6 +7,7 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
+import org.apache.ibatis.annotations.Insert;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 
@@ -18,6 +19,25 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             """)
     ProactiveEventEntity selectByDeviceAndEventId(@Param("deviceId") String deviceId,
             @Param("eventId") String eventId);
+
+    @Select("""
+            SELECT * FROM ai_device_proactive_event
+            WHERE device_id = #{deviceId} AND event_id = #{eventId}
+            FOR UPDATE
+            """)
+    ProactiveEventEntity selectByDeviceAndEventIdForUpdate(@Param("deviceId") String deviceId,
+            @Param("eventId") String eventId);
+
+    @Insert("""
+            INSERT INTO ai_device_proactive_event
+                (device_id, mac_address, event_id, topic, priority, reason, event_type, payload,
+                 created_at, expires_at, dedupe_key, requires_response, delivery_status, outcome, updated_at)
+            VALUES (#{e.deviceId}, #{e.macAddress}, #{e.eventId}, #{e.topic}, #{e.priority}, #{e.reason},
+                    #{e.eventType}, CAST(#{e.payload} AS JSON), #{e.createdAt}, #{e.expiresAt}, #{e.dedupeKey},
+                    #{e.requiresResponse}, #{e.deliveryStatus}, #{e.outcome}, #{e.updatedAt})
+            ON DUPLICATE KEY UPDATE id = id
+            """)
+    int insertIfAbsent(@Param("e") ProactiveEventEntity event);
 
     @Update("""
             UPDATE ai_device_proactive_event
