@@ -11,8 +11,54 @@ export const PROACTIVE_EVENT_TYPES = [
 ];
 export const PROACTIVE_DELIVERY_STATUSES = ['pending', 'delivered', 'failed', 'expired', 'dismissed'];
 
+export class DeviceRequestGate {
+  constructor() {
+    this.generation = 0;
+    this.deviceId = '';
+    this.channelGenerations = new Map();
+  }
+
+  activate(deviceId) {
+    this.generation += 1;
+    this.deviceId = deviceId || '';
+    this.channelGenerations.clear();
+    return this.snapshot();
+  }
+
+  begin(channel = 'default') {
+    const channelGeneration = (this.channelGenerations.get(channel) || 0) + 1;
+    this.channelGenerations.set(channel, channelGeneration);
+    return this.snapshot(channel, channelGeneration);
+  }
+
+  snapshot(channel = 'default', channelGeneration = this.channelGenerations.get(channel) || 0) {
+    return { generation: this.generation, deviceId: this.deviceId, channel, channelGeneration };
+  }
+
+  isCurrent(request) {
+    return Boolean(request && request.deviceId) &&
+      request.generation === this.generation &&
+      request.deviceId === this.deviceId &&
+      request.channelGeneration === (this.channelGenerations.get(request.channel) || 0);
+  }
+
+  invalidate() {
+    this.generation += 1;
+    this.deviceId = '';
+    this.channelGenerations.clear();
+  }
+}
+
 export function defaultDailyLimit(mode) {
   return { conservative: 1, active: 3, aggressive: 5 }[mode] || 1;
+}
+
+export function belongsToDevice(value, deviceId) {
+  return Boolean(value && deviceId && value.device_id === deviceId);
+}
+
+export function listBelongsToDevice(values, deviceId) {
+  return Array.isArray(values) && values.every(value => belongsToDevice(value, deviceId));
 }
 
 export function normalizeTime(value) {

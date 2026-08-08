@@ -2,12 +2,11 @@
   <el-dialog
     :title="$t('proactive.title')"
     :visible="visible"
-    width="1120px"
+    width="calc(100vw - 32px)"
     top="5vh"
     class="proactive-dialog"
     :close-on-click-modal="false"
-    @open="handleOpen"
-    @close="$emit('update:visible', false)"
+    @close="handleClose"
   >
     <div class="device-context">
       <div>
@@ -20,6 +19,7 @@
     <el-tabs v-model="activeTab" @tab-click="handleTabChange">
       <el-tab-pane :label="$t('proactive.settings')" name="settings">
         <div v-loading="preferenceLoading" class="section-body settings-body">
+          <el-alert v-if="preferenceError" :title="preferenceError" type="error" :closable="false" show-icon />
           <div v-if="isSilentToday" class="silent-notice">
             <span>{{ $t('proactive.silentUntil', { time: formatTime(preference.silent_until) }) }}</span>
           </div>
@@ -71,10 +71,10 @@
             </el-form-item>
           </el-form>
           <div class="settings-actions">
-            <el-button type="primary" size="small" :loading="saving" @click="savePreference">
+            <el-button type="primary" size="small" :loading="saving" :disabled="!loadedDeviceId || preferenceLoading || silencing" @click="savePreference">
               {{ $t('proactive.save') }}
             </el-button>
-            <el-button size="small" :disabled="isSilentToday" :loading="silencing" @click="silentToday">
+            <el-button size="small" :disabled="!loadedDeviceId || preferenceLoading || saving || isSilentToday" :loading="silencing" @click="silentToday">
               {{ $t('proactive.silentToday') }}
             </el-button>
           </div>
@@ -83,6 +83,7 @@
 
       <el-tab-pane :label="$t('proactive.events')" name="events">
         <div class="section-body">
+          <el-alert v-if="eventsError" :title="eventsError" type="error" :closable="false" show-icon />
           <div class="filter-row">
             <el-select v-model="eventFilters.topic" clearable size="small" :placeholder="$t('proactive.topic')">
               <el-option v-for="topic in topics" :key="topic" :label="enumLabel('topic', topic)" :value="topic" />
@@ -97,7 +98,8 @@
               {{ $t('proactive.filter') }}
             </el-button>
           </div>
-          <el-table v-loading="eventsLoading" :data="events" size="small" :empty-text="$t('proactive.noEvents')">
+          <div class="table-scroll">
+          <el-table v-loading="eventsLoading" :data="events" size="small" class="audit-table" :empty-text="$t('proactive.noEvents')">
             <el-table-column :label="$t('proactive.createdAt')" width="160">
               <template slot-scope="scope">{{ formatTime(scope.row.created_at) }}</template>
             </el-table-column>
@@ -115,6 +117,7 @@
               <template slot-scope="scope">{{ enumLabel('outcome', scope.row.outcome) }}</template>
             </el-table-column>
           </el-table>
+          </div>
           <div class="pagination-row">
             <el-pagination
               :current-page="eventFilters.page"
@@ -132,7 +135,9 @@
 
       <el-tab-pane :label="$t('proactive.habits')" name="habits">
         <div class="section-body">
-          <el-table v-loading="habitsLoading" :data="habits" size="small" :empty-text="$t('proactive.noHabits')">
+          <el-alert v-if="habitsError" :title="habitsError" type="error" :closable="false" show-icon />
+          <div class="table-scroll">
+          <el-table v-loading="habitsLoading" :data="habits" size="small" class="habits-table" :empty-text="$t('proactive.noHabits')">
             <el-table-column :label="$t('proactive.habitType')" width="160">
               <template slot-scope="scope">{{ enumLabel('habitType', scope.row.habit_type) }}</template>
             </el-table-column>
@@ -152,6 +157,7 @@
               </template>
             </el-table-column>
           </el-table>
+          </div>
         </div>
       </el-tab-pane>
     </el-tabs>
@@ -166,8 +172,11 @@ import {
   PROACTIVE_EVENT_TYPES,
   PROACTIVE_MODES,
   PROACTIVE_TOPICS,
+  DeviceRequestGate,
+  belongsToDevice,
   createPreferenceForm,
   defaultDailyLimit,
+  listBelongsToDevice,
   preferencePayload,
   validatePreference,
 } from '@/utils/proactiveAssistant.mjs';
@@ -183,6 +192,8 @@ export default {
     return {
       activeTab: 'settings',
       preference: {},
+      loadedDeviceId: '',
+      preferenceError: '',
       form: createPreferenceForm(),
       preferenceLoading: false,
       saving: false,
@@ -194,9 +205,12 @@ export default {
       events: [],
       eventTotal: 0,
       eventsLoading: false,
+      eventsError: '',
       eventFilters: { topic: '', event_type: '', delivery_status: '', page: 1, limit: 20 },
       habits: [],
       habitsLoading: false,
+      habitsError: '',
+      requestGate: new DeviceRequestGate(),
     };
   },
   computed: {
@@ -207,13 +221,54 @@ export default {
       return { conservative: 1, active: 3, aggressive: 5 }[this.form.mode] || 1;
     },
   },
+  watch: {
+    visible(isVisible) {
+      if (isVisible) this.initializeForDevice();
+      else this.invalidateAndReset();
+    },
+    'device.device_id'(deviceId, previousDeviceId) {
+      if (this.visible && deviceId !== previousDeviceId) this.initializeForDevice();
+    },
+  },
+  mounted() {
+    if (this.visible) this.initializeForDevice();
+  },
   methods: {
-    handleOpen() {
+    resetDialogState() {
       this.activeTab = 'settings';
+      this.preference = {};
+      this.loadedDeviceId = '';
+      this.preferenceError = '';
+      this.form = createPreferenceForm();
+      this.preferenceLoading = false;
+      this.saving = false;
+      this.silencing = false;
       this.eventFilters = { topic: '', event_type: '', delivery_status: '', page: 1, limit: 20 };
       this.events = [];
+      this.eventTotal = 0;
+      this.eventsLoading = false;
+      this.eventsError = '';
       this.habits = [];
+      this.habitsLoading = false;
+      this.habitsError = '';
+    },
+    initializeForDevice() {
+      const deviceId = this.device.device_id || '';
+      this.requestGate.activate(deviceId);
+      this.resetDialogState();
+      if (!deviceId) {
+        this.preferenceError = this.$t('proactive.loadPreferenceFailed');
+        return;
+      }
       this.loadPreference();
+    },
+    invalidateAndReset() {
+      this.requestGate.invalidate();
+      this.resetDialogState();
+    },
+    handleClose() {
+      this.invalidateAndReset();
+      this.$emit('update:visible', false);
     },
     handleTabChange() {
       if (this.activeTab === 'events') this.loadEvents();
@@ -226,15 +281,38 @@ export default {
       return error && error.data && error.data.msg ? error.data.msg : this.$t(fallbackKey);
     },
     loadPreference() {
+      const request = this.requestGate.begin('preference');
+      const deviceId = request.deviceId;
+      this.preference = {};
+      this.loadedDeviceId = '';
+      this.preferenceError = '';
+      this.form = createPreferenceForm();
       this.preferenceLoading = true;
-      Api.proactive.getPreference(this.device.device_id, response => {
+      Api.proactive.getPreference(deviceId, response => {
+        if (!this.requestGate.isCurrent(request)) return;
+        const preference = this.responseData(response);
+        if (!belongsToDevice(preference, deviceId)) {
+          this.handlePreferenceFailure(null, 'proactive.loadPreferenceFailed');
+          return;
+        }
         this.preferenceLoading = false;
-        this.preference = this.responseData(response) || {};
+        this.preference = preference;
         this.form = createPreferenceForm(this.preference);
+        this.loadedDeviceId = deviceId;
       }, error => {
-        this.preferenceLoading = false;
-        this.$message.error(this.errorMessage(error, 'proactive.loadPreferenceFailed'));
+        if (!this.requestGate.isCurrent(request)) return;
+        this.handlePreferenceFailure(error, 'proactive.loadPreferenceFailed');
       });
+    },
+    handlePreferenceFailure(error, fallbackKey) {
+      this.preferenceLoading = false;
+      this.saving = false;
+      this.silencing = false;
+      this.preference = {};
+      this.loadedDeviceId = '';
+      this.form = createPreferenceForm();
+      this.preferenceError = this.errorMessage(error, fallbackKey);
+      this.$message.error(this.preferenceError);
     },
     handleModeChange(mode) {
       this.form.daily_limit = defaultDailyLimit(mode);
@@ -244,37 +322,60 @@ export default {
       this.form.quiet_end = '';
     },
     savePreference() {
+      const deviceId = this.loadedDeviceId;
+      if (this.saving || this.silencing || !deviceId || deviceId !== this.requestGate.deviceId) return;
       const invalidField = validatePreference(this.form);
       if (invalidField) {
         this.$message.warning(this.$t(`proactive.validation.${invalidField}`));
         return;
       }
+      const request = this.requestGate.begin('preference');
       this.saving = true;
-      Api.proactive.updatePreference(this.device.device_id, preferencePayload(this.form), response => {
+      Api.proactive.updatePreference(deviceId, preferencePayload(this.form), response => {
+        if (!this.requestGate.isCurrent(request)) return;
+        const preference = this.responseData(response);
+        if (!belongsToDevice(preference, deviceId)) {
+          this.handlePreferenceFailure(null, 'proactive.saveFailed');
+          return;
+        }
         this.saving = false;
-        this.preference = this.responseData(response) || {};
+        this.preferenceError = '';
+        this.preference = preference;
         this.form = createPreferenceForm(this.preference);
+        this.loadedDeviceId = deviceId;
         this.$message.success(this.$t('proactive.saveSuccess'));
       }, error => {
-        this.saving = false;
-        this.$message.error(this.errorMessage(error, 'proactive.saveFailed'));
+        if (!this.requestGate.isCurrent(request)) return;
+        this.handlePreferenceFailure(error, 'proactive.saveFailed');
       });
     },
     silentToday() {
+      const deviceId = this.loadedDeviceId;
+      if (this.saving || this.silencing || !deviceId || deviceId !== this.requestGate.deviceId) return;
       this.$confirm(this.$t('proactive.silentTodayConfirm'), this.$t('message.warning'), {
         confirmButtonText: this.$t('button.ok'),
         cancelButtonText: this.$t('button.cancel'),
         type: 'warning',
       }).then(() => {
+        if (deviceId !== this.requestGate.deviceId) return;
+        const request = this.requestGate.begin('preference');
         this.silencing = true;
-        Api.proactive.silentToday(this.device.device_id, response => {
+        Api.proactive.silentToday(deviceId, response => {
+          if (!this.requestGate.isCurrent(request)) return;
+          const preference = this.responseData(response);
+          if (!belongsToDevice(preference, deviceId)) {
+            this.handlePreferenceFailure(null, 'proactive.silentTodayFailed');
+            return;
+          }
           this.silencing = false;
-          this.preference = this.responseData(response) || {};
+          this.preferenceError = '';
+          this.preference = preference;
           this.form = createPreferenceForm(this.preference);
+          this.loadedDeviceId = deviceId;
           this.$message.success(this.$t('proactive.silentTodaySuccess'));
         }, error => {
-          this.silencing = false;
-          this.$message.error(this.errorMessage(error, 'proactive.silentTodayFailed'));
+          if (!this.requestGate.isCurrent(request)) return;
+          this.handlePreferenceFailure(error, 'proactive.silentTodayFailed');
         });
       }).catch(() => {});
     },
@@ -283,15 +384,36 @@ export default {
       this.loadEvents();
     },
     loadEvents() {
+      const request = this.requestGate.begin('events');
+      if (!request.deviceId) {
+        this.events = [];
+        this.eventTotal = 0;
+        this.eventsLoading = false;
+        this.eventsError = this.$t('proactive.loadEventsFailed');
+        return;
+      }
       this.eventsLoading = true;
-      Api.proactive.getEvents({ ...this.eventFilters, device_id: this.device.device_id }, response => {
+      this.eventsError = '';
+      Api.proactive.getEvents({ ...this.eventFilters, device_id: request.deviceId }, response => {
+        if (!this.requestGate.isCurrent(request)) return;
         this.eventsLoading = false;
         const data = this.responseData(response) || {};
-        this.events = Array.isArray(data.list) ? data.list : [];
+        if (!listBelongsToDevice(data.list, request.deviceId)) {
+          this.events = [];
+          this.eventTotal = 0;
+          this.eventsError = this.$t('proactive.loadEventsFailed');
+          this.$message.error(this.eventsError);
+          return;
+        }
+        this.events = data.list;
         this.eventTotal = Number(data.total) || 0;
       }, error => {
+        if (!this.requestGate.isCurrent(request)) return;
         this.eventsLoading = false;
-        this.$message.error(this.errorMessage(error, 'proactive.loadEventsFailed'));
+        this.events = [];
+        this.eventTotal = 0;
+        this.eventsError = this.errorMessage(error, 'proactive.loadEventsFailed');
+        this.$message.error(this.eventsError);
       });
     },
     handleEventSizeChange(limit) {
@@ -304,26 +426,53 @@ export default {
       this.loadEvents();
     },
     loadHabits() {
+      const request = this.requestGate.begin('habits');
+      if (!request.deviceId) {
+        this.habits = [];
+        this.habitsLoading = false;
+        this.habitsError = this.$t('proactive.loadHabitsFailed');
+        return;
+      }
       this.habitsLoading = true;
-      Api.proactive.getHabits(this.device.device_id, response => {
+      this.habitsError = '';
+      Api.proactive.getHabits(request.deviceId, response => {
+        if (!this.requestGate.isCurrent(request)) return;
         this.habitsLoading = false;
         const data = this.responseData(response);
-        this.habits = Array.isArray(data) ? data : [];
+        if (!listBelongsToDevice(data, request.deviceId)) {
+          this.habits = [];
+          this.habitsError = this.$t('proactive.loadHabitsFailed');
+          this.$message.error(this.habitsError);
+          return;
+        }
+        this.habits = data;
       }, error => {
+        if (!this.requestGate.isCurrent(request)) return;
         this.habitsLoading = false;
-        this.$message.error(this.errorMessage(error, 'proactive.loadHabitsFailed'));
+        this.habits = [];
+        this.habitsError = this.errorMessage(error, 'proactive.loadHabitsFailed');
+        this.$message.error(this.habitsError);
       });
     },
     deleteHabit(habit) {
+      const deviceId = this.requestGate.deviceId;
+      if (!deviceId) return;
       this.$confirm(this.$t('proactive.deleteHabitConfirm'), this.$t('message.warning'), {
         confirmButtonText: this.$t('button.ok'),
         cancelButtonText: this.$t('button.cancel'),
         type: 'warning',
       }).then(() => {
+        if (deviceId !== this.requestGate.deviceId) return;
+        const request = this.requestGate.begin('habits');
         Api.proactive.deleteHabit(habit.id, () => {
+          if (!this.requestGate.isCurrent(request)) return;
           this.$message.success(this.$t('proactive.deleteHabitSuccess'));
           this.loadHabits();
-        }, error => this.$message.error(this.errorMessage(error, 'proactive.deleteHabitFailed')));
+        }, error => {
+          if (!this.requestGate.isCurrent(request)) return;
+          this.habitsError = this.errorMessage(error, 'proactive.deleteHabitFailed');
+          this.$message.error(this.habitsError);
+        });
       }).catch(() => {});
     },
     enumLabel(group, value) {
@@ -362,6 +511,7 @@ export default {
 
 .section-body { min-height: 430px; }
 .settings-body { position: relative; padding: 12px 24px 0 0; }
+.section-body > .el-alert { margin-bottom: 14px; }
 .silent-notice {
   margin: 0 0 16px 150px;
   padding: 9px 12px;
@@ -375,12 +525,43 @@ export default {
 .inline-help { margin-left: 10px; }
 .time-separator { margin: 0 8px; color: #909399; }
 .settings-actions { padding: 12px 0 0 150px; border-top: 1px solid #ebeef5; }
-.filter-row { display: flex; gap: 10px; margin-bottom: 14px; }
-.filter-row .el-select { width: 190px; }
-.pagination-row { display: flex; justify-content: flex-end; padding-top: 16px; }
+.filter-row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.filter-row .el-select { width: 190px; max-width: 100%; }
+.table-scroll { max-width: 100%; overflow-x: auto; }
+.audit-table { min-width: 865px; }
+.habits-table { min-width: 880px; }
+.pagination-row { display: flex; justify-content: flex-end; padding-top: 16px; overflow-x: auto; }
 .delete-button { color: #f56c6c; }
 
-::v-deep .el-dialog__body { padding: 12px 24px 20px; }
+.proactive-dialog ::v-deep .el-dialog {
+  max-width: 1120px;
+  min-width: 320px;
+  max-height: 90vh;
+  margin-bottom: 0;
+}
+.proactive-dialog ::v-deep .el-dialog__body {
+  max-height: calc(90vh - 58px);
+  padding: 12px 24px 20px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
 ::v-deep .el-tabs__header { margin: 0 0 18px; }
 ::v-deep .el-checkbox { margin-right: 22px; }
+
+@media (max-width: 768px) {
+  .device-context { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
+  .settings-body { padding-right: 0; }
+  .silent-notice { margin-left: 0; }
+  .settings-actions { padding-left: 0; }
+  .inline-help { display: block; margin: 4px 0 0; }
+  .filter-row .el-select { flex: 1 1 180px; width: auto; }
+  .filter-row .el-button { flex: 0 0 auto; }
+  .pagination-row { justify-content: flex-start; }
+
+  .proactive-dialog ::v-deep .el-dialog__body { padding: 10px 14px 16px; }
+  ::v-deep .el-form-item__label { float: none; width: auto !important; padding: 0 0 6px; line-height: 22px; }
+  ::v-deep .el-form-item__content { margin-left: 0 !important; }
+  ::v-deep .el-radio-group { display: flex; flex-wrap: wrap; }
+  ::v-deep .el-time-picker { width: calc(50% - 16px); min-width: 130px; }
+}
 </style>

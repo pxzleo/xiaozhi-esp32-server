@@ -2,11 +2,47 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  DeviceRequestGate,
+  belongsToDevice,
   buildEventQuery,
   createPreferenceForm,
+  listBelongsToDevice,
   preferencePayload,
   validatePreference,
 } from '../src/utils/proactiveAssistant.mjs';
+
+test('rejects responses from an older generation or another device', () => {
+  const gate = new DeviceRequestGate();
+  gate.activate('device-a');
+  const firstDeviceRequest = gate.begin('preference');
+  assert.equal(gate.isCurrent(firstDeviceRequest), true);
+
+  gate.activate('device-b');
+  const secondDeviceRequest = gate.begin('preference');
+  assert.equal(gate.isCurrent(firstDeviceRequest), false);
+  assert.equal(gate.isCurrent(secondDeviceRequest), true);
+
+  gate.invalidate();
+  assert.equal(gate.isCurrent(secondDeviceRequest), false);
+});
+
+test('rejects an older response in the same request channel', () => {
+  const gate = new DeviceRequestGate();
+  gate.activate('device-a');
+  const olderEvents = gate.begin('events');
+  const newerEvents = gate.begin('events');
+
+  assert.equal(gate.isCurrent(olderEvents), false);
+  assert.equal(gate.isCurrent(newerEvents), true);
+});
+
+test('requires response records to belong to the requested device', () => {
+  assert.equal(belongsToDevice({ device_id: 'device-a' }, 'device-a'), true);
+  assert.equal(belongsToDevice({ device_id: 'device-b' }, 'device-a'), false);
+  assert.equal(listBelongsToDevice([], 'device-a'), true);
+  assert.equal(listBelongsToDevice([{ device_id: 'device-a' }], 'device-a'), true);
+  assert.equal(listBelongsToDevice([{ device_id: 'device-b' }], 'device-a'), false);
+});
 
 test('normalizes server preference without exposing today_silent as a permanent mode', () => {
   const form = createPreferenceForm({
