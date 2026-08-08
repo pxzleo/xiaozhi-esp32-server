@@ -4,6 +4,36 @@
     <div class="main-wrapper">
       <div class="content-panel">
         <div class="content-area">
+          <el-card class="classifier-card" shadow="never">
+            <div class="classifier-header">
+              <div>
+                <h3>{{ $t('paramManagement.classifierTitle') }}</h3>
+                <p>{{ $t('paramManagement.classifierDescription') }}</p>
+              </div>
+              <el-tag :type="classifierAvailable ? 'success' : 'danger'">
+                {{ $t(classifierAvailable
+                  ? 'paramManagement.classifierAvailable'
+                  : 'paramManagement.classifierUnavailable') }}
+              </el-tag>
+            </div>
+            <el-alert v-if="classifierError" :title="classifierError" type="error" :closable="false" show-icon />
+            <el-alert v-if="classifierModelsError" :title="classifierModelsError" type="error" :closable="false" show-icon />
+            <div class="classifier-controls" v-loading="classifierLoading">
+              <el-select v-model="classifierModelId" filterable
+                :placeholder="$t('paramManagement.classifierPlaceholder')" class="classifier-select">
+                <el-option v-for="model in classifierModels" :key="model.value"
+                  :label="model.label" :value="model.value" />
+              </el-select>
+              <CustomButton type="confirm" :loading="classifierSaving" @click="saveClassifierModel">
+                {{ $t('paramManagement.classifierSave') }}
+              </CustomButton>
+              <CustomButton :loading="classifierTesting" :disabled="!classifierPersistedId || classifierModelId !== classifierPersistedId"
+                @click="testClassifierModel">
+                {{ $t('paramManagement.classifierTest') }}
+              </CustomButton>
+            </div>
+            <div class="classifier-help">{{ $t('paramManagement.classifierNoFallback') }}</div>
+          </el-card>
           <el-card class="params-card" shadow="never">
             <div class="operation-header">
               <h2 class="page-title">{{ $t('paramManagement.pageTitle') }}</h2>
@@ -97,6 +127,7 @@ import VersionFooter from "@/components/VersionFooter.vue";
 import CustomButton from "@/components/CustomButton.vue";
 import CustomTable from "@/components/CustomTable.vue";
 import CustomDialog from "@/components/CustomDialog.vue";
+import { classifierModelId, validClassifierModelId } from '@/utils/proactiveAssistant.mjs';
 
 export default {
   components: { HeaderBar, ParamDialog, VersionFooter, CustomButton, CustomTable, CustomDialog },
@@ -120,15 +151,99 @@ export default {
         valueType: "string",
         remark: ""
       },
-      tableColumns: []
+      tableColumns: [],
+      classifierModelId: '',
+      classifierPersistedId: '',
+      classifierModels: [],
+      classifierAvailable: false,
+      classifierLoading: false,
+      classifierSaving: false,
+      classifierTesting: false,
+      classifierError: '',
+      classifierModelsError: ''
     };
   },
   created() {
     this.initTableColumns();
     this.fetchParams();
+    this.loadClassifierModels();
+    this.loadClassifierModel();
 
   },
   methods: {
+    classifierErrorMessage(error, fallbackKey) {
+      return error && error.data && error.data.msg ? error.data.msg : this.$t(fallbackKey);
+    },
+    loadClassifierModels() {
+      Api.model.getLlmModelCodeList('', ({ data }) => {
+        if (data.code !== 0) {
+          this.classifierModelsError = data.msg || this.$t('paramManagement.classifierModelsFailed');
+          return;
+        }
+        this.classifierModelsError = '';
+        this.classifierModels = (data.data || []).map(item => ({
+          value: item.id,
+          label: item.modelName || item.id,
+        }));
+      }, error => {
+        this.classifierModelsError = this.classifierErrorMessage(error, 'paramManagement.classifierModelsFailed');
+      });
+    },
+    loadClassifierModel() {
+      this.classifierLoading = true;
+      this.classifierError = '';
+      Api.proactive.getClassifierModel(response => {
+        this.classifierLoading = false;
+        const model = response && response.data ? response.data.data : {};
+        this.classifierModelId = classifierModelId(model);
+        this.classifierPersistedId = this.classifierModelId;
+        this.classifierAvailable = Boolean(model && model.available);
+      }, error => {
+        this.classifierLoading = false;
+        this.classifierAvailable = false;
+        this.classifierError = this.classifierErrorMessage(error, 'paramManagement.classifierLoadFailed');
+      });
+    },
+    saveClassifierModel() {
+      if (this.classifierSaving) return;
+      if (!validClassifierModelId(this.classifierModelId)) {
+        this.$message.warning(this.$t('paramManagement.classifierRequired'));
+        return;
+      }
+      this.classifierSaving = true;
+      this.classifierError = '';
+      const selectedId = this.classifierModelId.trim();
+      Api.proactive.updateClassifierModel({ model_id: selectedId }, response => {
+        this.classifierSaving = false;
+        const model = response && response.data ? response.data.data : {};
+        this.classifierModelId = classifierModelId(model);
+        this.classifierPersistedId = this.classifierModelId;
+        this.classifierAvailable = Boolean(model && model.available);
+        this.$message.success(this.$t('paramManagement.classifierSaveSuccess'));
+      }, error => {
+        this.classifierSaving = false;
+        this.classifierAvailable = false;
+        this.classifierError = this.classifierErrorMessage(error, 'paramManagement.classifierSaveFailed');
+        this.$message.error(this.classifierError);
+      });
+    },
+    testClassifierModel() {
+      if (this.classifierTesting || this.classifierModelId !== this.classifierPersistedId) return;
+      this.classifierTesting = true;
+      this.classifierError = '';
+      Api.proactive.testClassifierModel(response => {
+        this.classifierTesting = false;
+        const model = response && response.data ? response.data.data : {};
+        this.classifierAvailable = Boolean(model && model.available);
+        if (this.classifierAvailable) this.$message.success(this.$t('paramManagement.classifierTestSuccess'));
+        else this.$message.error(this.$t('paramManagement.classifierTestUnavailable'));
+      }, error => {
+        this.classifierTesting = false;
+        this.classifierAvailable = false;
+        this.classifierError = this.classifierErrorMessage(error, 'paramManagement.classifierTestFailed');
+        this.$message.error(this.classifierError);
+      });
+    },
     initTableColumns() {
       this.tableColumns = [
         {
@@ -442,6 +557,33 @@ export default {
     overflow: hidden;
   }
 }
+
+.classifier-card {
+  flex: 0 0 auto;
+  margin: 14px 20px 0;
+  border-color: #e4e7ed;
+}
+
+.classifier-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+
+  h3 { margin: 0 0 5px; color: #303133; font-size: 16px; }
+  p { margin: 0; color: #909399; font-size: 13px; }
+}
+
+.classifier-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.classifier-select { width: 360px; max-width: 100%; }
+.classifier-help { margin-top: 9px; color: #909399; font-size: 12px; }
 
 .ctrl_btn {
   display: flex;

@@ -22,6 +22,21 @@ function send(path, method, data, callback, failCallback) {
 }
 
 export default {
+  getMonitors(deviceId, callback, failCallback) {
+    return send(`/device/proactive/monitors/${encodeURIComponent(deviceId)}`, 'GET', undefined, callback, failCallback);
+  },
+  updateMonitors(deviceId, data, callback, failCallback) {
+    return send(`/device/proactive/monitors/${encodeURIComponent(deviceId)}`, 'PUT', data, callback, failCallback);
+  },
+  getClassifierModel(callback, failCallback) {
+    return send('/proactive/classifier/model', 'GET', undefined, callback, failCallback);
+  },
+  updateClassifierModel(data, callback, failCallback) {
+    return send('/proactive/classifier/model', 'PUT', data, callback, failCallback);
+  },
+  testClassifierModel(callback, failCallback) {
+    return send('/proactive/classifier/model/test', 'POST', undefined, callback, failCallback);
+  },
   getPreference(deviceId, callback, failCallback) {
     return send(`/device/proactive/preferences/${encodeURIComponent(deviceId)}`, 'GET', undefined, callback, failCallback);
   },

@@ -87,6 +87,119 @@
         </div>
       </el-tab-pane>
 
+      <el-tab-pane :label="$t('proactive.externalMonitors')" name="monitors">
+        <div v-loading="monitorsLoading" class="section-body monitor-body">
+          <el-alert v-if="monitorsError" :title="monitorsError" type="error" :closable="false" show-icon />
+          <el-form :model="monitorForm" label-width="170px" size="small">
+            <div class="monitor-heading">{{ $t('proactive.monitor.common') }}</div>
+            <el-form-item :label="$t('proactive.monitor.weatherEnabled')">
+              <el-switch v-model="monitorForm.weather.enabled" />
+            </el-form-item>
+            <el-form-item :label="$t('proactive.monitor.newsEnabled')">
+              <el-switch v-model="monitorForm.news.enabled" />
+            </el-form-item>
+            <el-form-item :label="$t('proactive.monitor.location')">
+              <el-input :value="monitorLocation" readonly class="monitor-location"
+                :placeholder="$t('proactive.monitor.locationMissing')" />
+              <div :class="['field-help', { 'monitor-error-text': !monitorLocation }]">
+                {{ monitorLocation ? $t('proactive.monitor.locationInherited') : monitorLocationErrorText }}
+              </div>
+            </el-form-item>
+            <el-form-item :label="$t('proactive.monitor.preset')">
+              <el-radio-group v-model="monitorPresetSelection" @change="handleMonitorPreset">
+                <el-radio-button label="balanced">{{ $t('proactive.monitor.preset.balanced') }}</el-radio-button>
+                <el-radio-button label="timely">{{ $t('proactive.monitor.preset.timely') }}</el-radio-button>
+                <el-radio-button label="economical">{{ $t('proactive.monitor.preset.economical') }}</el-radio-button>
+              </el-radio-group>
+              <div v-if="monitorPresetSelection === 'custom'" class="field-help">{{ $t('proactive.monitor.preset.custom') }}</div>
+            </el-form-item>
+
+            <div class="monitor-status-grid">
+              <div v-for="type in ['weather', 'news']" :key="type" class="monitor-status-panel">
+                <strong>{{ $t(`proactive.monitor.${type}`) }}</strong>
+                <dl>
+                  <dt>{{ $t('proactive.monitor.status') }}</dt><dd>{{ monitorRuntimeStatus(type) }}</dd>
+                  <dt>{{ $t('proactive.monitor.lastSuccess') }}</dt><dd>{{ formatTime(monitors[type] && monitors[type].last_success_at) }}</dd>
+                  <dt>{{ $t('proactive.monitor.nextCheck') }}</dt><dd>{{ formatTime(monitors[type] && monitors[type].next_check_at) }}</dd>
+                  <dt>{{ $t('proactive.monitor.lastError') }}</dt><dd>{{ (monitors[type] && monitors[type].last_error_code) || '-' }}</dd>
+                  <dt>{{ $t('proactive.monitor.lastProbe') }}</dt><dd>{{ formatTime(monitors[type] && monitors[type].last_probe_at) }}</dd>
+                </dl>
+              </div>
+            </div>
+            <el-form-item :label="$t('proactive.monitor.classifierStatus')">
+              <el-tag :type="classifierStatusType">{{ classifierStatusText }}</el-tag>
+              <div class="field-help">{{ $t('proactive.monitor.classifierIndependent') }}</div>
+            </el-form-item>
+
+            <el-collapse class="monitor-advanced">
+              <el-collapse-item :title="$t('proactive.monitor.advanced')" name="advanced">
+                <div class="monitor-heading">{{ $t('proactive.monitor.weatherAdvanced') }}</div>
+                <el-form-item :label="$t('proactive.monitor.interval')">
+                  <el-input-number v-model="monitorForm.weather.interval_minutes" :min="5" :max="1440"
+                    @change="refreshMonitorPreset" />
+                  <span class="inline-help">{{ $t('proactive.monitor.minutes') }}</span>
+                </el-form-item>
+                <el-form-item :label="$t('proactive.monitor.hazardTypes')">
+                  <el-checkbox-group v-model="monitorForm.weather.config.hazard_types">
+                    <el-checkbox v-for="hazard in weatherHazards" :key="hazard" :label="hazard">
+                      {{ $t(`proactive.monitor.hazard.${hazard}`) }}
+                    </el-checkbox>
+                  </el-checkbox-group>
+                  <div class="field-help">{{ $t('proactive.monitor.emptyMeansDefault') }}</div>
+                </el-form-item>
+                <el-form-item :label="$t('proactive.monitor.officialSeverity')">
+                  <el-select v-model="monitorForm.weather.config.minimum_warning_severity">
+                    <el-option v-for="level in officialWarningLevels" :key="level"
+                      :label="$t(`proactive.monitor.severity.${level}`)" :value="level" />
+                  </el-select>
+                </el-form-item>
+                <div class="threshold-grid">
+                  <el-form-item :label="$t('proactive.monitor.precipProbability')"><el-input-number v-model="monitorForm.weather.config.precip_probability" :min="0" :max="100" /></el-form-item>
+                  <el-form-item :label="$t('proactive.monitor.windSpeed')"><el-input-number v-model="monitorForm.weather.config.wind_speed_kmh" :min="0" :max="300" /></el-form-item>
+                  <el-form-item :label="$t('proactive.monitor.highTemp')"><el-input-number v-model="monitorForm.weather.config.high_temp_c" :min="-50" :max="60" /></el-form-item>
+                  <el-form-item :label="$t('proactive.monitor.lowTemp')"><el-input-number v-model="monitorForm.weather.config.low_temp_c" :min="-50" :max="60" /></el-form-item>
+                  <el-form-item :label="$t('proactive.monitor.tempDrop')"><el-input-number v-model="monitorForm.weather.config.temp_drop_24h_c" :min="0" :max="60" /></el-form-item>
+                  <el-form-item :label="$t('proactive.monitor.forecastHours')"><el-input-number v-model="monitorForm.weather.config.forecast_hours" :min="1" :max="168" /></el-form-item>
+                </div>
+
+                <div class="monitor-heading">{{ $t('proactive.monitor.newsAdvanced') }}</div>
+                <el-form-item :label="$t('proactive.monitor.interval')">
+                  <el-input-number v-model="monitorForm.news.interval_minutes" :min="5" :max="1440"
+                    @change="refreshMonitorPreset" />
+                  <span class="inline-help">{{ $t('proactive.monitor.minutes') }}</span>
+                </el-form-item>
+                <el-form-item :label="$t('proactive.monitor.sources')">
+                  <el-select v-model="monitorForm.news.config.sources" multiple filterable allow-create default-first-option
+                    :placeholder="$t('proactive.monitor.sourcesPlaceholder')" class="monitor-wide-select" />
+                  <div class="field-help">{{ $t('proactive.monitor.emptySourcesHelp') }}</div>
+                </el-form-item>
+                <el-form-item :label="$t('proactive.monitor.categories')">
+                  <el-checkbox-group v-model="monitorForm.news.config.categories">
+                    <el-checkbox v-for="category in newsCategories" :key="category" :label="category">
+                      {{ $t(`proactive.monitor.category.${category}`) }}
+                    </el-checkbox>
+                  </el-checkbox-group>
+                  <div class="field-help">{{ $t('proactive.monitor.emptyMeansDefault') }}</div>
+                </el-form-item>
+                <el-form-item :label="$t('proactive.monitor.confidence')">
+                  <el-input-number v-model="monitorForm.news.config.confidence" :min="0.5" :max="1" :step="0.01" :precision="2" />
+                </el-form-item>
+                <el-form-item :label="$t('proactive.monitor.newsCooldown')">
+                  <el-input-number v-model="monitorForm.news.config.cooldown_minutes" :min="1" :max="10080" />
+                  <span class="inline-help">{{ $t('proactive.monitor.minutes') }}</span>
+                </el-form-item>
+              </el-collapse-item>
+            </el-collapse>
+          </el-form>
+          <div class="settings-actions monitor-actions">
+            <el-button type="primary" size="small" :loading="monitorsSaving"
+              :disabled="!monitorLoadedDeviceId || monitorsLoading" @click="saveMonitors">
+              {{ $t('proactive.monitor.save') }}
+            </el-button>
+          </div>
+        </div>
+      </el-tab-pane>
+
       <el-tab-pane :label="$t('proactive.events')" name="events">
         <div class="section-body">
           <el-alert v-if="eventsError" :title="eventsError" type="error" :closable="false" show-icon />
@@ -178,13 +291,25 @@ import {
   PROACTIVE_EVENT_TYPES,
   PROACTIVE_MODES,
   PROACTIVE_TOPICS,
+  NEWS_CATEGORIES,
+  OFFICIAL_WARNING_LEVELS,
+  WEATHER_HAZARD_TYPES,
   DeviceRequestGate,
+  applyMonitorPreset,
   belongsToDevice,
+  createMonitorsForm,
   createPreferenceForm,
   defaultDailyLimit,
   listBelongsToDevice,
+  monitorPreset,
+  monitorClassifierStatus,
+  monitorsPayload,
   preferencePayload,
+  recoverMonitorsFailure,
   recoverPreferenceFailure,
+  inheritedWeatherLocation,
+  inheritedWeatherLocationError,
+  validateMonitors,
   validatePreference,
 } from '@/utils/proactiveAssistant.mjs';
 
@@ -205,6 +330,16 @@ export default {
       preferenceLoading: false,
       saving: false,
       silencing: false,
+      monitors: {},
+      monitorLoadedDeviceId: '',
+      monitorForm: createMonitorsForm(),
+      monitorPresetSelection: 'balanced',
+      monitorsLoading: false,
+      monitorsSaving: false,
+      monitorsError: '',
+      weatherHazards: WEATHER_HAZARD_TYPES,
+      officialWarningLevels: OFFICIAL_WARNING_LEVELS,
+      newsCategories: NEWS_CATEGORIES,
       modes: PROACTIVE_MODES,
       topics: PROACTIVE_TOPICS,
       eventTypes: PROACTIVE_EVENT_TYPES,
@@ -226,6 +361,26 @@ export default {
     },
     modeMaximum() {
       return { conservative: 1, active: 5, aggressive: 0 }[this.form.mode] ?? 1;
+    },
+    monitorLocation() {
+      return inheritedWeatherLocation(this.monitors);
+    },
+    monitorLocationErrorText() {
+      const error = inheritedWeatherLocationError(this.monitors);
+      if (!error) return this.$t('proactive.monitor.locationMissingHelp');
+      const key = `proactive.monitor.locationError.${error}`;
+      const translated = this.$t(key);
+      return translated === key ? `${this.$t('proactive.monitor.locationConfigError')}: ${error}` : translated;
+    },
+    classifierStatusType() {
+      return monitorClassifierStatus(this.monitors) === 'available' ? 'success' : 'danger';
+    },
+    classifierStatusText() {
+      const status = monitorClassifierStatus(this.monitors);
+      if (status === 'unknown') return this.$t('proactive.monitor.classifierUnknown');
+      return this.$t(status === 'available'
+        ? 'proactive.monitor.classifierAvailable'
+        : 'proactive.monitor.classifierUnavailable');
     },
   },
   watch: {
@@ -250,6 +405,13 @@ export default {
       this.preferenceLoading = false;
       this.saving = false;
       this.silencing = false;
+      this.monitors = {};
+      this.monitorLoadedDeviceId = '';
+      this.monitorForm = createMonitorsForm();
+      this.monitorPresetSelection = 'balanced';
+      this.monitorsLoading = false;
+      this.monitorsSaving = false;
+      this.monitorsError = '';
       this.eventFilters = { topic: '', event_type: '', delivery_status: '', page: 1, limit: 20 };
       this.events = [];
       this.eventTotal = 0;
@@ -278,6 +440,9 @@ export default {
       this.$emit('update:visible', false);
     },
     handleTabChange() {
+      if (this.activeTab === 'monitors') {
+        this.loadMonitors();
+      }
       if (this.activeTab === 'events') this.loadEvents();
       if (this.activeTab === 'habits') this.loadHabits();
     },
@@ -332,6 +497,93 @@ export default {
     clearQuietHours() {
       this.form.quiet_start = '';
       this.form.quiet_end = '';
+    },
+    loadMonitors() {
+      const request = this.requestGate.begin('monitors');
+      const deviceId = request.deviceId;
+      if (!deviceId) {
+        this.monitorsError = this.$t('proactive.monitor.loadFailed');
+        return;
+      }
+      this.monitors = {};
+      this.monitorLoadedDeviceId = '';
+      this.monitorForm = createMonitorsForm();
+      this.monitorsError = '';
+      this.monitorsLoading = true;
+      Api.proactive.getMonitors(deviceId, response => {
+        if (!this.requestGate.isCurrent(request)) return;
+        const monitors = this.responseData(response);
+        if (!belongsToDevice(monitors, deviceId)) {
+          this.handleMonitorsFailure(null, true);
+          return;
+        }
+        this.monitorsLoading = false;
+        this.monitors = monitors;
+        this.monitorForm = createMonitorsForm(monitors);
+        this.monitorPresetSelection = monitorPreset(this.monitorForm);
+        this.monitorLoadedDeviceId = deviceId;
+      }, error => {
+        if (!this.requestGate.isCurrent(request)) return;
+        this.handleMonitorsFailure(error, true);
+      });
+    },
+    handleMonitorsFailure(error, clearState = false) {
+      const recovered = recoverMonitorsFailure({
+        monitors: this.monitors,
+        loadedDeviceId: this.monitorLoadedDeviceId,
+        form: this.monitorForm,
+      }, clearState);
+      this.monitorsLoading = false;
+      this.monitorsSaving = false;
+      this.monitors = recovered.monitors;
+      this.monitorLoadedDeviceId = recovered.loadedDeviceId;
+      this.monitorForm = recovered.form;
+      this.monitorsError = this.errorMessage(error, clearState
+        ? 'proactive.monitor.loadFailed' : 'proactive.monitor.saveFailed');
+      this.$message.error(this.monitorsError);
+    },
+    handleMonitorPreset(preset) {
+      this.monitorForm = applyMonitorPreset(this.monitorForm, preset);
+    },
+    refreshMonitorPreset() {
+      this.monitorPresetSelection = monitorPreset(this.monitorForm);
+    },
+    saveMonitors() {
+      const deviceId = this.monitorLoadedDeviceId;
+      if (this.monitorsSaving || !deviceId || deviceId !== this.requestGate.deviceId) return;
+      const invalidField = validateMonitors(this.monitorForm);
+      if (invalidField) {
+        this.$message.warning(this.$t(`proactive.monitor.validation.${invalidField}`));
+        return;
+      }
+      const request = this.requestGate.begin('monitors');
+      this.monitorsSaving = true;
+      Api.proactive.updateMonitors(deviceId, monitorsPayload(this.monitorForm), response => {
+        if (!this.requestGate.isCurrent(request)) return;
+        const monitors = this.responseData(response);
+        if (!belongsToDevice(monitors, deviceId)) {
+          this.handleMonitorsFailure(null);
+          return;
+        }
+        this.monitorsSaving = false;
+        this.monitorsError = '';
+        this.monitors = monitors;
+        this.monitorForm = createMonitorsForm(monitors);
+        this.monitorPresetSelection = monitorPreset(this.monitorForm);
+        this.monitorLoadedDeviceId = deviceId;
+        this.$message.success(this.$t('proactive.monitor.saveSuccess'));
+      }, error => {
+        if (!this.requestGate.isCurrent(request)) return;
+        this.handleMonitorsFailure(error);
+      });
+    },
+    monitorRuntimeStatus(type) {
+      const monitor = this.monitors[type];
+      if (!monitor) return '-';
+      if (!monitor.enabled) return this.$t('proactive.monitor.statusDisabled');
+      if (monitor.last_error_code) return this.$t('proactive.monitor.statusError');
+      if (monitor.last_success_at) return this.$t('proactive.monitor.statusRunning');
+      return this.$t('proactive.monitor.statusWaiting');
     },
     savePreference() {
       const deviceId = this.loadedDeviceId;
@@ -544,6 +796,25 @@ export default {
 .habits-table { min-width: 880px; }
 .pagination-row { display: flex; justify-content: flex-end; padding-top: 16px; overflow-x: auto; }
 .delete-button { color: #f56c6c; }
+.monitor-body { position: relative; padding: 4px 18px 0 0; }
+.monitor-heading {
+  margin: 10px 0 16px;
+  padding-left: 10px;
+  border-left: 3px solid #409eff;
+  color: #303133;
+  font-weight: 600;
+}
+.monitor-location, .monitor-wide-select { width: 420px; max-width: 100%; }
+.monitor-error-text { color: #f56c6c; }
+.monitor-status-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 8px 0 18px 170px; }
+.monitor-status-panel { padding: 13px 15px; border: 1px solid #ebeef5; border-radius: 4px; background: #fafafa; }
+.monitor-status-panel dl { display: grid; grid-template-columns: max-content 1fr; gap: 7px 12px; margin: 10px 0 0; font-size: 12px; }
+.monitor-status-panel dt { color: #909399; }
+.monitor-status-panel dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #606266; }
+.monitor-advanced { margin: 12px 0 0 170px; }
+.threshold-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.threshold-grid .el-form-item { margin-right: 18px; }
+.monitor-actions { margin-top: 18px; }
 
 .proactive-dialog ::v-deep .el-dialog {
   max-width: 1120px;
@@ -563,8 +834,12 @@ export default {
 @media (max-width: 768px) {
   .device-context { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
   .settings-body { padding-right: 0; }
+  .monitor-body { padding-right: 0; }
   .silent-notice { margin-left: 0; }
   .settings-actions { padding-left: 0; }
+  .monitor-status-grid { grid-template-columns: 1fr; margin-left: 0; }
+  .monitor-advanced { margin-left: 0; }
+  .threshold-grid { grid-template-columns: 1fr; }
   .inline-help { display: block; margin: 4px 0 0; }
   .filter-row .el-select { flex: 1 1 180px; width: auto; }
   .filter-row .el-button { flex: 0 0 auto; }

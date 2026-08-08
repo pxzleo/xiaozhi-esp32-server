@@ -50,20 +50,25 @@ manager-api 请求体中的 `created_at`、`expires_at` 和 `seen_at` 使用 Uni
 
 外界监测内部接口继续位于 `/config/proactive/**` 并使用 server-secret：
 
-- `POST /config/proactive/monitors/claim`：每次最多领取 100 条到期任务，只选择 15 分钟内有设备探测的记录；数据库以 owner 和唯一 token 做 CAS，租约固定 120 秒，多实例只能有一个领取者成功。候选到期、活跃窗口、租约生成和 CAS 均以 MySQL `CURRENT_TIMESTAMP` 为唯一权威时钟，不使用各 JVM 墙钟。
+- `POST /config/proactive/monitors/claim`：每次最多领取 100 条到期任务，只选择 15 分钟内有设备探测的记录；数据库以 owner 和唯一 token 做 CAS，租约固定 120 秒，多实例只能有一个领取者成功。候选到期、活跃窗口、租约生成和 CAS 均以 MySQL `CURRENT_TIMESTAMP` 为唯一权威时钟，不使用各 JVM 墙钟。每条 `MonitorTask` 同时携带 manager-api 权威解析的 `weather_location/weather_location_error` 和 `news_sources/news_sources_error`；新闻插件未配置、设备未绑定智能体，或 `news_sources` 缺失/null/纯空白时使用“澎湃新闻、百度热搜、财联社”默认值且错误为空，只有非字符串、非法分隔、超限、重复键或多根 JSON 等畸形配置才返回空列表和明确错误。worker 不从天气 baseline 猜城市，也不自行读取智能体私有插件配置。
 - `POST /config/proactive/monitors/complete`：只有数据库当前时间仍早于租约截止且匹配 owner/token 才能更新 state、成功时间、下次检查时间和错误码并释放租约；探测时间、活跃窗口和下次调度均以 MySQL 当前时间计算。用户 PUT 任一配置会立即使该 monitor 的现有租约失效，旧 worker 不得覆盖新配置对应的 state 或调度。状态 JSON 有大小上限并采用分类型白名单：两类顶层只允许 `schema_version`、字符串数组 `fingerprints` 和 `detection_status`；`detection_status` 只允许 ISO 时间 `last_event_at/cooldown_until`、字符串数组 `active_warning_ids/active_hazards`、字符串 `last_cluster_id`。仅 WEATHER 可额外保存 `baseline`，其顶层只允许 `captured_at/location_id/hourly/warning_ids/hazards`；`hourly` 元素只允许 `forecast_time/temp_c/weather_code/wind_speed_kmh/precip_mm/pop_pct`，`hazards` 元素只允许 `type/severity/window_start/window_end`。NEWS 禁止 `baseline`，所有层级未知字段和错误类型均明确拒绝。
 - `GET /config/proactive/monitor-events/{eventId}?mac_address=...`：按 MAC 与 event ID 读取权威天气或新闻事件；投递仍复用既有 180 秒 `/events/{eventId}/claim` 接口。
-- `POST /config/proactive/classifier/evaluate`：仅接受有界的新闻标题、来源和事实，使用全局独立分类模型，禁止回退设备智能体模型。固定分类契约使用 system 消息，序列化候选只作为独立的不可信 user JSON 数据；候选中的任何指令都不得改变角色或输出契约。模型只能返回一个完整 JSON 根对象，根对象后到 EOF 之间只能有空白；manager-api 校验 JSON 结构、整数且不越界的索引、索引完整性和字段范围，并只返回重新序列化的规范 JSON，绝不透传原始模型文本或尾随推理内容。
+- `POST /config/proactive/classifier/evaluate`：仅接受有界的新闻标题、来源和事实，使用全局独立分类模型，禁止回退设备智能体模型。固定分类契约使用 system 消息，序列化候选只作为独立的不可信 user JSON 数据；候选中的任何指令都不得改变角色或输出契约。模型只能返回一个完整 JSON 根对象，根对象后到 EOF 之间只能有空白；每个候选结果严格包含 `index/is_major/category/severity/confidence/spoken_summary/facts`，其中 `severity` 仅允许 `low/medium/high/critical`。manager-api 校验 JSON 结构、整数且不越界的索引、索引完整性和字段范围，并只返回重新序列化的规范 JSON，绝不透传原始模型文本或尾随推理内容。worker 只有在 `is_major=true`、`severity=high|critical` 且 `confidence>=0.85` 时才可创建新闻事件。
 
 超级管理员通过 `GET|PUT /proactive/classifier/model` 读取或保存独立 LLM model id，并通过 `POST /proactive/classifier/model/test` 检查可用性。未配置、非 LLM、未启用或缺少必要连接配置时明确返回不可用；任何接口都不得返回模型密钥。
 
-manager-web 在设备管理列表的单台设备操作区提供“主动助理”入口，使用同一弹窗分为设置、事件审计和习惯三个区域：
+manager-web 在设备管理列表的单台设备操作区提供“主动助理”入口，使用同一弹窗分为设置、外界监测、事件审计和习惯四个区域：
 
 - 设置区可修改主动程度、每日上限、安静时段及主题 allow/block，并可启用“今日静默”。表单必须执行与 manager-api 相同的模式额度、安静时段成对及主题互斥校验。
 - 事件区支持按主题、事件类型和投递状态筛选及分页，只展示结构化的 `reason`、`delivery_status`、`outcome` 和时间，不展示 payload 或自由推理内容。
 - 习惯区展示受控习惯类型、证据次数、状态和最近观察时间，并允许删除本人设备的记录。
+- 外界监测区严格使用 `GET|PUT /device/proactive/monitors/{deviceId}`。常用区提供天气/新闻开关、均衡（30/10 分钟）/及时（10/5 分钟）/省资源（60/30 分钟）档位，以及继承地点、运行状态、上次成功、下次执行、最近错误和设备最近探测时间。继承地点只读取响应顶层权威 `weather_location`；该值由 manager-api 直接解析设备绑定智能体的 `get_weather.param_info.default_location`，不依赖首次监测基线。`weather_location_error` 使用受控错误码区分未绑定智能体、插件缺失/重复、配置无效和默认城市缺失/无效；Web 显示明确配置错误且不猜测城市。worker 后续的城市解析或天气 API 权限错误继续显示在 `weather.last_error_code`，与静态配置错误分离。
+- 外界监测高级区直接映射严格 DTO：天气间隔、灾害类型、阈值和 `minimum_warning_severity`；新闻间隔、来源、类别、置信度和主题冷却。官方预警级别严格使用和风词表 `minor/moderate/severe/extreme`，默认最低 `moderate`；来源/类别为空表示沿用服务端继承和默认规则。保存前执行与 manager-api 相同的整数范围、列表、枚举、温度上下界及置信度校验；提交体不携带 DTO 之外的字段。
+- 外界监测读取和保存使用独立请求通道；切换设备、关闭弹窗或同通道新请求后旧响应失效。首次读取失败清空不可信状态并禁止保存，保存失败保留当前表单以便重试。普通设备所有者直接读取响应顶层脱敏 `classifier:{configured,available,error}` 状态；该对象不包含 `model_id`、provider 或凭据。设备弹窗不调用超级管理员分类模型接口，也不得显示为已回退设备模型。
 - 弹窗关闭、切换设备或同一通道发起新请求后，旧响应必须失效；偏好保存只能使用已成功加载且仍为当前设备的 `device_id`。保存失败保留当前表单以便重试，首次加载失败则清空不可信状态并禁用写操作。
 - 弹窗宽度受视口限制，筛选项可换行，表格在窄屏下允许横向滚动，确保移动端仍可访问主要操作。
+
+超级管理员的桌面“参数管理”页提供“外界新闻分类模型”专用卡片。模型选项只读取 LLM 列表，保存和连通性测试分别调用 `PUT /proactive/classifier/model` 与 `POST /proactive/classifier/model/test`；未配置或不可用时显示错误，并明确说明新闻监测不会回退设备智能体模型。该首期页面不修改 manager-mobile。
 
 偏好默认模式为 `aggressive`、`daily_limit=0`，表示普通主动发言不受每日总额度限制，且积极模式不能配置成有限次数；没有默认安静时段。`active` 未显式给出 `daily_limit` 时为 5，允许用户在 1 至 5 内调低；`conservative` 固定为 1，`today_silent` 为 0。进入当日静默会同时保留 `previous_mode`、`previous_daily_limit` 和次日恢复时间；读取偏好时若静默已到期，manager-api 原子、完整地恢复原模式与原每日上限并递增 `version`。存量 `aggressive` 的 1 至 5 会以模式、旧额度和版本为条件做窄字段 CAS 规范化为 0，再权威重读，避免覆盖并发偏好更新；存量 `active` 的 1 至 3 保持原值。安静时段必须同时给出 `quiet_start`、`quiet_end` 且不能相同。
 
