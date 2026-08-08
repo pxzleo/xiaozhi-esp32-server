@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+import threading
 import uuid
 from concurrent.futures import Future
 from datetime import datetime
@@ -27,6 +28,24 @@ ASSISTANT_TRIGGERED_METHOD = "notifications/assistant/triggered"
 PROACTIVE_TTS_READY_TIMEOUT_SECONDS = 2
 DEVICE_REMINDER_TTS_WAIT_SECONDS = 15
 _LOCAL_DATETIME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+
+
+def capture_netease_briefing_resume(conn, abort_generation):
+    from plugins_func.functions.play_netease_music import (
+        capture_netease_briefing_resume as capture,
+    )
+
+    return capture(conn, abort_generation)
+
+
+def schedule_netease_briefing_resume(
+    conn, token, proactive_sentence_id, completion_event
+):
+    from plugins_func.functions.play_netease_music import (
+        schedule_netease_briefing_resume as schedule,
+    )
+
+    return schedule(conn, token, proactive_sentence_id, completion_event)
 
 
 def _device_tool_description(name: str, description: str) -> str:
@@ -435,11 +454,49 @@ async def _handle_assistant_triggered_notification(
         seen.clear()
     seen.add(event_id)
     text = await build_daily_briefing(conn, sections, location)
-    await _speak_proactive_notification(conn, text, "每日简报", notification_state)
+    abort_generation = (
+        notification_state[1]
+        if notification_state is not None
+        else getattr(conn, "abort_generation", 0)
+    )
+    resume_token = capture_netease_briefing_resume(conn, abort_generation)
+    completion_event = threading.Event() if resume_token is not None else None
+    try:
+        proactive_sentence_id = await _speak_proactive_notification(
+            conn,
+            text,
+            "每日简报",
+            notification_state,
+            completion_event=completion_event,
+        )
+    except Exception:
+        if resume_token is not None:
+            completion_event.set()
+            schedule_netease_briefing_resume(
+                conn,
+                resume_token,
+                conn.sentence_id,
+                completion_event,
+            )
+        raise
+    if resume_token is not None:
+        if proactive_sentence_id is None:
+            completion_event.set()
+            proactive_sentence_id = conn.sentence_id
+        schedule_netease_briefing_resume(
+            conn,
+            resume_token,
+            proactive_sentence_id,
+            completion_event,
+        )
 
 
 async def _speak_proactive_notification(
-    conn, text, notification_name, notification_state=None
+    conn,
+    text,
+    notification_name,
+    notification_state=None,
+    completion_event=None,
 ):
     if not _connection_is_active(conn):
         logger.bind(tag=TAG).info(f"{notification_name}通知因连接关闭而取消")
@@ -506,6 +563,7 @@ async def _speak_proactive_notification(
             sentence_id=sentence_id,
             sentence_type=SentenceType.LAST,
             content_type=ContentType.ACTION,
+            completion_event=completion_event,
         ))
     except Exception:
         await _stop_failed_proactive_tts(
@@ -514,6 +572,7 @@ async def _speak_proactive_notification(
         raise
     conn.dialogue.put(Message(role="assistant", content=text))
     logger.bind(tag=TAG).info(f"已处理{notification_name}语音通知")
+    return sentence_id
 
 
 def _notification_state_is_current(conn, notification_state):

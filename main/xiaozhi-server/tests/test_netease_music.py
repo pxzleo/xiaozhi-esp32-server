@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call, patch
@@ -2087,6 +2088,7 @@ class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
 
     def test_abort_pauses_but_keeps_saved_queue(self):
         connection = _Connection()
+        connection.abort_generation = 7
         state = netease.NeteasePlaybackState(
             resolved=[({"id": 1, "name": "第一首"}, Path("/cache/1.mp3"))],
             status="playing",
@@ -2097,6 +2099,100 @@ class NeteaseMusicQueueTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(connection._netease_playback, state)
         self.assertEqual(state.status, "paused")
+        self.assertEqual(state.interrupted_abort_generation, 7)
+        self.assertIs(
+            netease.capture_netease_briefing_resume(connection, 7).state,
+            state,
+        )
+        self.assertIsNone(netease.capture_netease_briefing_resume(connection, 6))
+
+    def test_manually_paused_queue_is_not_eligible_for_briefing_resume(self):
+        connection = _Connection()
+        connection.abort_generation = 4
+        connection._netease_playback = netease.NeteasePlaybackState(
+            resolved=[({"id": 1, "name": "第一首"}, Path("/cache/1.mp3"))],
+            status="paused",
+        )
+
+        netease.interrupt_netease_playback(connection)
+
+        self.assertIsNone(netease.capture_netease_briefing_resume(connection, 4))
+
+    async def test_briefing_completion_restarts_the_interrupted_track(self):
+        connection = _Connection()
+        connection.abort_generation = 5
+        connection.client_abort = False
+        connection.client_is_speaking = False
+        connection.sentence_id = "briefing-turn"
+        state = netease.NeteasePlaybackState(
+            resolved=[({"id": 1, "name": "第一首"}, Path("/cache/1.mp3"))],
+            status="playing",
+        )
+        connection._netease_playback = state
+        netease.interrupt_netease_playback(connection)
+        token = netease.capture_netease_briefing_resume(connection, 5)
+        completion_event = threading.Event()
+        completion_event.set()
+
+        with patch.object(
+            netease,
+            "send_tts_message",
+            AsyncMock(return_value=11),
+        ) as send_start:
+            task = netease.schedule_netease_briefing_resume(
+                connection,
+                token,
+                "briefing-turn",
+                completion_event,
+            )
+            await task
+            await asyncio.sleep(0)
+
+        self.assertEqual(state.status, "playing")
+        self.assertIsNone(state.interrupted_abort_generation)
+        self.assertNotEqual(connection.sentence_id, "briefing-turn")
+        self.assertTrue(connection.client_is_speaking)
+        send_start.assert_awaited_once_with(connection, "start")
+        file_messages = [
+            message
+            for message in connection.tts.tts_text_queue.items
+            if message.content_type == netease.ContentType.FILE
+        ]
+        self.assertEqual(file_messages[0].content_file, "/cache/1.mp3")
+        netease.interrupt_netease_playback(connection)
+
+    async def test_new_user_abort_prevents_briefing_music_resume(self):
+        connection = _Connection()
+        connection.abort_generation = 5
+        connection.client_abort = False
+        connection.sentence_id = "briefing-turn"
+        state = netease.NeteasePlaybackState(
+            resolved=[({"id": 1, "name": "第一首"}, Path("/cache/1.mp3"))],
+            status="playing",
+        )
+        connection._netease_playback = state
+        netease.interrupt_netease_playback(connection)
+        token = netease.capture_netease_briefing_resume(connection, 5)
+        completion_event = threading.Event()
+        completion_event.set()
+        connection.abort_generation = 6
+        connection.client_abort = True
+
+        with patch.object(
+            netease,
+            "send_tts_message",
+            AsyncMock(),
+        ) as send_start:
+            task = netease.schedule_netease_briefing_resume(
+                connection,
+                token,
+                "briefing-turn",
+                completion_event,
+            )
+            await task
+
+        self.assertEqual(state.status, "paused")
+        send_start.assert_not_awaited()
 
     def test_intent_handler_does_not_speak_server_music_response_twice(self):
         self.assertTrue(handles_own_audio_response("play_music"))

@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import httpx
 
 from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
-from core.handle.sendAudioHandle import send_music_lyrics_event
+from core.handle.sendAudioHandle import send_music_lyrics_event, send_tts_message
 from plugins_func.register import Action, ActionResponse, ToolType, register_function
 
 if TYPE_CHECKING:
@@ -39,6 +39,7 @@ MAX_LYRIC_LINES = 500
 MAX_LYRIC_TEXT_CHARS = 32_000
 PREPARE_FILE_PROTECTION_SECONDS = 60
 QUEUE_FILE_PROTECTION_SECONDS = 12 * 3600
+BRIEFING_RESUME_WAIT_SECONDS = 180
 SUPPORTED_QUALITY_LEVELS = {
     "standard",
     "higher",
@@ -176,6 +177,13 @@ class NeteasePlaybackState:
     lyrics_loader: object = None
     source_playlist_id: str = ""
     intelligence_eligible: bool = False
+    interrupted_abort_generation: object = None
+
+
+@dataclass(frozen=True)
+class NeteaseBriefingResumeToken:
+    state: NeteasePlaybackState
+    abort_generation: int
 
 
 play_netease_music_function_desc = {
@@ -1679,7 +1687,89 @@ def interrupt_netease_playback(conn):
     conn.server_audio_playback_sentence_id = None
     if state.status == "playing":
         state.status = "paused"
+        state.interrupted_abort_generation = getattr(conn, "abort_generation", None)
     _schedule_lyrics_clear(conn, "interrupted")
+
+
+def capture_netease_briefing_resume(conn, abort_generation):
+    state = getattr(conn, "_netease_playback", None)
+    if (
+        state is None
+        or state.status != "paused"
+        or state.interrupted_abort_generation != abort_generation
+    ):
+        return None
+    return NeteaseBriefingResumeToken(state, abort_generation)
+
+
+def _briefing_resume_is_current(conn, token, sentence_id):
+    if getattr(conn, "_closed", False):
+        return False
+    stop_event = getattr(conn, "stop_event", None)
+    if stop_event is not None and stop_event.is_set():
+        return False
+    return (
+        getattr(conn, "_netease_playback", None) is token.state
+        and token.state.status == "paused"
+        and token.state.interrupted_abort_generation == token.abort_generation
+        and getattr(conn, "abort_generation", None) == token.abort_generation
+        and getattr(conn, "sentence_id", None) == sentence_id
+    )
+
+
+async def _resume_netease_after_briefing(
+    conn, token, proactive_sentence_id, completion_event
+):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + BRIEFING_RESUME_WAIT_SECONDS
+    while not completion_event.is_set():
+        if not _briefing_resume_is_current(conn, token, proactive_sentence_id):
+            return
+        if loop.time() >= deadline:
+            conn.logger.bind(tag=TAG).warning("每日简报结束后等待音乐恢复超时")
+            return
+        await asyncio.sleep(0.1)
+    if not _briefing_resume_is_current(conn, token, proactive_sentence_id):
+        return
+
+    resumed_sentence_id = uuid.uuid4().hex
+    conn.sentence_id = resumed_sentence_id
+    conn.client_abort = False
+    tts_control_generation = await send_tts_message(conn, "start")
+    if not _briefing_resume_is_current(conn, token, resumed_sentence_id):
+        await send_tts_message(
+            conn,
+            "stop",
+            expected_generation=tts_control_generation,
+        )
+        return
+    conn.client_is_speaking = True
+    _restart_saved_playback(conn, token.state, "")
+
+
+def schedule_netease_briefing_resume(
+    conn, token, proactive_sentence_id, completion_event
+):
+    task = asyncio.create_task(
+        _resume_netease_after_briefing(
+            conn,
+            token,
+            proactive_sentence_id,
+            completion_event,
+        )
+    )
+
+    def log_failure(completed):
+        if completed.cancelled():
+            return
+        error = completed.exception()
+        if error is not None:
+            conn.logger.bind(tag=TAG).error(
+                f"每日简报结束后恢复音乐失败: {type(error).__name__}"
+            )
+
+    task.add_done_callback(log_failure)
+    return task
 
 
 def close_netease_playback(conn):
@@ -1893,6 +1983,7 @@ def _restart_saved_playback(conn, state, prompt):
     _clear_audio_queues(conn)
     _cancel_playback_task(state)
     state.status = "playing"
+    state.interrupted_abort_generation = None
     conn.server_audio_playback_sentence_id = conn.sentence_id
     state.task = asyncio.create_task(
         _run_playback(conn, state, state.generation, prompt)
@@ -1939,6 +2030,7 @@ async def _control_playback(conn, action, position=0, request_generation=None):
         _cancel_playback_task(state)
         conn.server_audio_playback_sentence_id = None
         state.status = "paused"
+        state.interrupted_abort_generation = None
         await send_music_lyrics_event(
             conn, {"version": 1, "action": "clear", "reason": "paused"}
         )
