@@ -111,7 +111,7 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
         claim_lock = asyncio.Lock()
         claimed = False
 
-        async def atomic_claim(_event_id, _mac_address):
+        async def atomic_claim(_event_id, _mac_address, _claim_token):
             nonlocal claimed
             async with claim_lock:
                 if claimed:
@@ -134,6 +134,55 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
                 for conn in connections
             ))
         speak.assert_awaited_once()
+
+    async def test_critical_health_manager_outage_keeps_safety_delivery(self):
+        params = {
+            **_event_fields(
+                topic="health_critical", priority="critical",
+                reason="device health", requires_response=False,
+            ),
+            "version": 1,
+            "kind": "audio_decode_failed",
+            "severity": "critical",
+            "occurred_at": 1_786_170_600,
+            "recovered": False,
+            "details": {"error_code": "17"},
+        }
+        speak = AsyncMock(return_value="sid")
+        captured = {}
+
+        async def uncertain_claim(_event_id, _mac_address, claim_token):
+            captured["claim_token"] = claim_token
+            raise RuntimeError("response lost")
+
+        def capture_audit(_conn, audit, delivery_result):
+            captured["audit"] = audit
+            if hasattr(delivery_result, "close"):
+                delivery_result.close()
+
+        with patch.object(
+            mcp_handler, "_prepare_proactive_audit", AsyncMock(return_value=False)
+        ), patch.object(
+            mcp_handler, "claim_proactive_event", side_effect=uncertain_claim
+        ), patch.object(
+            mcp_handler, "_speak_proactive_notification", speak
+        ), patch.object(
+            mcp_handler, "_schedule_delivery_audit", side_effect=capture_audit
+        ):
+            await mcp_handler._handle_device_health_notification(self.conn, params)
+        speak.assert_awaited_once()
+        self.assertEqual(
+            captured["claim_token"], captured["audit"]["_claim_token"]
+        )
+        status = AsyncMock()
+        with patch.object(
+            mcp_handler, "create_proactive_event",
+            AsyncMock(return_value={"delivery_status": "claimed"}),
+        ), patch.object(mcp_handler, "update_proactive_event_status", status):
+            self.assertTrue(await mcp_handler._audit_proactive_delivery(
+                captured["audit"], False
+            ))
+        self.assertEqual(captured["claim_token"], status.await_args.kwargs["claim_token"])
 
     async def test_critical_health_bypasses_conservative_policy(self):
         self.conn.proactive_preferences = {
@@ -410,6 +459,24 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
             completion.set_result(True)
             self.assertTrue(await task)
         status.assert_awaited_once_with("event-1", "AA:BB", "delivered", "none")
+
+    async def test_claimed_delivery_status_uses_token_without_leaking_into_event(self):
+        audit = mcp_handler._build_proactive_audit(
+            self.conn,
+            _event_fields(topic="health_critical", priority="critical"),
+            {"title": "设备健康", "reference_id": "audio", "source": "device"},
+        )
+        audit["_claim_token"] = "claim-token"
+        create = AsyncMock(return_value={"delivery_status": "claimed"})
+        status = AsyncMock()
+        with patch.object(mcp_handler, "create_proactive_event", create), patch.object(
+            mcp_handler, "update_proactive_event_status", status
+        ):
+            self.assertTrue(await mcp_handler._audit_proactive_delivery(audit, True))
+        self.assertNotIn("_claim_token", create.await_args.args[0])
+        status.assert_awaited_once_with(
+            "event-1", "AA:BB", "delivered", "none", claim_token="claim-token"
+        )
 
     async def test_abort_before_tts_completion_is_failed(self):
         completion = mcp_handler.ProactiveDeliveryCompletion()
@@ -1152,7 +1219,9 @@ class ManageApiProactiveClientTest(unittest.IsolatedAsyncioTestCase):
                 "x", "AA:BB", "delivered"
             )
             client._execute_async_request.return_value = True
-            self.assertTrue(await manage_api_client.claim_proactive_event("x", "AA:BB"))
+            self.assertTrue(await manage_api_client.claim_proactive_event(
+                "x", "AA:BB", "claim-token"
+            ))
             client._execute_async_request.return_value = {"habit_key": "x"}
             await manage_api_client.observe_proactive_habit({"habit_key": "x"})
             client._execute_async_request.return_value = []

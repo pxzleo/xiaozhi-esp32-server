@@ -50,6 +50,12 @@ class ProactiveContractTest {
             String sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
             assertTrue(sql.contains("ADD KEY `idx_ai_device_user_id_id` (`user_id`, `id`)"));
         }
+        try (var stream = getClass().getResourceAsStream("/db/changelog/202608081900.sql")) {
+            String sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            assertTrue(sql.contains("ADD COLUMN `claim_token` varchar(64)"));
+            assertTrue(sql.contains("ADD COLUMN `claimed_at` datetime"));
+            assertTrue(sql.contains("idx_ai_device_proactive_event_claim"));
+        }
     }
 
     @Test
@@ -92,10 +98,12 @@ class ProactiveContractTest {
         assertTrue(habitSql.contains("evidence_count = evidence_count + VALUES(evidence_count)"));
         assertTrue(habitSql.contains("ON DUPLICATE KEY UPDATE"));
 
-        Method status = ProactiveEventDao.class.getMethod("updateStatus", String.class, String.class,
-                String.class, String.class, java.util.Date.class);
+        Method status = ProactiveEventDao.class.getMethod("updateStatusCas", String.class, String.class,
+                String.class, String.class, String.class, String.class, java.util.Date.class);
         String eventSql = status.getAnnotation(Update.class).value()[0];
         assertTrue(eventSql.contains("device_id = #{deviceId} AND event_id = #{eventId}"));
+        assertTrue(eventSql.contains("delivery_status = #{expectedStatus}"));
+        assertTrue(eventSql.contains("claim_token = #{claimToken}"));
 
         Method findEvent = ProactiveEventDao.class.getMethod("selectByDeviceAndEventId",
                 String.class, String.class);
@@ -121,10 +129,13 @@ class ProactiveContractTest {
         assertTrue(insertSql.contains("ON DUPLICATE KEY UPDATE id = id"));
 
         Method claim = ProactiveEventDao.class.getMethod("claimPending", String.class,
-                String.class, java.util.Date.class);
+                String.class, String.class, java.util.Date.class, java.util.Date.class);
         String claimSql = claim.getAnnotation(Update.class).value()[0];
         assertTrue(claimSql.contains("delivery_status = 'CLAIMED'"));
         assertTrue(claimSql.contains("delivery_status = 'PENDING'"));
+        assertTrue(claimSql.contains("claim_token = #{claimToken}"));
+        assertTrue(claimSql.contains("claimed_at < #{leaseCutoff}"));
+        assertTrue(claimSql.contains("claimed_at IS NULL"));
         assertTrue(claimSql.contains("device_id = #{deviceId} AND event_id = #{eventId}"));
     }
 }

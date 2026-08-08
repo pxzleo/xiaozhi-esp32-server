@@ -32,8 +32,8 @@
 
 - `GET /config/proactive/preferences/{macAddress}`、`PUT /config/proactive/preferences/{macAddress}`：读取或更新设备偏好。
 - `POST /config/proactive/events`：按设备内唯一 `(device_id, event_id)` 幂等写入事件；相同 `event_id` 的重试必须与已存审计内容完全一致，否则明确报错。不同设备可以使用相同 `event_id`。`dedupe_key` 仅供策略层关联和去重，不是审计唯一键，因此同一故障及其恢复事件可以分别留痕。
-- `PUT /config/proactive/events/{eventId}/status`：请求体必须带 `mac_address`，按设备与事件共同更新投递状态。
-- `POST /config/proactive/events/{eventId}/claim`：请求体只带 `mac_address`，以数据库条件更新将未过期的 `pending` 原子改为 `claimed`；并发连接只有一个返回 `true`。critical 或恢复类设备健康通知必须领取成功后才可播报。
+- `PUT /config/proactive/events/{eventId}/status`：请求体必须带 `mac_address`；claimed 事件还必须带领取时的 `claim_token`，状态与令牌共同参与 CAS。
+- `POST /config/proactive/events/{eventId}/claim`：请求体带 `mac_address` 和调用方生成的唯一 `claim_token`。数据库以 180 秒租约将未过期 `pending` 原子改为 `claimed`；响应丢失后使用同 token 重试仍返回成功，租约过期后允许新 token 重领，旧 token 不得写终态。明确返回 `false` 表示其他连接持有有效租约；manager-api 请求异常时，critical 或恢复类健康通知按安全契约继续播报。
 - `POST /config/proactive/habits/observe`：按 `(device_id, habit_type, habit_key)` 原子累加证据；证据达到 3 次后进入候选。
 - `GET /config/proactive/habits/candidates?mac_address=...`：列出尚未接受或忽略的建议候选。
 
@@ -64,7 +64,7 @@ manager-web 在设备管理列表的单台设备操作区提供“主动助理�
 
 建连 GET 偏好的成功或失败结果都必须校验当前连接的偏好修改代次；设备工具已在此期间成功修改偏好时，过期 GET 既不得覆盖新值，也不得因请求失败把新值重置为本地默认。
 
-新主动事件按 `pending → claimed → delivered/failed` 异步审计；普通非竞争事件可从 `pending` 直接进入终态。`delivered` 只能在音频发送且设备播放完成信号返回后写入；合成、发送、断连、用户打断、句子被替换或等待超时都写入 `failed`。事件创建或初始状态更新失败时，审计任务显式返回失败，后续 outcome 不得越过失败任务继续回写。后台日志只记录异常类型，不记录 payload、`label` 或 `details`。
+新主动事件按 `pending → claimed → delivered/failed` 异步审计；普通非竞争事件可从 `pending` 直接进入 `delivered/failed`。`/status` 禁止直接写 `claimed`，claimed 只有匹配 token 才能进入终态；终态不得回退，`delivered` 只允许保持同状态更新 outcome。`delivered` 只能在音频发送且设备播放完成信号返回后写入；合成、发送、断连、用户打断、句子被替换或等待超时都写入 `failed`。事件创建或初始状态更新失败时，审计任务显式返回失败，后续 outcome 不得越过失败任务继续回写。后台日志只记录异常类型，不记录 payload、`label` 或 `details`。
 
 所有 TTS provider 都必须转发消息自身携带的 completion，包括工具提示使用的 `MIDDLE` 文本段；abort、旧句子、合成或发送异常必须完成为失败且同一 completion 只完成一次。日程完成邀请、天气行动句、习惯建议、深夜音乐建议和队列结束建议都在播报前创建审计生命周期并绑定真实 completion。音乐服务连续失败建议因当前普通工具结果链没有独立播放完成句柄，只创建 `pending` 审计，不得把未知结果写成 `delivered` 或 `failed`。
 

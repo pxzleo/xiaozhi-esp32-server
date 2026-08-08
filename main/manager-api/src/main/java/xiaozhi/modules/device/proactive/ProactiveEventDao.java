@@ -45,19 +45,30 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
                 delivered_at = CASE WHEN #{status} = 'DELIVERED' AND delivered_at IS NULL THEN #{now} ELSE delivered_at END,
                 updated_at = #{now}
             WHERE device_id = #{deviceId} AND event_id = #{eventId}
+              AND delivery_status = #{expectedStatus}
+              AND (#{expectedStatus} <> 'CLAIMED' OR claim_token = #{claimToken})
             """)
-    int updateStatus(@Param("deviceId") String deviceId, @Param("eventId") String eventId,
+    int updateStatusCas(@Param("deviceId") String deviceId, @Param("eventId") String eventId,
+            @Param("expectedStatus") String expectedStatus, @Param("claimToken") String claimToken,
             @Param("status") String status, @Param("outcome") String outcome, @Param("now") Date now);
 
     @Update("""
             UPDATE ai_device_proactive_event
-            SET delivery_status = 'CLAIMED', updated_at = #{now}
+            SET claimed_at = CASE
+                    WHEN claim_token = #{claimToken} AND claimed_at >= #{leaseCutoff} THEN claimed_at
+                    ELSE #{now} END,
+                delivery_status = 'CLAIMED', claim_token = #{claimToken},
+                updated_at = #{now}
             WHERE device_id = #{deviceId} AND event_id = #{eventId}
-              AND delivery_status = 'PENDING'
               AND (expires_at IS NULL OR expires_at > #{now})
+              AND (delivery_status = 'PENDING'
+                   OR (delivery_status = 'CLAIMED' AND claim_token = #{claimToken})
+                   OR (delivery_status = 'CLAIMED'
+                       AND (claimed_at IS NULL OR claimed_at < #{leaseCutoff})))
             """)
     int claimPending(@Param("deviceId") String deviceId, @Param("eventId") String eventId,
-            @Param("now") Date now);
+            @Param("claimToken") String claimToken, @Param("now") Date now,
+            @Param("leaseCutoff") Date leaseCutoff);
 
     @Select("""
             <script>

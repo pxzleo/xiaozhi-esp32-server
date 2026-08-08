@@ -223,26 +223,35 @@ async def create_proactive_event(event: Dict) -> Dict:
 
 
 async def update_proactive_event_status(
-    event_id: str, mac_address: str, delivery_status: str, outcome: str = "none"
+    event_id: str,
+    mac_address: str,
+    delivery_status: str,
+    outcome: str = "none",
+    claim_token: Optional[str] = None,
 ) -> Dict:
     """更新事件投递状态。"""
+    payload = {
+        "mac_address": mac_address,
+        "delivery_status": delivery_status,
+        "outcome": outcome,
+    }
+    if claim_token is not None:
+        payload["claim_token"] = claim_token
     return await _execute_proactive_request(
         "PUT",
         f"/config/proactive/events/{quote(event_id, safe='')}/status",
-        json={
-            "mac_address": mac_address,
-            "delivery_status": delivery_status,
-            "outcome": outcome,
-        },
+        json=payload,
     )
 
 
-async def claim_proactive_event(event_id: str, mac_address: str) -> bool:
+async def claim_proactive_event(
+    event_id: str, mac_address: str, claim_token: str
+) -> bool:
     """原子领取待投递事件；仅一个并发连接可成功。"""
     claimed = await _execute_proactive_request(
         "POST",
         f"/config/proactive/events/{quote(event_id, safe='')}/claim",
-        json={"mac_address": mac_address},
+        json={"mac_address": mac_address, "claim_token": claim_token},
     )
     if not isinstance(claimed, bool):
         raise ManageApiError("manager-api主动事件领取响应无效")

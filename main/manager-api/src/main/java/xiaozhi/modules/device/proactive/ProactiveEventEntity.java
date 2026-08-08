@@ -28,5 +28,7 @@ public class ProactiveEventEntity {
     private String deliveryStatus;
     private String outcome;
     private Date deliveredAt;
+    private String claimToken;
+    private Date claimedAt;
     private Date updatedAt;
 }

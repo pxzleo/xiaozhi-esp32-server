@@ -46,6 +46,7 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 
 @Service
 public class ProactiveService {
+    private static final long CLAIM_LEASE_MILLIS = 180_000L;
     private static final Set<String> EVENT_PAYLOAD_KEYS = Set.of(
             "title", "message", "reference_id", "scheduled_at", "action", "source");
     private static final Set<String> HABIT_PAYLOAD_KEYS = Set.of(
@@ -149,9 +150,29 @@ public class ProactiveService {
     @Transactional
     public EventView updateEventStatus(String eventId, EventStatusUpdate request) {
         DeviceEntity device = resolveByMac(request.getMacAddress());
-        if (eventDao.updateStatus(device.getId(), eventId, request.getDeliveryStatus().name(),
-                request.getOutcome().name(), new Date()) != 1) {
+        ProactiveEventEntity current = eventDao.selectByDeviceAndEventIdForUpdate(
+                device.getId(), eventId);
+        if (current == null) {
             throw new RenException("主动事件不存在");
+        }
+        DeliveryStatus source = DeliveryStatus.valueOf(current.getDeliveryStatus());
+        DeliveryStatus target = request.getDeliveryStatus();
+        String claimToken = request.getClaimToken();
+        boolean transitionAllowed = switch (source) {
+            case PENDING -> target == DeliveryStatus.DELIVERED || target == DeliveryStatus.FAILED;
+            case CLAIMED -> (target == DeliveryStatus.DELIVERED || target == DeliveryStatus.FAILED)
+                    && claimToken != null && claimToken.equals(current.getClaimToken());
+            case DELIVERED -> target == DeliveryStatus.DELIVERED
+                    && (current.getClaimToken() == null
+                        || current.getClaimToken().equals(claimToken));
+            default -> false;
+        };
+        if (!transitionAllowed || target == DeliveryStatus.CLAIMED) {
+            throw new RenException("主动事件状态转换无效");
+        }
+        if (eventDao.updateStatusCas(device.getId(), eventId, source.name(), claimToken,
+                target.name(), request.getOutcome().name(), new Date()) != 1) {
+            throw new RenException("主动事件状态已变化");
         }
         ProactiveEventEntity event = eventDao.selectByDeviceAndEventId(device.getId(), eventId);
         return toEvent(event);
@@ -160,7 +181,14 @@ public class ProactiveService {
     @Transactional
     public boolean claimEvent(String eventId, EventClaim request) {
         DeviceEntity device = resolveByMac(request.getMacAddress());
-        return eventDao.claimPending(device.getId(), eventId, new Date()) == 1;
+        Date now = new Date();
+        Date leaseCutoff = new Date(now.getTime() - CLAIM_LEASE_MILLIS);
+        eventDao.claimPending(device.getId(), eventId, request.getClaimToken(), now, leaseCutoff);
+        ProactiveEventEntity event = eventDao.selectByDeviceAndEventId(device.getId(), eventId);
+        return event != null
+                && DeliveryStatus.CLAIMED.name().equals(event.getDeliveryStatus())
+                && request.getClaimToken().equals(event.getClaimToken())
+                && (event.getExpiresAt() == null || event.getExpiresAt().after(now));
     }
 
     @Transactional

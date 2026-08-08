@@ -516,8 +516,11 @@ async def _wait_for_proactive_delivery(
 async def _audit_proactive_delivery(audit, delivery_result):
     mac_address = audit["mac_address"]
     audit_event_id = audit["event_id"]
+    claim_token = audit.get("_claim_token")
     try:
-        await create_proactive_event(audit)
+        await create_proactive_event({
+            key: value for key, value in audit.items() if not key.startswith("_")
+        })
         delivered = (
             await delivery_result
             if hasattr(delivery_result, "__await__")
@@ -528,6 +531,7 @@ async def _audit_proactive_delivery(audit, delivery_result):
             mac_address,
             "delivered" if delivered else "failed",
             "none" if delivered else "failed",
+            **({"claim_token": claim_token} if claim_token else {}),
         )
         return True
     except asyncio.CancelledError:
@@ -893,18 +897,21 @@ async def _handle_device_health_notification(conn, params, notification_state=No
         return
     bypass_policy = recovered or severity == "critical"
     if bypass_policy:
+        claim_token = uuid.uuid4().hex
         try:
             claimed = await claim_proactive_event(
-                audit["event_id"], audit["mac_address"]
+                audit["event_id"], audit["mac_address"], claim_token
             )
         except Exception as error:
-            logger.bind(tag=TAG).error(
-                f"关键设备健康事件领取失败: {type(error).__name__}"
+            logger.bind(tag=TAG).warning(
+                f"关键设备健康事件领取服务不可用，按安全契约继续播报: {type(error).__name__}"
             )
-            return
-        if not claimed:
+            claimed = None
+        if claimed is False:
             logger.bind(tag=TAG).info("设备健康事件已由其他连接领取")
             return
+        if claimed is not False:
+            audit["_claim_token"] = claim_token
     if not _claim_notification_event(conn, event["event_id"]):
         logger.bind(tag=TAG).info("忽略重复的设备健康通知")
         return

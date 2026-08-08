@@ -18,7 +18,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -235,29 +235,39 @@ class ProactiveServiceTest {
         update.setMacAddress(device.getMacAddress());
         update.setDeliveryStatus(DeliveryStatus.DELIVERED);
         update.setOutcome(Outcome.ACKNOWLEDGED);
-        when(eventDao.updateStatus(eq("device-1"), eq("event-1"), eq("DELIVERED"),
-                eq("ACKNOWLEDGED"), any())).thenReturn(1);
-        when(eventDao.selectByDeviceAndEventId("device-1", "event-1"))
-                .thenReturn(eventEntity(eventRequest()));
+        ProactiveEventEntity pending = eventEntity(eventRequest());
+        ProactiveEventEntity delivered = eventEntity(eventRequest());
+        delivered.setDeliveryStatus(DeliveryStatus.DELIVERED.name());
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(pending);
+        when(eventDao.updateStatusCas(eq("device-1"), eq("event-1"), eq("PENDING"),
+                eq(null), eq("DELIVERED"), eq("ACKNOWLEDGED"), any())).thenReturn(1);
+        when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(delivered);
 
         service.updateEventStatus("event-1", update);
 
-        verify(eventDao).updateStatus(eq("device-1"), eq("event-1"), eq("DELIVERED"),
-                eq("ACKNOWLEDGED"), any());
+        verify(eventDao).updateStatusCas(eq("device-1"), eq("event-1"), eq("PENDING"),
+                eq(null), eq("DELIVERED"), eq("ACKNOWLEDGED"), any());
     }
 
     @Test
     void concurrentEventClaimHasExactlyOneServiceWinner() throws Exception {
-        EventClaim claim = new EventClaim();
-        claim.setMacAddress(device.getMacAddress());
-        AtomicInteger updates = new AtomicInteger();
-        when(eventDao.claimPending(eq("device-1"), eq("event-1"), any()))
-                .thenAnswer(ignored -> updates.getAndIncrement() == 0 ? 1 : 0);
+        EventClaim first = claim("token-1");
+        EventClaim second = claim("token-2");
+        AtomicReference<String> owner = new AtomicReference<>();
+        when(eventDao.claimPending(eq("device-1"), eq("event-1"), any(), any(), any()))
+                .thenAnswer(call -> owner.compareAndSet(null, call.getArgument(2)) ? 1 : 0);
+        when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenAnswer(ignored -> {
+            ProactiveEventEntity event = eventEntity(eventRequest());
+            event.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
+            event.setClaimToken(owner.get());
+            return event;
+        });
 
         try (var executor = Executors.newFixedThreadPool(2)) {
             var results = executor.invokeAll(List.of(
-                    () -> service.claimEvent("event-1", claim),
-                    () -> service.claimEvent("event-1", claim)));
+                    () -> service.claimEvent("event-1", first),
+                    () -> service.claimEvent("event-1", second)));
             long winners = results.stream().filter(result -> {
                 try {
                     return Boolean.TRUE.equals(result.get());
@@ -267,6 +277,70 @@ class ProactiveServiceTest {
             }).count();
             assertEquals(1, winners);
         }
+    }
+
+    @Test
+    void lostClaimResponseCanRetryWithSameToken() {
+        EventClaim claim = claim("same-token");
+        ProactiveEventEntity claimed = eventEntity(eventRequest());
+        claimed.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
+        claimed.setClaimToken("same-token");
+        when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(claimed);
+
+        assertTrue(service.claimEvent("event-1", claim));
+        assertTrue(service.claimEvent("event-1", claim));
+    }
+
+    @Test
+    void staleLeaseCanBeReclaimedByDifferentToken() {
+        EventClaim claim = claim("new-token");
+        ProactiveEventEntity reclaimed = eventEntity(eventRequest());
+        reclaimed.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
+        reclaimed.setClaimToken("new-token");
+        when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(reclaimed);
+
+        assertTrue(service.claimEvent("event-1", claim));
+        verify(eventDao).claimPending(eq("device-1"), eq("event-1"), eq("new-token"),
+                any(), any());
+    }
+
+    @Test
+    void oldClaimTokenCannotCompleteReclaimedEvent() {
+        ProactiveEventEntity claimed = eventEntity(eventRequest());
+        claimed.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
+        claimed.setClaimToken("new-token");
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(claimed);
+        EventStatusUpdate update = status(DeliveryStatus.DELIVERED, "old-token");
+
+        assertThrows(RenException.class, () -> service.updateEventStatus("event-1", update));
+        verify(eventDao, never()).updateStatusCas(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void oldClaimTokenCannotUpdateOutcomeAfterNewClaimDelivered() {
+        ProactiveEventEntity delivered = eventEntity(eventRequest());
+        delivered.setDeliveryStatus(DeliveryStatus.DELIVERED.name());
+        delivered.setClaimToken("new-token");
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(delivered);
+
+        assertThrows(RenException.class, () -> service.updateEventStatus(
+                "event-1", status(DeliveryStatus.DELIVERED, "old-token")));
+        verify(eventDao, never()).updateStatusCas(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void terminalEventCannotRegressOrBeClaimedDirectly() {
+        ProactiveEventEntity delivered = eventEntity(eventRequest());
+        delivered.setDeliveryStatus(DeliveryStatus.DELIVERED.name());
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(delivered);
+
+        assertThrows(RenException.class, () -> service.updateEventStatus(
+                "event-1", status(DeliveryStatus.FAILED, null)));
+        assertThrows(RenException.class, () -> service.updateEventStatus(
+                "event-1", status(DeliveryStatus.CLAIMED, null)));
     }
 
     @Test
@@ -384,6 +458,22 @@ class ProactiveServiceTest {
         value.setCreatedAt(new Date());
         value.setDedupeKey("reminder-1");
         value.setRequiresResponse(true);
+        return value;
+    }
+
+    private EventClaim claim(String token) {
+        EventClaim value = new EventClaim();
+        value.setMacAddress(device.getMacAddress());
+        value.setClaimToken(token);
+        return value;
+    }
+
+    private EventStatusUpdate status(DeliveryStatus deliveryStatus, String token) {
+        EventStatusUpdate value = new EventStatusUpdate();
+        value.setMacAddress(device.getMacAddress());
+        value.setDeliveryStatus(deliveryStatus);
+        value.setOutcome(deliveryStatus == DeliveryStatus.FAILED ? Outcome.FAILED : Outcome.NONE);
+        value.setClaimToken(token);
         return value;
     }
 

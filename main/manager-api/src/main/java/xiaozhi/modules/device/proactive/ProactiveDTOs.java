@@ -105,12 +105,15 @@ public final class ProactiveDTOs {
         @JsonProperty("mac_address") private String macAddress;
         @NotNull @JsonProperty("delivery_status") private DeliveryStatus deliveryStatus;
         @NotNull private Outcome outcome;
+        @Size(max = 64) @JsonProperty("claim_token") private String claimToken;
     }
 
     @Data
     public static class EventClaim extends StrictRequest {
         @NotBlank(message = "mac_address不能为空") @Size(max = 50)
         @JsonProperty("mac_address") private String macAddress;
+        @NotBlank(message = "claim_token不能为空") @Size(max = 64)
+        @JsonProperty("claim_token") private String claimToken;
     }
 
     @Data
