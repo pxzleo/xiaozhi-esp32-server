@@ -8,8 +8,24 @@ import {
   createPreferenceForm,
   listBelongsToDevice,
   preferencePayload,
+  recoverPreferenceFailure,
   validatePreference,
 } from '../src/utils/proactiveAssistant.mjs';
+
+test('clears failed loads but preserves a verified preference after mutation failure', () => {
+  const current = {
+    preference: { device_id: 'device-a', mode: 'active' },
+    loadedDeviceId: 'device-a',
+    form: createPreferenceForm({ mode: 'active', daily_limit: 3 }),
+  };
+
+  assert.deepEqual(recoverPreferenceFailure(current, true), {
+    preference: {},
+    loadedDeviceId: '',
+    form: createPreferenceForm(),
+  });
+  assert.deepEqual(recoverPreferenceFailure(current, false), current);
+});
 
 test('rejects responses from an older generation or another device', () => {
   const gate = new DeviceRequestGate();

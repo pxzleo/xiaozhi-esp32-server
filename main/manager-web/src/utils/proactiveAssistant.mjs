@@ -61,6 +61,17 @@ export function listBelongsToDevice(values, deviceId) {
   return Array.isArray(values) && values.every(value => belongsToDevice(value, deviceId));
 }
 
+export function recoverPreferenceFailure(current, clearState) {
+  if (clearState) {
+    return { preference: {}, loadedDeviceId: '', form: createPreferenceForm() };
+  }
+  return {
+    preference: current.preference,
+    loadedDeviceId: current.loadedDeviceId,
+    form: current.form,
+  };
+}
+
 export function normalizeTime(value) {
   return typeof value === 'string' && /^\d{2}:\d{2}/.test(value) ? value.slice(0, 5) : '';
 }

@@ -178,6 +178,7 @@ import {
   defaultDailyLimit,
   listBelongsToDevice,
   preferencePayload,
+  recoverPreferenceFailure,
   validatePreference,
 } from '@/utils/proactiveAssistant.mjs';
 
@@ -292,7 +293,7 @@ export default {
         if (!this.requestGate.isCurrent(request)) return;
         const preference = this.responseData(response);
         if (!belongsToDevice(preference, deviceId)) {
-          this.handlePreferenceFailure(null, 'proactive.loadPreferenceFailed');
+          this.handlePreferenceFailure(null, 'proactive.loadPreferenceFailed', true);
           return;
         }
         this.preferenceLoading = false;
@@ -301,16 +302,21 @@ export default {
         this.loadedDeviceId = deviceId;
       }, error => {
         if (!this.requestGate.isCurrent(request)) return;
-        this.handlePreferenceFailure(error, 'proactive.loadPreferenceFailed');
+        this.handlePreferenceFailure(error, 'proactive.loadPreferenceFailed', true);
       });
     },
-    handlePreferenceFailure(error, fallbackKey) {
+    handlePreferenceFailure(error, fallbackKey, clearState = false) {
+      const recovered = recoverPreferenceFailure({
+        preference: this.preference,
+        loadedDeviceId: this.loadedDeviceId,
+        form: this.form,
+      }, clearState);
       this.preferenceLoading = false;
       this.saving = false;
       this.silencing = false;
-      this.preference = {};
-      this.loadedDeviceId = '';
-      this.form = createPreferenceForm();
+      this.preference = recovered.preference;
+      this.loadedDeviceId = recovered.loadedDeviceId;
+      this.form = recovered.form;
       this.preferenceError = this.errorMessage(error, fallbackKey);
       this.$message.error(this.preferenceError);
     },
