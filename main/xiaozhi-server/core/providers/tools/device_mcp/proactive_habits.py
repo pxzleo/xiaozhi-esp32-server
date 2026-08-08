@@ -145,9 +145,7 @@ async def _suggest_habit(
     if claims is None:
         claims = set()
         conn._habit_suggestion_events = claims
-    if event_id in claims or not claim_proactive_opportunity(
-        conn, event_id, cooldown_seconds=365 * 24 * 3600, policy_topic="habit"
-    ):
+    if event_id in claims:
         return False
     event = {
         "mac_address": mac_address,
@@ -165,6 +163,10 @@ async def _suggest_habit(
     stored = await create_proactive_event(event)
     if isinstance(stored, dict) and stored.get("delivery_status") == "delivered":
         claims.add(event_id)
+        return False
+    if not claim_proactive_opportunity(
+        conn, event_id, cooldown_seconds=365 * 24 * 3600, policy_topic="habit"
+    ):
         return False
     from core.providers.tools.device_mcp.mcp_handler import _speak_proactive_notification
 

@@ -223,6 +223,72 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertEqual("conservative", conn.proactive_preferences["mode"])
 
+    async def test_stale_connection_preference_failure_cannot_reset_device_change(self):
+        logger = Mock()
+        logger.bind.return_value = logger
+        conn = SimpleNamespace(
+            device_id="AA:BB",
+            logger=logger,
+            proactive_preferences=safe_local_preferences(),
+            _proactive_preference_revision=0,
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_failure(_mac_address):
+            started.set()
+            await release.wait()
+            raise RuntimeError("manager offline")
+
+        with patch("core.connection.get_proactive_preference", delayed_failure):
+            task = asyncio.create_task(ConnectionHandler._load_proactive_preferences(conn))
+            await started.wait()
+            conn.proactive_preferences = {
+                **safe_local_preferences(),
+                "mode": "conservative",
+                "daily_limit": 1,
+            }
+            conn._proactive_preference_revision += 1
+            release.set()
+            await task
+        self.assertEqual("conservative", conn.proactive_preferences["mode"])
+
+    async def test_follow_up_outcome_waits_for_delivery_audit(self):
+        calls = []
+
+        async def create_event(_event):
+            calls.append("created")
+            await asyncio.sleep(0)
+            return {"delivery_status": "pending"}
+
+        async def update_status(_event_id, _mac, delivery_status, outcome):
+            calls.append((delivery_status, outcome))
+
+        event = _event_fields()
+        with patch.object(
+            mcp_handler, "create_proactive_event", side_effect=create_event
+        ), patch.object(
+            mcp_handler, "update_proactive_event_status", side_effect=update_status
+        ):
+            audit_task = mcp_handler._schedule_delivery_audit(
+                self.conn,
+                event,
+                {"title": "完成跟进", "reference_id": "7", "source": "device"},
+                True,
+            )
+            self.conn._current_followup_audit_event_id = "event-1"
+            self.conn._current_followup_audit_task = audit_task
+            mcp_handler.handle_successful_device_tool_result(
+                self.conn,
+                "self.schedule.complete_recent",
+                {"action": "RESPONSE", "data": {}},
+            )
+            await asyncio.gather(*self.conn._proactive_background_tasks)
+        self.assertEqual(
+            ["created", ("delivered", "none"), ("delivered", "completed")],
+            calls,
+        )
+
 
 class ManageApiProactiveClientTest(unittest.IsolatedAsyncioTestCase):
     async def test_strict_wrapper_uses_expected_endpoint_without_logging_payload(self):
@@ -339,6 +405,48 @@ class HabitSuggestionTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(await suggest_habit_candidate(conn, candidate))
         self.assertEqual(events[0], events[1])
+
+    async def test_delivered_candidate_does_not_consume_daily_budget(self):
+        conn = SimpleNamespace(
+            device_id="AA:BB",
+            headers={"device-id": "AA:BB"},
+            proactive_preferences={
+                **safe_local_preferences(),
+                "daily_limit": 1,
+            },
+        )
+
+        async def existing_status(event):
+            status = (
+                "delivered"
+                if event["payload"]["reference_id"] == "music:category:old"
+                else "pending"
+            )
+            return {"delivery_status": status}
+
+        base = {
+            "evidence_count": 3,
+            "habit_type": "content_preference",
+            "first_seen_at": 1_786_170_600_000,
+        }
+        with patch(
+            "core.providers.tools.device_mcp.proactive_habits.create_proactive_event",
+            side_effect=existing_status,
+        ), patch(
+            "core.providers.tools.device_mcp.proactive_habits.update_proactive_event_status",
+            AsyncMock(),
+        ), patch.object(
+            mcp_handler, "_speak_proactive_notification", AsyncMock(return_value="sid")
+        ) as speak:
+            old_result = await suggest_habit_candidate(
+                conn, {**base, "habit_key": "music:category:old"}
+            )
+            new_result = await suggest_habit_candidate(
+                conn, {**base, "habit_key": "music:category:new"}
+            )
+        self.assertFalse(old_result)
+        self.assertTrue(new_result)
+        speak.assert_awaited_once()
 
 
 if __name__ == "__main__":

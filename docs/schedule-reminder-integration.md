@@ -73,3 +73,5 @@ MCP 消息仍由后台任务处理，但任务入口必须捕获并记录异常�
 请求不得有额外字段；`source_id` 是正整数，`label` 去空白后为 1–80 个 Unicode 字符，`topic=follow_up`、`priority=normal`、`reason="schedule follow up"`、`follow_up=true`、`requires_response=true`、`speak=true`。服务端不调用 LLM，固定播报“刚才提醒的 `{label}` 完成了吗？”，并沿用现有 TTS 和自动收听链。同连接重复 `event_id` 只处理一次；65–96 字符的设备事件 ID 会确定性映射为不超过 64 字符的 manager 审计 ID。无效通知日志不包含 `label`。
 
 跟进事件按统一主动事件契约审计。设备 `self.schedule.complete_recent/follow_up/dismiss_follow_up` 成功后，服务端分别将当前事件 outcome 更新为 `completed/acknowledged/dismissed`。普通闹铃/提醒仍不恢复音乐，每日简报的独立恢复逻辑不受影响。
+
+同一 follow-up 的 outcome 回写必须等待该事件的审计创建与初始投递状态完成。二者共享单一异步任务顺序，保证不会在事件创建前更新失败，也不会让较晚的 `outcome=none` 覆盖已确认的终态。

@@ -472,6 +472,7 @@ def _schedule_delivery_audit(conn, event, payload, delivered):
         conn._proactive_audit_tasks = tasks
     tasks.add(task)
     task.add_done_callback(tasks.discard)
+    return task
 
 
 def _schedule_visible_background_task(conn, coroutine, name):
@@ -504,6 +505,16 @@ async def _sync_preference_with_retry(conn, preference):
             if attempt == 0:
                 await asyncio.sleep(0)
     raise RuntimeError("偏好同步重试失败") from last_error
+
+
+async def _sync_followup_outcome_after_audit(
+    audit_task, event_id, mac_address, delivery_status, outcome
+):
+    if isinstance(audit_task, asyncio.Task):
+        await audit_task
+    await update_proactive_event_status(
+        event_id, mac_address, delivery_status, outcome
+    )
 
 
 def handle_successful_device_tool_result(conn, actual_name, result):
@@ -573,10 +584,15 @@ def handle_successful_device_tool_result(conn, actual_name, result):
         mac_address = getattr(conn, "device_id", None)
         if isinstance(event_id, str) and isinstance(mac_address, str):
             delivery_status, outcome = schedule_outcomes[actual_name]
+            audit_task = getattr(conn, "_current_followup_audit_task", None)
             _schedule_visible_background_task(
                 conn,
-                update_proactive_event_status(
-                    event_id, mac_address, delivery_status, outcome
+                _sync_followup_outcome_after_audit(
+                    audit_task,
+                    event_id,
+                    mac_address,
+                    delivery_status,
+                    outcome,
                 ),
                 "完成跟进结果同步",
             )
@@ -628,7 +644,7 @@ async def _handle_schedule_follow_up_notification(conn, params, notification_sta
     sentence_id = await _speak_proactive_notification(
         conn, f"刚才提醒的{label.strip()}完成了吗？", "完成跟进", notification_state
     )
-    _schedule_delivery_audit(
+    conn._current_followup_audit_task = _schedule_delivery_audit(
         conn,
         event,
         {"title": "完成跟进", "reference_id": str(source_id), "source": "device"},

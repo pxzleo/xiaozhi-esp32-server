@@ -1012,6 +1012,9 @@ class ConnectionHandler:
 
             schedule_candidate_suggestion(self)
         except Exception as error:
+            if revision != self._proactive_preference_revision:
+                self.logger.bind(tag=TAG).info("忽略建连期间过期偏好请求的失败结果")
+                return
             self.proactive_preferences = safe_local_preferences()
             self.logger.bind(tag=TAG).warning(
                 f"积极主动偏好加载失败，使用安全本地默认: {type(error).__name__}"
