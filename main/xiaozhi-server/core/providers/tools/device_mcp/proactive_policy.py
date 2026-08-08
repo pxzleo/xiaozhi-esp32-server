@@ -175,8 +175,8 @@ def claim_proactive_opportunity(
             state = _DevicePolicyState(day=day)
             _states[key] = state
         elif state.day < day:
-            state = _DevicePolicyState(day=day)
-            _states[key] = state
+            state.day = day
+            state.used = 0
         previous = state.topic_times.get(topic)
         if previous is not None and current - previous < cooldown_seconds:
             return False

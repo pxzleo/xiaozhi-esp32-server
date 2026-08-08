@@ -72,6 +72,61 @@ class ProactivePolicyTest(unittest.TestCase):
             )
         )
 
+    def test_aggressive_topic_cooldown_survives_midnight(self):
+        set_connection_preferences(
+            self.conn,
+            {
+                "mode": "aggressive",
+                "daily_limit": 0,
+                "quiet_start": None,
+                "quiet_end": None,
+                "allowed_topics": [],
+                "blocked_topics": [],
+            },
+        )
+        before_midnight = datetime(2026, 8, 8, 23, 59, 50).timestamp()
+        self.assertTrue(
+            claim_proactive_opportunity(
+                self.conn, "weather", cooldown_seconds=120, now=before_midnight
+            )
+        )
+        self.assertFalse(
+            claim_proactive_opportunity(
+                self.conn, "weather", cooldown_seconds=120, now=before_midnight + 20
+            )
+        )
+        self.assertTrue(
+            claim_proactive_opportunity(
+                self.conn, "weather", cooldown_seconds=120, now=before_midnight + 121
+            )
+        )
+
+    def test_new_day_resets_active_budget_without_dropping_cooldown(self):
+        set_connection_preferences(
+            self.conn,
+            {
+                "mode": "active",
+                "daily_limit": 2,
+                "quiet_start": None,
+                "quiet_end": None,
+                "allowed_topics": [],
+                "blocked_topics": [],
+            },
+        )
+        before_midnight = datetime(2026, 8, 8, 23, 59, 40).timestamp()
+        self.assertTrue(claim_proactive_opportunity(
+            self.conn, "calendar", cooldown_seconds=120, now=before_midnight))
+        self.assertTrue(claim_proactive_opportunity(
+            self.conn, "system", cooldown_seconds=120, now=before_midnight + 10))
+        self.assertFalse(claim_proactive_opportunity(
+            self.conn, "calendar", cooldown_seconds=120, now=before_midnight + 30))
+        self.assertTrue(claim_proactive_opportunity(
+            self.conn, "music", cooldown_seconds=120, now=before_midnight + 31))
+        self.assertTrue(claim_proactive_opportunity(
+            self.conn, "weather", cooldown_seconds=120, now=before_midnight + 32))
+        self.assertFalse(claim_proactive_opportunity(
+            self.conn, "habit", cooldown_seconds=120, now=before_midnight + 33))
+
     def test_mock_like_device_attribute_does_not_become_shared_key(self):
         first = SimpleNamespace(headers={})
         second = SimpleNamespace(headers={})

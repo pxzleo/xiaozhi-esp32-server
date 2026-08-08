@@ -60,7 +60,7 @@ manager-web 在设备管理列表的单台设备操作区提供“主动助理�
 
 ### 服务端执行契约
 
-连接建立后，服务端按设备 MAC 异步读取偏好。manager-api 不可用时，critical 故障与恢复通知仍直接投递；其他建议使用 `active`、每日 5 次、无默认安静时段的本地安全值。`conservative` 只允许 critical，`today_silent` 屏蔽非 critical；`active` 同时受日上限、主题冷却、安静时段和 allow/block 主题约束。`aggressive` 仅绕过每日总额度，主题冷却、安静时段、allow/block、过期、连接和投递安全规则均不变；critical 原语义不变。同设备并发领取在进程内原子完成。
+连接建立后，服务端按设备 MAC 异步读取偏好。manager-api 不可用时，critical 故障与恢复通知仍直接投递；其他建议使用 `active`、每日 5 次、无默认安静时段的本地安全值。`conservative` 只允许 critical，`today_silent` 屏蔽非 critical；`active` 同时受日上限、主题冷却、安静时段和 allow/block 主题约束。`aggressive` 仅绕过每日总额度，主题冷却、安静时段、allow/block、过期、连接和投递安全规则均不变；跨日只重置每日已用次数，不清除仍在有效期内的主题冷却；critical 原语义不变。同设备并发领取在进程内原子完成。
 
 建连 GET 偏好的成功或失败结果都必须校验当前连接的偏好修改代次；设备工具已在此期间成功修改偏好时，过期 GET 既不得覆盖新值，也不得因请求失败把新值重置为本地默认。
 
