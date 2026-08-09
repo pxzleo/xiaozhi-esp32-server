@@ -251,7 +251,8 @@ public class ProactiveService {
         DeliveryStatus target = request.getDeliveryStatus();
         String claimToken = request.getClaimToken();
         boolean transitionAllowed = switch (source) {
-            case PENDING -> target == DeliveryStatus.DELIVERED || target == DeliveryStatus.FAILED;
+            case PENDING -> target == DeliveryStatus.DELIVERED || target == DeliveryStatus.FAILED
+                    || target == DeliveryStatus.DISMISSED;
             case CLAIMED -> (target == DeliveryStatus.DELIVERED || target == DeliveryStatus.FAILED)
                     && claimToken != null && claimToken.equals(current.getClaimToken());
             case DELIVERED -> target == DeliveryStatus.DELIVERED
@@ -259,7 +260,8 @@ public class ProactiveService {
                         || current.getClaimToken().equals(claimToken));
             default -> false;
         };
-        if (!transitionAllowed || target == DeliveryStatus.CLAIMED) {
+        if (!transitionAllowed || target == DeliveryStatus.CLAIMED
+                || target == DeliveryStatus.DISMISSED && request.getOutcome() != Outcome.DISMISSED) {
             throw new RenException("主动事件状态转换无效");
         }
         if (eventDao.updateStatusCas(device.getId(), eventId, source.name(), claimToken,

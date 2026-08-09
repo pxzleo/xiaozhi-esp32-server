@@ -32,7 +32,7 @@ from plugins_func.functions.get_news_from_newsnow import CHANNEL_MAP
 from core.providers.tools.device_mcp.proactive_policy import (
     claim_proactive_opportunity,
     release_proactive_opportunity,
-    reserve_proactive_opportunity,
+    reserve_proactive_opportunity_with_reason,
     set_connection_preferences,
 )
 
@@ -1423,15 +1423,29 @@ async def _handle_external_triggered_notification(
         f"external_weather:{event['payload'].get('reference_id')}"
         if event["topic"] == "weather" else "external_news"
     )
-    reservation = reserve_proactive_opportunity(
+    decision = reserve_proactive_opportunity_with_reason(
         conn,
         opportunity_key,
         cooldown_seconds=cooldown,
         policy_topic=event["topic"],
         critical=critical_weather,
     )
+    reservation = decision.reservation
     if reservation is None:
-        logger.bind(tag=TAG).info("外界事件被当前主动策略抑制")
+        try:
+            await update_proactive_event_status(
+                event_id, mac_address, "dismissed", "dismissed", claim_token=None
+            )
+            logger.bind(tag=TAG).info(
+                "外界事件被主动策略抑制并终止: reason={}",
+                decision.rejection_reason,
+            )
+        except Exception as error:
+            logger.bind(tag=TAG).error(
+                "外界事件被主动策略抑制但终态回写失败: reason={}, error={}",
+                decision.rejection_reason,
+                type(error).__name__,
+            )
         return
     claim_token = uuid.uuid4().hex
     try:

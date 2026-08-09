@@ -13,6 +13,19 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 
 @Mapper
 public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
+    @Update("""
+            UPDATE ai_device_proactive_event
+            SET delivery_status = 'PENDING', claim_token = NULL, claimed_at = NULL,
+                updated_at = #{now}
+            WHERE device_id = #{deviceId}
+              AND event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
+              AND delivery_status = 'CLAIMED'
+              AND (claimed_at IS NULL OR claimed_at < #{claimCutoff})
+              AND (expires_at IS NULL OR expires_at > #{now})
+            """)
+    int releaseExpiredMonitorClaims(@Param("deviceId") String deviceId,
+            @Param("now") Date now, @Param("claimCutoff") Date claimCutoff);
+
     @Select("""
             SELECT * FROM ai_device_proactive_event
             WHERE device_id = #{deviceId} AND event_id = #{eventId}
@@ -129,16 +142,14 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             WHERE e.device_id = #{deviceId}
               AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
               AND (e.expires_at IS NULL OR e.expires_at > #{now})
-              AND (e.delivery_status = 'PENDING'
-                   OR (e.delivery_status = 'CLAIMED'
-                       AND (e.claimed_at IS NULL OR e.claimed_at < #{claimCutoff})))
+              AND e.delivery_status = 'PENDING'
             ORDER BY CASE e.priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
                      WHEN 'NORMAL' THEN 2 ELSE 3 END,
                      e.created_at, e.id
             LIMIT 20
             """)
     List<ProactiveEventEntity> selectPendingMonitorEvents(@Param("deviceId") String deviceId,
-            @Param("now") Date now, @Param("claimCutoff") Date claimCutoff);
+            @Param("now") Date now);
 
     @Select("""
             SELECT e.* FROM ai_device_proactive_event e

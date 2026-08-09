@@ -148,17 +148,22 @@ class ExternalTriggeredTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*conn._proactive_audit_tasks)
         self.assertEqual("failed", status.await_args.args[2])
 
-    async def test_news_quiet_policy_leaves_event_pending(self):
+    async def test_news_policy_suppression_dismisses_event(self):
         conn = connection()
         conn.proactive_preferences["mode"] = "today_silent"
         conn.proactive_preferences["daily_limit"] = 0
         with patch.object(mcp_handler, "get_proactive_monitor_event", AsyncMock(return_value=event())), patch.object(
             mcp_handler, "claim_proactive_event", AsyncMock()
-        ) as claim:
+        ) as claim, patch.object(
+            mcp_handler, "update_proactive_event_status", AsyncMock()
+        ) as status:
             await mcp_handler._handle_external_triggered_notification(
                 conn, {"version": 1, "event_id": "ext-1", "speak": True}
             )
         claim.assert_not_awaited()
+        status.assert_awaited_once_with(
+            "ext-1", "AA:BB", "dismissed", "dismissed", claim_token=None
+        )
 
     async def test_critical_weather_bypasses_quiet_policy(self):
         conn = connection()

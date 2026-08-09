@@ -46,7 +46,7 @@ manager-api 请求体中的 `created_at`、`expires_at` 和 `seen_at` 使用 Uni
 - `GET /device/proactive/events`：分页参数为 `page`（1 至 1000）和 `limit`（1 至 100），可选 `device_id`、`topic`、`delivery_status`、`event_type` 过滤；未给 `device_id` 时只查询本人全部绑定设备。
 - `GET /device/proactive/habits`、`DELETE /device/proactive/habits/{habitId}`：列出本人设备的习惯或删除指定候选；列表可选 `device_id`。
 - `GET|PUT /device/proactive/monitors/{deviceId}`：原子读取或同时更新本人设备的天气、新闻监测配置。天气默认 30 分钟、新闻默认 10 分钟，两类默认启用；配置字段严格校验，未知字段拒绝，普通监测首次运行以空 `state` 建立基线。
-- `GET /device/proactive/pending`：设备使用 `Device-Id`、`Client-Id` 和 Bearer HMAC 令牌鉴权。每次探测更新两类监测的 `last_probe_at`，只返回一个未过期、可领取的 `weather_alert/news_alert` 安全信封，不返回 payload 或 reason；无事件时返回 `pending=false,retry_after_seconds=300`。用户关闭某类 monitor 后该类事件一律拒绝，critical 天气也不能绕过关闭开关；在 monitor 已启用的前提下，仅 critical 天气可以绕过今日静默、安静时段、模式和主题 allow/block，新闻永不绕过；`conservative` 也只允许已启用的 critical 天气。
+- `GET /device/proactive/pending`：设备使用 `Device-Id`、`Client-Id` 和 Bearer HMAC 令牌鉴权。每次探测更新两类监测的 `last_probe_at`；事务内先把租约已过期且事件仍有效的外界 `claimed` 事件恢复为 `pending`，再只返回一个未过期、可领取的 `weather_alert/news_alert` 安全信封，不返回 payload 或 reason；无事件时返回 `pending=false,retry_after_seconds=300`。用户关闭某类 monitor 后该类事件一律拒绝，critical 天气也不能绕过关闭开关；在 monitor 已启用的前提下，仅 critical 天气可以绕过今日静默、安静时段、模式和主题 allow/block，新闻永不绕过；`conservative` 也只允许已启用的 critical 天气。
 - `GET /device/proactive/pending` 必须先按当前 Web MVC 日期和枚举规则序列化为 UTF-8 JSON 字节，再返回与实际字节数完全一致且非零的 `Content-Length`，不得依赖容器的 chunked 默认行为。设备同时兼容服务端或中间代理改写出的 chunked、连接关闭定界响应，但无论是否声明长度都只允许有界读取最多 2048 字节。
 
 外界监测内部接口继续位于 `/config/proactive/**` 并使用 server-secret：
@@ -71,7 +71,7 @@ Python 服务启动后运行唯一的进程内外界监测 runner，每 30 秒�
 {"jsonrpc":"2.0","method":"notifications/assistant/external_triggered","params":{"version":1,"event_id":"ext-...","speak":true}}
 ```
 
-Python 严格要求 params 恰好包含 `version/event_id/speak`，任何设备自带标题、文本、优先级或 payload 都会整体拒绝。服务端按当前连接 MAC 从 manager-api 读取权威事件，校验类型、主题、有效期和响应标记，再以随机 token 领取既有 180 秒事件租约。普通新闻继续执行偏好、安静时段、每日额度和 2 小时主题冷却；critical 天气绕过这些普通限制但不绕过 manager-api 的 monitor 开关复验、事件有效期、原子领取、连接状态和真实播放终态。TTS 完成信号成功才写 `delivered`；合成失败、连接中断、用户打断、句子替换或超时写 `failed`。新闻固定以“要了解详情吗？”结尾，保存权威标题、来源、事实和原始链接到当前对话及 NewsNow 详情关联并保持连接收听；天气播报行动建议后不进入新闻追问状态。
+Python 严格要求 params 恰好包含 `version/event_id/speak`，任何设备自带标题、文本、优先级或 payload 都会整体拒绝。服务端按当前连接 MAC 从 manager-api 读取权威事件，校验类型、主题、有效期和响应标记，再以随机 token 领取既有 180 秒事件租约。普通新闻继续执行偏好、安静时段、每日额度和 2 小时主题冷却；critical 天气绕过这些普通限制但不绕过 manager-api 的 monitor 开关复验、事件有效期、原子领取、连接状态和真实播放终态。事件若在权威读取后被当前策略拒绝，必须记录稳定原因码并将仍为 `pending` 的事件直接写为 `dismissed/dismissed`，防止设备反复为同一不可播事件建连；终态回写失败必须记录错误并允许后续重试。TTS 完成信号成功才写 `delivered`；合成失败、连接中断、用户打断、句子替换或超时写 `failed`。新闻固定以“要了解详情吗？”结尾，保存权威标题、来源、事实和原始链接到当前对话及 NewsNow 详情关联并保持连接收听；天气播报行动建议后不进入新闻追问状态。
 
 超级管理员通过 `GET|PUT /proactive/classifier/model` 读取或保存独立 LLM model id，并通过 `POST /proactive/classifier/model/test` 检查可用性。未配置、非 LLM、未启用或缺少必要连接配置时明确返回不可用；任何接口都不得返回模型密钥。
 
@@ -100,7 +100,7 @@ manager-web 在设备管理列表的单台设备操作区提供“主动助理�
 
 建连 GET 偏好的成功或失败结果都必须校验当前连接的偏好修改代次；设备工具已在此期间成功修改偏好时，过期 GET 既不得覆盖新值，也不得因请求失败把新值重置为本地默认。
 
-新主动事件按 `pending → claimed → delivered/failed` 异步审计；普通非竞争事件可从 `pending` 直接进入 `delivered/failed`。`/status` 禁止直接写 `claimed`，claimed 只有匹配 token 才能进入终态；终态不得回退，`delivered` 只允许保持同状态更新 outcome。`delivered` 只能在音频发送且设备播放完成信号返回后写入；合成、发送、断连、用户打断、句子被替换或等待超时都写入 `failed`。事件创建或初始状态更新失败时，审计任务显式返回失败，后续 outcome 不得越过失败任务继续回写。后台日志只记录异常类型，不记录 payload、`label` 或 `details`。
+新主动事件按 `pending → claimed → delivered/failed` 异步审计；普通非竞争事件可从 `pending` 直接进入 `delivered/failed`，当前策略拒绝的未领取事件可从 `pending` 进入 `dismissed` 且 outcome 必须为 `dismissed`。`/status` 禁止直接写 `claimed`，claimed 只有匹配 token 才能进入终态；终态不得回退，`delivered` 只允许保持同状态更新 outcome。`delivered` 只能在音频发送且设备播放完成信号返回后写入；合成、发送、断连、用户打断、句子被替换或等待超时都写入 `failed`。事件创建或初始状态更新失败时，审计任务显式返回失败，后续 outcome 不得越过失败任务继续回写。后台日志只记录异常类型，不记录 payload、`label` 或 `details`。
 
 所有 TTS provider 都必须转发消息自身携带的 completion，包括工具提示使用的 `MIDDLE` 文本段；abort、旧句子、合成或发送异常必须完成为失败且同一 completion 只完成一次。日程完成邀请、天气行动句、习惯建议、深夜音乐建议和队列结束建议都在播报前创建审计生命周期并绑定真实 completion。音乐服务连续失败建议因当前普通工具结果链没有独立播放完成句柄，只创建 `pending` 审计，不得把未知结果写成 `delivered` 或 `failed`。
 

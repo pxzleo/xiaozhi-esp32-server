@@ -8,6 +8,7 @@ from core.providers.tools.device_mcp import proactive_policy
 from core.providers.tools.device_mcp.proactive_policy import (
     claim_proactive_opportunity,
     policy_allows,
+    reserve_proactive_opportunity_with_reason,
     reset_proactive_policy_for_test,
     set_connection_preferences,
 )
@@ -34,6 +35,24 @@ class ProactivePolicyTest(unittest.TestCase):
                 self.conn, "music_continue", cooldown_seconds=60, now=161
             )
         )
+
+    def test_reservation_reports_stable_cooldown_and_daily_limit_reasons(self):
+        first = reserve_proactive_opportunity_with_reason(
+            self.conn, "external_news", cooldown_seconds=60, daily_limit=1, now=100
+        )
+        cooldown = reserve_proactive_opportunity_with_reason(
+            self.conn, "external_news", cooldown_seconds=60, daily_limit=1, now=120
+        )
+        budget = reserve_proactive_opportunity_with_reason(
+            self.conn, "weather", cooldown_seconds=0, daily_limit=1, now=161
+        )
+
+        self.assertIsNotNone(first.reservation)
+        self.assertIsNone(first.rejection_reason)
+        self.assertIsNone(cooldown.reservation)
+        self.assertEqual("topic_cooldown", cooldown.rejection_reason)
+        self.assertIsNone(budget.reservation)
+        self.assertEqual("daily_limit", budget.rejection_reason)
 
     def test_daily_limit_is_shared_across_connections_for_device(self):
         other = SimpleNamespace(headers={"device-id": "device-a"})

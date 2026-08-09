@@ -292,8 +292,17 @@ class ProactiveMonitorContractTest {
 
     @Test
     void pendingQueryOnlySelectsMonitorEventsAndNoPayloadProjectionContractLeaks() throws Exception {
-        Method pending = ProactiveEventDao.class.getMethod("selectPendingMonitorEvents",
+        Method release = ProactiveEventDao.class.getMethod("releaseExpiredMonitorClaims",
                 String.class, java.util.Date.class, java.util.Date.class);
+        String releaseSql = release.getAnnotation(Update.class).value()[0];
+        assertTrue(releaseSql.contains("delivery_status = 'CLAIMED'"));
+        assertTrue(releaseSql.contains("claimed_at < #{claimCutoff}"));
+        assertTrue(releaseSql.contains("delivery_status = 'PENDING'"));
+        assertTrue(releaseSql.contains("claim_token = NULL"));
+        assertTrue(releaseSql.contains("claimed_at = NULL"));
+
+        Method pending = ProactiveEventDao.class.getMethod("selectPendingMonitorEvents",
+                String.class, java.util.Date.class);
         String sql = pending.getAnnotation(Select.class).value()[0];
         assertTrue(sql.contains("INNER JOIN ai_device_proactive_monitor m"));
         assertTrue(sql.contains("m.enabled = 1"));
@@ -304,7 +313,7 @@ class ProactiveMonitorContractTest {
         assertTrue(sql.contains("LOWER(TRIM(g.param_value)) = 'true'"));
         assertTrue(sql.contains("event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')"));
         assertTrue(sql.contains("delivery_status = 'PENDING'"));
-        assertTrue(sql.contains("claimed_at < #{claimCutoff}"));
+        assertFalse(sql.contains("delivery_status = 'CLAIMED'"));
         assertTrue(sql.indexOf("m.enabled = 1") < sql.indexOf("ORDER BY"));
         assertTrue(sql.indexOf("m.enabled = 1") < sql.indexOf("LIMIT 20"));
         assertFalse(java.util.Arrays.stream(ProactiveDTOs.PendingEnvelope.class.getRecordComponents())

@@ -26,6 +26,12 @@ class ProactiveOpportunityReservation:
     deadline: float | None
 
 
+@dataclass(frozen=True)
+class ProactiveOpportunityDecision:
+    reservation: ProactiveOpportunityReservation | None
+    rejection_reason: str | None
+
+
 _states: dict[str, _DevicePolicyState] = {}
 _lock = threading.Lock()
 
@@ -123,24 +129,37 @@ def _in_quiet_window(preferences: dict, current: float) -> bool:
     return now_value >= start or now_value < end
 
 
-def policy_allows(conn, topic: str, *, critical: bool = False, now: float | None = None) -> bool:
-    """检查偏好层；关键通知和恢复通知由调用方以 critical 显式放行。"""
+def _policy_rejection_reason(conn, topic: str, *, critical: bool, current: float) -> str | None:
     if critical:
-        return True
+        return None
     preferences = getattr(conn, "proactive_preferences", None)
     if not isinstance(preferences, dict):
         preferences = safe_local_preferences()
-    if preferences.get("mode") in ("conservative", "today_silent"):
-        return False
+    if preferences.get("mode") == "conservative":
+        return "mode_conservative"
+    if preferences.get("mode") == "today_silent":
+        return "today_silent"
     policy_topic = topic if topic in _KNOWN_TOPICS else topic.split("_", 1)[0]
     allowed = set(preferences.get("allowed_topics") or [])
     blocked = set(preferences.get("blocked_topics") or [])
-    if policy_topic in blocked or (allowed and policy_topic not in allowed):
-        return False
-    return not _in_quiet_window(preferences, time.time() if now is None else now)
+    if policy_topic in blocked:
+        return "topic_blocked"
+    if allowed and policy_topic not in allowed:
+        return "topic_not_allowed"
+    if _in_quiet_window(preferences, current):
+        return "quiet_hours"
+    return None
 
 
-def reserve_proactive_opportunity(
+def policy_allows(conn, topic: str, *, critical: bool = False, now: float | None = None) -> bool:
+    """检查偏好层；关键通知和恢复通知由调用方以 critical 显式放行。"""
+    current = time.time() if now is None else now
+    return _policy_rejection_reason(
+        conn, topic, critical=critical, current=current
+    ) is None
+
+
+def reserve_proactive_opportunity_with_reason(
     conn,
     topic: str,
     *,
@@ -149,16 +168,20 @@ def reserve_proactive_opportunity(
     now: float | None = None,
     policy_topic: str | None = None,
     critical: bool = False,
-) -> ProactiveOpportunityReservation | None:
-    """原子预留一次主动发言机会；调用方可在外部领取失败时精确回滚。"""
+) -> ProactiveOpportunityDecision:
+    """原子预留主动机会，并返回未预留时的稳定原因码。"""
     if not topic or cooldown_seconds < 0:
         raise ValueError("主动机会参数无效")
     current = time.time() if now is None else now
-    if not policy_allows(conn, policy_topic or topic, critical=critical, now=current):
-        return None
-    # 关键事件不消耗普通建议预算，也不应被 today_silent 的 0 配额判为参数错误。
+    rejection = _policy_rejection_reason(
+        conn, policy_topic or topic, critical=critical, current=current
+    )
+    if rejection is not None:
+        return ProactiveOpportunityDecision(None, rejection)
     if critical:
-        return ProactiveOpportunityReservation(None, None, None, None)
+        return ProactiveOpportunityDecision(
+            ProactiveOpportunityReservation(None, None, None, None), None
+        )
     preferences = getattr(conn, "proactive_preferences", None)
     if not isinstance(preferences, dict):
         preferences = None
@@ -193,13 +216,37 @@ def reserve_proactive_opportunity(
         for tracked_topic in expired_topics:
             del state.topic_deadlines[tracked_topic]
         if topic in state.topic_deadlines:
-            return None
+            return ProactiveOpportunityDecision(None, "topic_cooldown")
         if not unlimited and state.used >= effective_limit:
-            return None
+            return ProactiveOpportunityDecision(None, "daily_limit")
         state.used += 1
         deadline = current + cooldown_seconds
         state.topic_deadlines[topic] = deadline
-        return ProactiveOpportunityReservation(key, day, topic, deadline)
+        return ProactiveOpportunityDecision(
+            ProactiveOpportunityReservation(key, day, topic, deadline), None
+        )
+
+
+def reserve_proactive_opportunity(
+    conn,
+    topic: str,
+    *,
+    cooldown_seconds: int,
+    daily_limit: int | None = None,
+    now: float | None = None,
+    policy_topic: str | None = None,
+    critical: bool = False,
+) -> ProactiveOpportunityReservation | None:
+    """原子预留一次主动发言机会；调用方可在外部领取失败时精确回滚。"""
+    return reserve_proactive_opportunity_with_reason(
+        conn,
+        topic,
+        cooldown_seconds=cooldown_seconds,
+        daily_limit=daily_limit,
+        now=now,
+        policy_topic=policy_topic,
+        critical=critical,
+    ).reservation
 
 
 def release_proactive_opportunity(reservation: ProactiveOpportunityReservation) -> None:

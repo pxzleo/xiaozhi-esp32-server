@@ -569,6 +569,60 @@ class ProactiveServiceTest {
     }
 
     @Test
+    void pendingEventCanBeDismissedWhenCurrentPolicySuppressesDelivery() {
+        EventStatusUpdate update = new EventStatusUpdate();
+        update.setMacAddress(device.getMacAddress());
+        update.setDeliveryStatus(DeliveryStatus.DISMISSED);
+        update.setOutcome(Outcome.DISMISSED);
+        ProactiveEventEntity pending = eventEntity(eventRequest());
+        ProactiveEventEntity dismissed = eventEntity(eventRequest());
+        dismissed.setDeliveryStatus(DeliveryStatus.DISMISSED.name());
+        dismissed.setOutcome(Outcome.DISMISSED.name());
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(pending);
+        when(eventDao.updateStatusCas(eq("device-1"), eq("event-1"), eq("PENDING"),
+                eq(null), eq("DISMISSED"), eq("DISMISSED"), any())).thenReturn(1);
+        when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(dismissed);
+
+        var result = service.updateEventStatus("event-1", update);
+
+        assertEquals(DeliveryStatus.DISMISSED, result.deliveryStatus());
+        assertEquals(Outcome.DISMISSED, result.outcome());
+    }
+
+    @Test
+    void claimedEventCannotBeDismissedEvenWithItsClaimToken() {
+        EventStatusUpdate update = new EventStatusUpdate();
+        update.setMacAddress(device.getMacAddress());
+        update.setDeliveryStatus(DeliveryStatus.DISMISSED);
+        update.setOutcome(Outcome.DISMISSED);
+        update.setClaimToken("active-token");
+        ProactiveEventEntity claimed = eventEntity(eventRequest());
+        claimed.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
+        claimed.setClaimToken("active-token");
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(claimed);
+
+        assertThrows(RenException.class, () -> service.updateEventStatus("event-1", update));
+
+        verify(eventDao, never()).updateStatusCas(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void dismissedStatusRequiresDismissedOutcome() {
+        EventStatusUpdate update = new EventStatusUpdate();
+        update.setMacAddress(device.getMacAddress());
+        update.setDeliveryStatus(DeliveryStatus.DISMISSED);
+        update.setOutcome(Outcome.NONE);
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(eventEntity(eventRequest()));
+
+        assertThrows(RenException.class, () -> service.updateEventStatus("event-1", update));
+
+        verify(eventDao, never()).updateStatusCas(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void concurrentEventClaimHasExactlyOneServiceWinner() throws Exception {
         EventClaim first = claim("token-1");
         EventClaim second = claim("token-2");
