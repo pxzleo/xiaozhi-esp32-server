@@ -60,12 +60,15 @@ _TYPHOON_QUOTED = re.compile(r"(?:超强台风|强台风|台风)[“\"']([^”\"
 _TYPHOON_UNQUOTED = re.compile(
     r"(?:超强台风|强台风|台风)"
     r"([0-9A-Za-z\u4e00-\u9fff]{2,12}?)"
-    r"(?=外围|影响|逼近|登陆|中心|路径|预警|来袭|肆虐|升级|"
-    r"已|将|在|预计|带来|造成|导致|$)"
+    r"(?=外围|最新|正在|影响|逼近|登陆|中心|路径|预警|来袭|肆虐|升级|"
+    r"增强|减弱|袭击|移入|移出|生成|发展|转向|远离|靠近|北上|南下|"
+    r"已|将|在|预计|带来|造成|导致)"
 )
+_TYPHOON_COMPARISON = re.compile(r"历史|相比|对比|相较|曾经|当年|类似于")
 _TYPHOON_GENERIC_PREFIXES = (
     "外围", "影响", "逼近", "登陆", "中心", "路径", "预警", "来袭", "肆虐",
-    "升级", "预计", "带来", "造成", "导致",
+    "升级", "预计", "带来", "造成", "导致", "红色", "橙色", "黄色", "蓝色",
+    "消息", "动态", "防御指南",
 )
 
 
@@ -889,22 +892,33 @@ def normalize_news_title(value):
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]", "", text)
 
 
+def _typhoon_names(text):
+    names = []
+    value = str(text or "")
+    names.extend(match.group(1) for match in _TYPHOON_QUOTED.finditer(value))
+    names.extend(match.group(1) for match in _TYPHOON_UNQUOTED.finditer(value))
+    normalized = {
+        normalize_news_title(name) for name in names
+        if name and not name.startswith(_TYPHOON_GENERIC_PREFIXES)
+    }
+    return {name for name in normalized if len(name) >= 2}
+
+
 def _news_incident_id(candidate, verdict):
     """为可确定命名的持续事件生成稳定ID；无法确定时退回标题聚类ID。"""
     if verdict.get("category") != "natural_disaster":
         return candidate["cluster_id"]
-    text = str(candidate.get("title") or "")
-    match = _TYPHOON_QUOTED.search(text)
-    name = match.group(1) if match else None
-    if name is None:
-        matches = list(_TYPHOON_UNQUOTED.finditer(text))
-        name = matches[-1].group(1) if matches else None
-        if name and name.startswith(_TYPHOON_GENERIC_PREFIXES):
-            name = None
-    normalized_name = normalize_news_title(name)
-    if len(normalized_name) < 2:
+    names = _typhoon_names(candidate.get("title"))
+    if not names:
+        descriptions = candidate.get("source_descriptions")
+        if not isinstance(descriptions, list):
+            descriptions = []
+        if any(_TYPHOON_COMPARISON.search(str(value or "")) for value in descriptions):
+            return candidate["cluster_id"]
+        names = set().union(*(_typhoon_names(value) for value in descriptions))
+    if len(names) != 1:
         return candidate["cluster_id"]
-    return _hash("natural_disaster", "typhoon", normalized_name, size=40)
+    return _hash("natural_disaster", "typhoon", next(iter(names)), size=40)
 
 
 def _similar_news_title(left, right):
@@ -948,11 +962,18 @@ def prefilter_news(source_items, stats=None):
                 (existing for existing in clusters if _similar_news_title(existing, normalized_title)),
                 normalized_title,
             )
+            source_description = _trim(item.get("description"), 500)
             cluster = clusters.setdefault(key, {
                 "title": title, "url": url, "sources": [], "position": position,
                 "primary_source": source,
-                "facts": _trim(item.get("description") or item.get("extra") or title, 500),
+                "source_descriptions": [],
+                "facts": _trim(source_description or item.get("extra") or title, 500),
             })
+            if (
+                source_description
+                and source_description not in cluster["source_descriptions"]
+            ):
+                cluster["source_descriptions"].append(source_description)
             if source not in cluster["sources"]:
                 cluster["sources"].append(source)
             cluster["position"] = min(cluster["position"], position)

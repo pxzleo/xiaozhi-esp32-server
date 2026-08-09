@@ -10,6 +10,7 @@ import asyncio
 import tempfile
 import traceback
 import threading
+import numpy as np
 
 from abc import ABC, abstractmethod
 from config.logger import setup_logging
@@ -27,6 +28,68 @@ if TYPE_CHECKING:
 
 TAG = __name__
 logger = setup_logging()
+
+
+def _pcm_quality_stats(pcm_bytes: bytes):
+    """计算16kHz 16-bit单声道PCM的无内容质量指标。"""
+    if not isinstance(pcm_bytes, (bytes, bytearray)):
+        raise TypeError("PCM质量统计只接受字节数据")
+    usable_bytes = len(pcm_bytes) - len(pcm_bytes) % 2
+    if usable_bytes == 0:
+        return {
+            "sample_count": 0,
+            "pcm_rms": 0.0,
+            "pcm_peak": 0,
+            "pcm_dc_offset": 0.0,
+            "clipping_ratio": 0.0,
+            "zero_ratio": 0.0,
+        }
+    samples = np.frombuffer(memoryview(pcm_bytes)[:usable_bytes], dtype="<i2")
+    wide_samples = samples.astype(np.int32)
+    absolute_samples = np.abs(wide_samples)
+    return {
+        "sample_count": int(samples.size),
+        "pcm_rms": float(np.sqrt(np.mean(wide_samples.astype(np.float64) ** 2))),
+        "pcm_peak": int(absolute_samples.max()),
+        "pcm_dc_offset": float(wide_samples.mean()),
+        "clipping_ratio": float(np.count_nonzero(absolute_samples >= 32760) / samples.size),
+        "zero_ratio": float(np.count_nonzero(samples == 0) / samples.size),
+    }
+
+
+def _log_asr_result(provider, outcome, duration_ms, audio_ms, pcm_bytes):
+    rtf = duration_ms / audio_ms if audio_ms > 0 else 0.0
+    try:
+        quality = _pcm_quality_stats(pcm_bytes)
+        quality_fields = (
+            f", sample_count={quality['sample_count']}, "
+            f"pcm_rms={quality['pcm_rms']:.1f}, pcm_peak={quality['pcm_peak']}, "
+            f"pcm_dc_offset={quality['pcm_dc_offset']:.1f}, "
+            f"clipping_ratio={quality['clipping_ratio']:.4f}, "
+            f"zero_ratio={quality['zero_ratio']:.4f}"
+        )
+    except Exception as error:
+        quality_fields = f", quality_stats_error={type(error).__name__}"
+        try:
+            logger.bind(tag=TAG).error(
+                f"ASR音频质量统计失败: {type(error).__name__}"
+            )
+        except Exception:
+            pass
+    message = (
+        f"ASR处理结果: provider={provider}, outcome={outcome}, "
+        f"duration_ms={duration_ms:.1f}, audio_ms={audio_ms:.1f}, rtf={rtf:.3f}"
+        f"{quality_fields}"
+    )
+    try:
+        logger.bind(tag=TAG).info(message)
+    except Exception as error:
+        try:
+            logger.bind(tag=TAG).error(
+                f"ASR处理结果日志失败: {type(error).__name__}"
+            )
+        except Exception:
+            pass
 
 
 class ASRProviderBase(ABC):
@@ -119,6 +182,7 @@ class ASRProviderBase(ABC):
                 raw_text = ""
             else:
                 raw_text, _ = asr_result
+                raw_text = raw_text or ""
 
             if getattr(conn, "_external_news_waiting_response", False):
                 corrected_text = correct_news_followup_asr(raw_text)
@@ -279,6 +343,9 @@ class ASRProviderBase(ABC):
     ) -> Tuple[Optional[str], Optional[str]]:
         file_path = None
         temp_path = None
+        started_at = time.monotonic()
+        combined_pcm_data = b""
+        outcome = "error"
         try:
             combined_pcm_data = b"".join(pcm_data)
 
@@ -307,14 +374,22 @@ class ASRProviderBase(ABC):
             text, _ = await self.speech_to_text(
                 pcm_data, session_id, artifacts
             )
+            text = text or ""
+            outcome = "success" if text else "empty"
             return text, file_path
         except OSError as e:
             logger.bind(tag=TAG).error(f"文件操作错误: {e}")
-            return None, None
+            return "", None
         except Exception as e:
             logger.bind(tag=TAG).error(f"语音识别失败: {e}")
-            return None, None
+            return "", None
         finally:
+            duration_ms = (time.monotonic() - started_at) * 1000
+            audio_ms = len(combined_pcm_data) / 32.0
+            _log_asr_result(
+                type(self).__module__, outcome, duration_ms, audio_ms,
+                combined_pcm_data,
+            )
             try:
                 if temp_path and os.path.exists(temp_path):
                     os.unlink(temp_path)

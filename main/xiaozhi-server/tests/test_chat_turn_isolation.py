@@ -29,6 +29,23 @@ class _Dialogue:
 
 
 class ChatTurnIsolationTest(unittest.TestCase):
+    def test_closing_dialogue_ignores_late_asr_result(self):
+        logger = Mock()
+        logger.bind.return_value = logger
+        conn = SimpleNamespace(
+            close_after_chat=True,
+            logger=logger,
+            need_bind=False,
+        )
+
+        with patch.object(
+            receiveAudioHandle, "handle_user_intent", new=AsyncMock()
+        ) as handle_user_intent:
+            asyncio.run(receiveAudioHandle.startToChat(conn, "还有瞄准的"))
+
+        handle_user_intent.assert_not_awaited()
+        logger.info.assert_called_once_with("对话正在关闭，忽略迟到的ASR结果")
+
     def test_tool_call_notice_describes_search(self):
         self.assertEqual(
             get_tool_call_notice([{"name": "web_search"}]),

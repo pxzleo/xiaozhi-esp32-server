@@ -3,6 +3,7 @@ import queue
 import tempfile
 import threading
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
 from core.providers.tts.index_stream import TTSProvider
@@ -16,6 +17,27 @@ class _ConnectionStub:
 
 
 class IndexStreamFilePlaybackTest(unittest.TestCase):
+    def test_leading_fillers_are_removed_before_streaming_tts(self):
+        provider = object.__new__(TTSProvider)
+        provider._correct_words_pattern = None
+        provider.text_to_speak = AsyncMock()
+
+        with patch("core.providers.tts.index_stream.logger"):
+            self.assertTrue(provider.to_tts_single_stream("嘿嘿，哎呀～你好", True))
+
+        provider.text_to_speak.assert_awaited_once_with("你好", True)
+
+    def test_only_leading_fillers_do_not_send_empty_tts_request(self):
+        provider = object.__new__(TTSProvider)
+        provider._correct_words_pattern = None
+        provider.text_to_speak = AsyncMock()
+        provider._process_before_stop_play_files = unittest.mock.Mock()
+
+        self.assertTrue(provider.to_tts_single_stream("嘿嘿，哎呀～", True))
+
+        provider.text_to_speak.assert_not_awaited()
+        provider._process_before_stop_play_files.assert_called_once_with()
+
     def test_prompt_tts_failure_does_not_end_owned_music_session(self):
         provider = object.__new__(TTSProvider)
         provider.conn = _ConnectionStub()

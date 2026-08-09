@@ -503,6 +503,18 @@ class NewsDetectionTest(unittest.IsolatedAsyncioTestCase):
                 "url": "https://news.example/typhoon-landfall",
             }],
         }
+        alert_items = {
+            "澎湃新闻": [{
+                "title": "中央气象台升级发布台风红色预警 六省份有大暴雨",
+                "description": "台风白海豚登陆后继续带来强风暴雨",
+                "url": "https://news.example/typhoon-red-alert",
+            }],
+            "财联社": [{
+                "title": "中央气象台升级发布台风红色预警 六省份有大暴雨",
+                "description": "台风白海豚登陆后继续带来强风暴雨",
+                "url": "https://news.example/typhoon-red-alert",
+            }],
+        }
         verdict = {"items": [{
             "index": 0, "is_major": True, "category": "natural_disaster",
             "severity": "critical", "confidence": 0.95,
@@ -519,23 +531,32 @@ class NewsDetectionTest(unittest.IsolatedAsyncioTestCase):
         }
         first_time = datetime(2026, 8, 9, 4, 0, tzinfo=timezone.utc)
         landed_time = first_time + timedelta(hours=3)
+        alert_time = first_time + timedelta(hours=6)
         with patch(
             "core.proactive_monitor.runner.evaluate_proactive_news_candidates",
-            AsyncMock(side_effect=[verdict, verdict]),
+            AsyncMock(side_effect=[verdict, verdict, verdict]),
         ), patch(
             "core.proactive_monitor.runner.create_proactive_monitor_event",
             AsyncMock(return_value=create_result),
         ) as create, patch(
             "core.proactive_monitor.runner._utc_now",
-            side_effect=[first_time, first_time, landed_time, landed_time],
+            side_effect=[
+                first_time, first_time,
+                landed_time, landed_time,
+                alert_time, alert_time,
+            ],
         ):
             first = await process_news(task, FakeNews(first_items))
             task["state"] = first.state
             second = await process_news(task, FakeNews(landed_items))
+            task["state"] = second.state
+            third = await process_news(task, FakeNews(alert_items))
 
         self.assertEqual(1, create.await_count)
         self.assertEqual([], second.created_event_ids)
         self.assertEqual("same_incident_recently_notified", second.decision["reason"])
+        self.assertEqual([], third.created_event_ids)
+        self.assertEqual("same_incident_recently_notified", third.decision["reason"])
         self.assertTrue(
             create.await_args.args[0]["dedupe_key"].startswith("news-incident:")
         )
@@ -581,6 +602,120 @@ class NewsDetectionTest(unittest.IsolatedAsyncioTestCase):
         candidate["facts"] = "历史台风海燕造成严重损失"
 
         self.assertEqual(first, _news_incident_id(candidate, verdict))
+
+    def test_unnamed_typhoon_alert_uses_unique_name_from_source_description(self):
+        verdict = {"category": "natural_disaster"}
+        named = {
+            "cluster_id": "e" * 40,
+            "title": "台风“白海豚”在浙江玉环沿海登陆",
+            "facts": "台风白海豚已经登陆浙江",
+        }
+        unnamed = {
+            "cluster_id": "f" * 40,
+            "title": "中央气象台升级发布台风红色预警 六省份有大暴雨",
+            "source_descriptions": ["台风白海豚登陆后继续带来强风暴雨"],
+        }
+
+        self.assertEqual(
+            _news_incident_id(named, verdict),
+            _news_incident_id(unnamed, verdict),
+        )
+
+    def test_ambiguous_source_description_does_not_choose_historical_typhoon(self):
+        candidate = {
+            "cluster_id": "1" * 40,
+            "title": "中央气象台升级发布台风红色预警",
+            "source_descriptions": ["台风白海豚正在影响浙江，历史台风海燕造成严重损失"],
+        }
+
+        self.assertEqual(
+            candidate["cluster_id"],
+            _news_incident_id(candidate, {"category": "natural_disaster"}),
+        )
+
+    def test_generic_typhoon_words_are_not_treated_as_names(self):
+        verdict = {"category": "natural_disaster"}
+        for index, title in enumerate((
+            "中央气象台发布台风消息",
+            "沿海地区关注台风动态",
+            "应急部门发布台风防御指南",
+        )):
+            with self.subTest(title=title):
+                candidate = {"cluster_id": str(index + 2) * 40, "title": title}
+                self.assertEqual(
+                    candidate["cluster_id"], _news_incident_id(candidate, verdict)
+                )
+
+    def test_named_typhoon_progress_suffixes_keep_the_exact_name(self):
+        verdict = {"category": "natural_disaster"}
+        baseline = {
+            "cluster_id": "6" * 40,
+            "title": "台风白海豚登陆浙江",
+        }
+        expected = _news_incident_id(baseline, verdict)
+        for index, title in enumerate((
+            "台风白海豚最新消息",
+            "台风白海豚正在影响浙江",
+            "台风白海豚增强为强台风",
+            "台风白海豚袭击沿海",
+            "台风白海豚移入东海",
+        )):
+            with self.subTest(title=title):
+                candidate = {"cluster_id": str(index + 7) * 40, "title": title}
+                self.assertEqual(expected, _news_incident_id(candidate, verdict))
+
+    def test_source_description_comparison_fails_closed(self):
+        candidate = {
+            "cluster_id": "d" * 40,
+            "title": "中央气象台升级发布台风红色预警",
+            "source_descriptions": [
+                "台风白海豚正在影响浙江，与山竹相比强度更高"
+            ],
+        }
+
+        self.assertEqual(
+            candidate["cluster_id"],
+            _news_incident_id(candidate, {"category": "natural_disaster"}),
+        )
+
+    def test_prefilter_aggregates_all_source_descriptions_for_incident_identity(self):
+        items = {
+            "澎湃新闻": [{
+                "title": "中央气象台升级发布台风红色预警",
+                "url": "https://news.example/alert-a",
+            }],
+            "财联社": [{
+                "title": "中央气象台升级发布台风红色预警",
+                "description": "台风白海豚正在影响浙江",
+                "url": "https://news.example/alert-b",
+            }],
+        }
+
+        candidate = prefilter_news(items)[0]
+        named = {
+            "cluster_id": "e" * 40,
+            "title": "台风白海豚登陆浙江",
+        }
+
+        self.assertEqual(
+            _news_incident_id(named, {"category": "natural_disaster"}),
+            _news_incident_id(candidate, {"category": "natural_disaster"}),
+        )
+
+    def test_conflicting_source_descriptions_fail_closed(self):
+        candidate = {
+            "cluster_id": "f" * 40,
+            "title": "中央气象台升级发布台风红色预警",
+            "source_descriptions": [
+                "台风白海豚正在影响浙江",
+                "台风海燕正在影响广东",
+            ],
+        }
+
+        self.assertEqual(
+            candidate["cluster_id"],
+            _news_incident_id(candidate, {"category": "natural_disaster"}),
+        )
 
     def test_news_state_keeps_incident_when_cluster_partition_is_full(self):
         incident = f"news-incident:{'a' * 40}:1786248000"

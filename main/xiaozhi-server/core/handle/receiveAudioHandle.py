@@ -63,6 +63,8 @@ def is_likely_tts_echo(conn: "ConnectionHandler", text: str) -> bool:
 
 
 async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
+    if getattr(conn, "close_after_chat", False):
+        return
     # 当前片段是否有人说话
     have_voice = conn.vad.is_vad(conn, pcm_frame)
     # 如果设备刚刚被唤醒，短暂忽略VAD检测
@@ -88,7 +90,10 @@ async def resume_vad_detection(conn: "ConnectionHandler"):
     conn.just_woken_up = False
 
 
-async def startToChat(conn: "ConnectionHandler", text):
+async def startToChat(conn: "ConnectionHandler", text, allow_when_closing=False):
+    if getattr(conn, "close_after_chat", False) and not allow_when_closing:
+        conn.logger.bind(tag=TAG).info("对话正在关闭，忽略迟到的ASR结果")
+        return
     # 检查输入是否是JSON格式（包含说话人信息）
     speaker_name = None
     actual_text = text
@@ -188,7 +193,7 @@ async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
             prompt = end_prompt.get("prompt")
             if not prompt:
                 prompt = "请你以```时间过得真快```未来头，用富有感情、依依不舍的话来结束这场对话吧。！"
-            await startToChat(conn, prompt)
+            await startToChat(conn, prompt, allow_when_closing=True)
 
 
 async def max_out_size(conn: "ConnectionHandler"):

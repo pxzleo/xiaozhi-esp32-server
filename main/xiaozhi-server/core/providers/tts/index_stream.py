@@ -6,7 +6,7 @@ import asyncio
 import requests
 import traceback
 from config.logger import setup_logging
-from core.utils.tts import MarkdownCleaner
+from core.utils.tts import MarkdownCleaner, sanitize_spoken_text
 from core.providers.tts.base import TTSProviderBase
 from core.utils import opus_encoder_utils, textUtils
 from core.providers.tts.dto.dto import SentenceType, ContentType, InterfaceType
@@ -139,7 +139,12 @@ class TTSProvider(TTSProviderBase):
 
     def to_tts_single_stream(self, text, is_last=False):
         try:
-            original_text = text
+            original_text = sanitize_spoken_text(text)
+            if not original_text:
+                if is_last:
+                    self._process_before_stop_play_files()
+                return True
+            text = original_text
             text = MarkdownCleaner.clean_markdown(text)
             if self._correct_words_pattern:
                 text = self._correct_words_pattern.sub(lambda m: self.correct_words[m.group(0)], text)
@@ -268,6 +273,9 @@ class TTSProvider(TTSProviderBase):
             list: 返回opus编码后的音频数据列表
         """
         start_time = time.time()
+        text = sanitize_spoken_text(text)
+        if not text:
+            return []
         text = MarkdownCleaner.clean_markdown(text)
         if self._correct_words_pattern:
             text = self._correct_words_pattern.sub(lambda m: self.correct_words[m.group(0)], text)

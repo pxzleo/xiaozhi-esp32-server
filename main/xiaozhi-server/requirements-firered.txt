@@ -1,0 +1,10 @@
+# FireRedASR2S 可选运行依赖。
+# 保留主 requirements.txt 中已有的 torch/torchaudio/numpy 版本，避免官方最新依赖覆盖现有运行环境。
+setuptools<81  # ModelScope 1.32 CLI 仍依赖 pkg_resources
+transformers==4.51.3
+cn2an==0.5.23
+kaldiio>=2.18.0,<3
+kaldi-native-fbank==1.15
+sentencepiece>=0.1.99,<0.3
+soundfile>=0.12.1,<1
+textgrid==1.6.1

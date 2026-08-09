@@ -7,7 +7,7 @@ import edge_tts
 from datetime import datetime
 from config.logger import setup_logging
 from core.utils import textUtils
-from core.utils.tts import MarkdownCleaner
+from core.utils.tts import MarkdownCleaner, sanitize_spoken_text
 from core.providers.tts.base import TTSProviderBase
 from core.providers.tts.dto.dto import SentenceType
 
@@ -20,9 +20,6 @@ class TTSProvider(TTSProviderBase):
     MIN_FIRST_SEGMENT_CHARS = 6
     DISCARDABLE_TRAILING_FILLERS = frozenset(
         {"哈哈", "嘿嘿", "哎呀", "哦", "嗯", "好呀"}
-    )
-    LEADING_FILLER_PATTERN = re.compile(
-        r"^(?:(?:哈{2,}|嘿{2,}|哎呀+|汪+)[，,。、！!？?~～\s]*)+"
     )
     PARTIAL_STREAM_FAILURE_NOTICE = "语音连接中断，请再问一次"
 
@@ -72,7 +69,7 @@ class TTSProvider(TTSProviderBase):
     @classmethod
     def _sanitize_spoken_text(cls, text):
         """确定性移除模型偶尔输出的句首填充词，不依赖提示词遵循。"""
-        return cls.LEADING_FILLER_PATTERN.sub("", text or "").lstrip()
+        return sanitize_spoken_text(text)
 
     def _notify_partial_stream_failure(self, original_text, audio_handler):
         if original_text == self.PARTIAL_STREAM_FAILURE_NOTICE:

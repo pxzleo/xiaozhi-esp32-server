@@ -2085,6 +2085,12 @@ class ConnectionHandler:
         重置所有音频相关状态(VAD + ASR)
         """
         # Reset VAD states
+        if (
+            hasattr(self, "vad")
+            and self.vad
+            and hasattr(self.vad, "reset_conn_state")
+        ):
+            self.vad.reset_conn_state(self)
         self.client_audio_buffer.clear()
         self.client_have_voice = False
         self.client_voice_stop = False

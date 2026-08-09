@@ -373,6 +373,18 @@ ASR:
     # 识别语种：auto 自动检测；如需限制只识别中文可设为 zh，避免中文短句误判为韩文等。
     # SenseVoice 支持 zh、en、ja、ko、yue 等语种标记。
     language: auto
+  FireRedASR2AED:
+    # FireRedASR2-AED 本地离线识别。安装与模型下载见 docs/firered-asr2s-integration.md。
+    type: firered_aed
+    source_dir: models/FireRedASR2S
+    model_dir: models/FireRedASR2S/pretrained_models/FireRedASR2-AED
+    output_dir: tmp/
+    # 当前模型较大，默认使用CPU以避免在显存不足时启动失败；确认显存充足后再打开。
+    use_gpu: false
+    use_half: false
+    beam_size: 3
+    softmax_smoothing: 1.25
+    aed_length_penalty: 0.6
   FunASRServer:
     # 独立部署FunASR，使用FunASR的API服务，只需要五句话
     # 第一句：mkdir -p ./funasr-runtime-resources/models
@@ -619,6 +631,18 @@ VAD:
     threshold_low: 0.25
     model_dir: models/snakers4_silero-vad
     min_silence_duration_ms: 700  # 避免普通语句内停顿被切成多轮并误触发打断
+  FireRedVAD:
+    # FireRed 流式VAD。安装与模型下载见 docs/firered-asr2s-integration.md。
+    type: firered_stream
+    source_dir: models/FireRedASR2S
+    model_dir: models/FireRedASR2S/pretrained_models/FireRedVAD/Stream-VAD
+    use_gpu: false
+    speech_threshold: 0.5
+    smooth_window_size: 5
+    pad_start_frame: 5
+    min_speech_frame: 8
+    max_speech_frame: 2000
+    min_silence_duration_ms: 700
 
 LLM:
   # 所有openai类型均可以修改超参，以AliLLM为例

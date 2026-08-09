@@ -40,6 +40,9 @@ public class SystemInitConfig {
         }
 
         sysParamsService.initServerSecret();
+        // Liquibase 可能直接更新模型表，Redis 会跨进程重启保留旧模型配置。
+        // 必须在重建 server:config 前失效 FireRedVAD，确保使用迁移后的数据库值。
+        redisUtils.delete(RedisKeys.getModelConfigById("VAD_FireRedVAD"));
         configService.getConfig(false);
 
         // 初始化设备通讯录缓存

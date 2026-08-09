@@ -30,6 +30,15 @@ punctuation_set = {
     "~",  # 波浪号
 }
 
+LEADING_FILLER_PATTERN = re.compile(
+    r"^(?:(?:哈{2,}|嘿{2,}|哎呀+|汪+)[，,。、！!？?~～\s]*)+"
+)
+
+
+def sanitize_spoken_text(text: str) -> str:
+    """确定性移除模型偶尔输出的句首填充词。"""
+    return LEADING_FILLER_PATTERN.sub("", text or "").lstrip()
+
 def create_instance(class_name, *args, **kwargs):
     # 创建TTS实例
     if os.path.exists(os.path.join('core', 'providers', 'tts', f'{class_name}.py')):
