@@ -58,6 +58,8 @@ manager-api 请求体中的 `created_at`、`expires_at` 和 `seen_at` 使用 Uni
 
 Python 服务启动后运行唯一的进程内外界监测 runner，每 30 秒领取一次到期任务；同一进程不并发重入，多实例互斥完全依赖 manager-api 的 120 秒数据库租约，不保存第二套权威调度状态。停止服务时 runner 必须取消并等待退出。数据源网络调用使用显式连接/总超时；可重试网络错误在当前租约内短暂指数退避，最终失败以受控错误码完成任务，下一次执行时间仍由 manager-api 计算。城市解析结果缓存 1 小时、NewsNow 单源列表缓存 60 秒，缓存仅减少外部请求，不参与到期判断、租约或事件终态。
 
+每条已领取任务无论是否产生主动通知，都必须输出一条 `外界监测判定` INFO 结构化摘要。摘要包含 monitor 类型、设备 ID 不可逆短散列、`outcome`、稳定 `reason` 原因码和安全计数：天气记录查询/有效/低于阈值/已建立基线的预警数、当前灾害类型以及事件创建或权威去重数；新闻记录成功/失败来源数、抓取数、预筛数、非法条目、无效标题或链接、娱乐体育排除、未满足重大关键词或跨源聚类、分类模型各拒绝原因计数，以及最终入选项的类别、级别、置信度和聚类短散列。首次基线、地点变化重建、未发现风险、无新增或升级、冷却、近期聚类去重、预筛全部拒绝、分类模型全部拒绝、事件创建、事件去重和任务失败必须有不同原因码。日志禁止记录新闻标题/正文/链接、天气原始响应、播报文本、设备原始 ID、凭据、令牌或模型推理内容。
+
 全局开关由超级管理员 `GET|PUT /proactive/settings/external-monitoring` 管理并默认关闭。关闭后 manager-api 同时阻止任务领取、外界 pending/read/claim 和外界事件创建；Python runner 可以保持运行，但不会自行保存或猜测另一份开关状态，普通提醒不受影响。
 
 天气 worker 只使用任务中的 `weather_location`，通过和风 Geo API 解析 location id 与经纬度后并行请求 `/weatheralert/v1/current/{latitude}/{longitude}` 和 `/v7/weather/24h` 的结构化 JSON；预警严格读取 `messageType.code/supersedes`、`severity`、`effectiveTime/expireTime`、`headline/description/instruction`，不解析自然语言网页。普通逐小时预报首次只写基线；仍有效的 `severe/extreme` 官方预警可在首次运行创建 critical 事件。后续只对新增或升级的官方预警、未命中到命中的预报风险创建事件；取消、过期和恢复只更新白名单状态。新闻 worker 对继承的 NewsNow 来源执行标题/URL 规范化、相似标题跨源聚类、可信来源与榜位评分、重大关键词预筛和娱乐体育排除；首次只记录当前聚类基线。后续候选必须通过 manager-api 独立分类模型的严格七字段复核，每轮最多创建一条，分类不可用或输出无效时明确失败，禁止回退设备智能体模型。

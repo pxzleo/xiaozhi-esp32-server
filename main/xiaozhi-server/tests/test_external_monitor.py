@@ -14,7 +14,9 @@ from config import manage_api_client
 from core.proactive_monitor.runner import (
     ExternalMonitorRunner,
     MonitorError,
+    MonitorProcessResult,
     QWeatherClient,
+    _log_monitor_decision,
     _normalized_hourly,
     _validate_monitor_state,
     detect_weather_hazards,
@@ -120,10 +122,16 @@ class WeatherDetectionTest(unittest.IsolatedAsyncioTestCase):
     async def test_first_normal_forecast_only_builds_baseline(self):
         client = FakeWeather([], hourly(icon="310", pop=70))
         with patch("core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()) as create:
-            state, created = await process_weather(weather_task(), client)
+            result = await process_weather(weather_task(), client)
+            state, created = result
         self.assertEqual([], created)
         self.assertIn("rainstorm", state["detection_status"]["active_hazards"])
         create.assert_not_awaited()
+        self.assertEqual(
+            ("weather", "no_notification", "initial_baseline"),
+            ("weather", result.decision["outcome"], result.decision["reason"]),
+        )
+        self.assertEqual(["rainstorm"], result.decision["details"]["hazard_types"])
 
     async def test_first_active_severe_warning_is_immediate_and_deduped(self):
         warning = {
@@ -226,6 +234,39 @@ class WeatherDetectionTest(unittest.IsolatedAsyncioTestCase):
             _, created = await process_weather(weather_task(warning_prior), FakeWeather([upgraded], hourly()))
         self.assertEqual(1, len(created))
         self.assertEqual("critical", create.await_args.args[0]["priority"])
+
+    async def test_weather_multi_event_created_and_deduped_has_mixed_reason(self):
+        prior = {
+            "schema_version": 1,
+            "fingerprints": [],
+            "detection_status": {"active_warning_ids": [], "active_hazards": []},
+            "baseline": {
+                "captured_at": "2026-01-01T00:00:00+00:00",
+                "location_id": "101280101",
+            },
+        }
+        warning = {
+            "id": "warning-mixed", "severity": "severe",
+            "messageType": {"code": "alert"}, "headline": "预警升级",
+            "effectiveTime": "2026-01-01T00:00:00+00:00",
+            "expireTime": "2099-01-01T00:00:00+00:00",
+        }
+        persistence = [
+            {"created": True, "deduped": False, "event": {}, "authoritative_event_id": "new"},
+            {"created": False, "deduped": True, "event": {}, "authoritative_event_id": "old"},
+        ]
+        with patch(
+            "core.proactive_monitor.runner.create_proactive_monitor_event",
+            AsyncMock(side_effect=persistence),
+        ):
+            result = await process_weather(
+                weather_task(prior), FakeWeather([warning], hourly(icon="310", pop=70))
+            )
+        self.assertEqual(2, len(result.created_event_ids))
+        self.assertEqual("notification_created_and_deduped", result.decision["outcome"])
+        self.assertTrue(result.decision["reason"].endswith("_created_and_deduped"))
+        self.assertEqual(1, result.decision["details"]["created_count"])
+        self.assertEqual(1, result.decision["details"]["deduped_count"])
 
     def test_threshold_boundaries_and_temperature_drop(self):
         values = hourly(pop=70, wind=62, temp=35)
@@ -374,9 +415,11 @@ class NewsDetectionTest(unittest.IsolatedAsyncioTestCase):
         }
 
     def test_prefilter_clusters_sources_excludes_entertainment_and_normalizes_url(self):
-        candidates = prefilter_news(self.items)
+        stats = {}
+        candidates = prefilter_news(self.items, stats)
         self.assertEqual(1, len(candidates))
         self.assertEqual(["澎湃新闻", "财联社"], candidates[0]["sources"])
+        self.assertEqual(1, stats["prefilter_rejection_counts"]["excluded_topic"])
         self.assertEqual("https://news.example/a", normalize_news_url("https://news.example/a?utm=x#x"))
         self.assertEqual("", normalize_news_url("https://user:password@news.example/a"))
 
@@ -410,10 +453,16 @@ class NewsDetectionTest(unittest.IsolatedAsyncioTestCase):
             "severity": "high", "confidence": 0.85, "spoken_summary": "某地发生强烈地震。",
             "facts": ["当地已启动紧急响应"],
         }]}
+        create_result = {
+            "created": True, "deduped": False,
+            "authoritative_event_id": "event", "event": {"event_id": "event"},
+        }
         with patch("core.proactive_monitor.runner.evaluate_proactive_news_candidates", AsyncMock(return_value=output)), patch(
-            "core.proactive_monitor.runner.create_proactive_monitor_event", AsyncMock()
+            "core.proactive_monitor.runner.create_proactive_monitor_event",
+            AsyncMock(return_value=create_result),
         ) as create:
-            state, created = await process_news(task, FakeNews(self.items))
+            result = await process_news(task, FakeNews(self.items))
+            state, created = result
             self.assertEqual(1, len(created))
             self.assertEqual("https://news.example/a", create.await_args.args[0]["payload"]["reference_url"])
             self.assertEqual("rolling_window", create.await_args.args[0]["dedupe_policy"])
@@ -422,6 +471,73 @@ class NewsDetectionTest(unittest.IsolatedAsyncioTestCase):
             _, repeated = await process_news(task, FakeNews(self.items))
         self.assertEqual([], repeated)
         self.assertEqual(1, create.await_count)
+        self.assertEqual(
+            ("notification_created", "major_news_public_safety_high_created"),
+            (result.decision["outcome"], result.decision["reason"]),
+        )
+        self.assertEqual("created", result.decision["details"]["persistence"])
+
+    async def test_classifier_rejection_logs_each_concrete_reason_without_content(self):
+        task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
+        output = {"items": [{
+            "index": 0, "is_major": False, "category": "major_policy",
+            "severity": "low", "confidence": 0.4,
+            "spoken_summary": "不得写入日志的摘要", "facts": ["不得写入日志的事实"],
+        }]}
+        with patch(
+            "core.proactive_monitor.runner.evaluate_proactive_news_candidates",
+            AsyncMock(return_value=output),
+        ):
+            result = await process_news(task, FakeNews(self.items))
+            _, created = result
+        self.assertEqual([], created)
+        self.assertEqual(
+            ("no_notification", "classifier_rejected_all"),
+            (result.decision["outcome"], result.decision["reason"]),
+        )
+        self.assertEqual({
+            "not_major": 1,
+            "severity_below_high": 1,
+            "confidence_below_threshold": 1,
+            "category_disabled": 1,
+        }, result.decision["details"]["rejection_counts"])
+        self.assertNotIn("不得写入日志", str(result.decision))
+
+    async def test_authoritative_api_dedupe_has_distinct_outcome_and_reason(self):
+        task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
+        output = {"items": [{
+            "index": 0, "is_major": True, "category": "public_safety",
+            "severity": "high", "confidence": 0.9,
+            "spoken_summary": "重大事件摘要", "facts": ["已启动响应"],
+        }]}
+        create_result = {
+            "created": False, "deduped": True,
+            "authoritative_event_id": "existing", "event": {"event_id": "existing"},
+        }
+        with patch(
+            "core.proactive_monitor.runner.evaluate_proactive_news_candidates",
+            AsyncMock(return_value=output),
+        ), patch(
+            "core.proactive_monitor.runner.create_proactive_monitor_event",
+            AsyncMock(return_value=create_result),
+        ):
+            result = await process_news(task, FakeNews(self.items))
+        self.assertEqual("notification_deduped", result.decision["outcome"])
+        self.assertEqual(
+            "major_news_public_safety_high_deduped", result.decision["reason"]
+        )
+        self.assertEqual("deduped", result.decision["details"]["persistence"])
+
+    def test_decision_log_hashes_device_and_does_not_log_raw_identifier(self):
+        with patch("core.proactive_monitor.runner.logger") as safe_logger:
+            _log_monitor_decision(
+                {"device_id": "private-device-id"},
+                "news", "no_notification", "prefilter_rejected_all",
+                fetched_item_count=3,
+            )
+        logged = safe_logger.bind.return_value.info.call_args.args
+        self.assertNotIn("private-device-id", str(logged))
+        self.assertIn("device_hash", logged[0])
 
     async def test_classifier_failure_is_explicit_and_never_creates_event(self):
         task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
@@ -476,9 +592,13 @@ class NewsDetectionTest(unittest.IsolatedAsyncioTestCase):
                 "topic": first["topic"], "event_type": first["event_type"],
                 "dedupe_key": first["dedupe_key"], "payload": first["payload"],
             }
-            _, created = await process_news(task, FakeNews(self.items))
+            result = await process_news(task, FakeNews(self.items))
+            _, created = result
         self.assertEqual([first["event_id"]], created)
         get_existing.assert_awaited_once()
+        self.assertEqual("notification_deduped", result.decision["outcome"])
+        self.assertTrue(result.decision["reason"].endswith("_deduped"))
+        self.assertEqual("authoritative_existing", result.decision["details"]["persistence"])
 
     def test_classifier_contract_rejects_invalid_and_accepts_exact_boundary(self):
         valid = {"items": [{
@@ -526,7 +646,13 @@ class RunnerTest(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=[task]),
         ), patch(
             "core.proactive_monitor.runner.process_weather",
-            AsyncMock(side_effect=[retry, retry, ({"schema_version": 1}, [])]),
+            AsyncMock(side_effect=[
+                retry,
+                retry,
+                MonitorProcessResult(
+                    {"schema_version": 1}, [], "no_notification", "no_active_risk"
+                ),
+            ]),
         ) as process, patch(
             "core.proactive_monitor.runner.complete_proactive_monitor_task", AsyncMock()
         ) as complete, patch("core.proactive_monitor.runner.asyncio.sleep", AsyncMock()) as sleep:
@@ -534,6 +660,31 @@ class RunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(3, process.await_count)
         self.assertEqual([0.25, 0.5], [call.args[0] for call in sleep.await_args_list])
         self.assertTrue(complete.await_args.kwargs["success"])
+
+    async def test_success_completion_failure_logs_one_specific_final_decision(self):
+        runner = ExternalMonitorRunner({"plugins": {}})
+        task = {
+            "device_id": "d", "monitor_type": "weather", "state": {},
+            "lease_owner": runner.lease_owner, "lease_token": "t",
+        }
+        result = MonitorProcessResult(
+            {"schema_version": 1}, [], "no_notification", "no_active_risk"
+        )
+        complete = AsyncMock(side_effect=[RuntimeError("write failed"), None])
+        with patch(
+            "core.proactive_monitor.runner.claim_proactive_monitor_tasks",
+            AsyncMock(return_value=[task]),
+        ), patch(
+            "core.proactive_monitor.runner.process_weather", AsyncMock(return_value=result),
+        ), patch(
+            "core.proactive_monitor.runner.complete_proactive_monitor_task", complete,
+        ), patch("core.proactive_monitor.runner._log_monitor_decision") as decision:
+            await runner.run_once()
+        decision.assert_called_once()
+        self.assertEqual("monitor_failed", decision.call_args.args[2])
+        self.assertEqual("monitor_completion_failed", decision.call_args.args[3])
+        self.assertEqual("no_active_risk", decision.call_args.kwargs["planned_reason"])
+        self.assertTrue(decision.call_args.kwargs["completion_recorded"])
 
     async def test_runner_start_and_stop_cancel_background_loop_cleanly(self):
         runner = ExternalMonitorRunner({"plugins": {}}, poll_seconds=30)

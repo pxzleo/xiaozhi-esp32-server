@@ -132,6 +132,54 @@ def _hash(*parts, size=40):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:size]
 
 
+def _log_monitor_decision(task, monitor_type, outcome, reason, **details):
+    """记录不含正文、凭据和设备原始标识的单轮监测判定摘要。"""
+    logger.bind(tag=TAG).info(
+        "外界监测判定: monitor_type={}, device_hash={}, outcome={}, reason={}, details={}",
+        monitor_type,
+        _hash(task.get("device_id"), size=12),
+        outcome,
+        reason,
+        json.dumps(details, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    )
+
+
+class MonitorProcessResult:
+    def __init__(self, state, created_event_ids, outcome, reason, **details):
+        self.state = state
+        self.created_event_ids = created_event_ids
+        self.decision = {
+            "outcome": outcome,
+            "reason": reason,
+            "details": details,
+        }
+
+    def __iter__(self):
+        yield self.state
+        yield self.created_event_ids
+
+
+def _log_process_result(task, monitor_type, result):
+    decision = result.decision
+    _log_monitor_decision(
+        task,
+        monitor_type,
+        decision["outcome"],
+        decision["reason"],
+        **decision["details"],
+    )
+
+
+def _event_persistence_outcome(result):
+    if isinstance(result, dict) and result.get("created") is True:
+        return "created"
+    if isinstance(result, dict) and result.get("deduped") is True:
+        return "deduped"
+    if isinstance(result, dict) and isinstance(result.get("event_id"), str):
+        return "authoritative_existing"
+    return "unknown"
+
+
 def _append_fingerprint(state, fingerprint, max_items=MAX_NEWS_FINGERPRINTS):
     values = [item for item in state.get("fingerprints", []) if isinstance(item, str)]
     if fingerprint not in values:
@@ -468,9 +516,11 @@ async def process_weather(task, client):
     config = task.get("config") if isinstance(task.get("config"), dict) else {}
     prior = task.get("state") if isinstance(task.get("state"), dict) else {}
     prior_baseline = prior.get("baseline") if isinstance(prior.get("baseline"), dict) else None
+    location_changed = (
+        prior_baseline is not None and prior_baseline.get("location_id") != city["id"]
+    )
     if (
-        prior_baseline is not None
-        and prior_baseline.get("location_id") != city["id"]
+        location_changed
     ):
         prior = {}
     now = _utc_now()
@@ -482,6 +532,9 @@ async def process_weather(task, client):
     fingerprints = list(prior.get("fingerprints") or [])
     active_warnings = []
     warning_events = []
+    below_minimum_count = 0
+    unchanged_warning_count = 0
+    baselined_warning_count = 0
     minimum = str(config.get("minimum_warning_severity", "moderate"))
     minimum_rank = _SEVERITY_RANK.get(minimum, 2)
     for item in raw_warnings:
@@ -499,11 +552,13 @@ async def process_weather(task, client):
         warning_token = f"{warning_hash}:{_SEVERITY_CODE[severity]}"
         active_warnings.append(warning_token)
         if _SEVERITY_RANK[severity] < minimum_rank:
+            below_minimum_count += 1
             continue
         fingerprint = f"w:{warning_token}"
         first_baseline = not isinstance(prior.get("baseline"), dict)
         initial_critical = first_baseline and severity in {"severe", "extreme"}
         if fingerprint in fingerprints:
+            unchanged_warning_count += 1
             continue
         prior_ranks = [
             _SEVERITY_RANK.get(_CODE_SEVERITY.get(token.rsplit(":", 1)[-1]), 0)
@@ -511,8 +566,10 @@ async def process_weather(task, client):
             if isinstance(token, str) and token.startswith(warning_hash + ":")
         ]
         if prior_ranks and max(prior_ranks) >= _SEVERITY_RANK[severity]:
+            unchanged_warning_count += 1
             continue
         if not prior_ranks and first_baseline and not initial_critical:
+            baselined_warning_count += 1
             fingerprints = _append_fingerprint(
                 {"fingerprints": fingerprints}, fingerprint, MAX_WEATHER_FINGERPRINTS
             )
@@ -648,9 +705,67 @@ async def process_weather(task, client):
         else:
             break
     _validate_monitor_state("weather", state)
+    persistence = []
     for _, event, _ in planned:
-        await _create_external_event_idempotently(event)
-    return state, created
+        result = await _create_external_event_idempotently(event)
+        persistence.append(_event_persistence_outcome(result))
+    created_count = persistence.count("created")
+    deduped_count = persistence.count("deduped")
+    authoritative_existing_count = persistence.count("authoritative_existing")
+    effective_deduped_count = deduped_count + authoritative_existing_count
+    unknown_count = persistence.count("unknown")
+    if planned:
+        if unknown_count:
+            outcome = "notification_persistence_unknown"
+            persistence_reason = "persistence_unknown"
+        elif created_count and effective_deduped_count:
+            outcome = "notification_created_and_deduped"
+            persistence_reason = "created_and_deduped"
+        elif created_count:
+            outcome = "notification_created"
+            persistence_reason = "created"
+        else:
+            outcome = "notification_deduped"
+            persistence_reason = "deduped"
+        reason = "+".join(sorted({
+            event[1]["reason"].replace(" ", "_") for event in planned
+        })) + f"_{persistence_reason}"
+    else:
+        outcome = "no_notification"
+        if location_changed:
+            reason = "location_changed_rebaseline"
+        elif first_baseline:
+            reason = "initial_baseline"
+        elif (
+            active_warnings
+            and below_minimum_count == len(active_warnings)
+            and not hazards
+        ):
+            reason = "warning_below_minimum"
+        elif unchanged_warning_count:
+            reason = "no_new_or_upgraded_risk"
+        elif cooldown_active and hazards:
+            reason = "cooldown_active"
+        elif active_warnings or hazards:
+            reason = "no_new_or_upgraded_risk"
+        else:
+            reason = "no_active_risk"
+    return MonitorProcessResult(
+        state,
+        created,
+        outcome,
+        reason,
+        queried_warning_count=len(raw_warnings),
+        active_warning_count=len(active_warnings),
+        below_minimum_count=below_minimum_count,
+        unchanged_warning_count=unchanged_warning_count,
+        baselined_warning_count=baselined_warning_count,
+        hazard_types=sorted(current_hazards),
+        candidate_event_count=len(planned),
+        created_count=created_count,
+        deduped_count=effective_deduped_count,
+        persistence_unknown_count=unknown_count,
+    )
 
 
 class NewsNowClient:
@@ -715,18 +830,31 @@ def _similar_news_title(left, right):
     return bool(union) and len(left_pairs & right_pairs) / len(union) >= 0.72
 
 
-def prefilter_news(source_items):
+def prefilter_news(source_items, stats=None):
+    rejection_counts = {
+        "invalid_item": 0,
+        "invalid_title_or_url": 0,
+        "excluded_topic": 0,
+        "not_major_or_cross_source": 0,
+    }
+    scanned_item_count = 0
     clusters = {}
     for source, items in source_items.items():
         if not isinstance(items, list):
             continue
         for position, item in enumerate(items[:20]):
+            scanned_item_count += 1
             if not isinstance(item, dict):
+                rejection_counts["invalid_item"] += 1
                 continue
             title = _trim(item.get("title"), 200)
             normalized_title = normalize_news_title(title)
             url = normalize_news_url(item.get("url") or item.get("mobileUrl"))
-            if len(normalized_title) < 6 or not url or len(url) > 2048 or _EXCLUDED_NEWS.search(title):
+            if len(normalized_title) < 6 or not url or len(url) > 2048:
+                rejection_counts["invalid_title_or_url"] += 1
+                continue
+            if _EXCLUDED_NEWS.search(title):
+                rejection_counts["excluded_topic"] += 1
                 continue
             key = next(
                 (existing for existing in clusters if _similar_news_title(existing, normalized_title)),
@@ -744,12 +872,19 @@ def prefilter_news(source_items):
     for key, cluster in clusters.items():
         major_match = bool(_MAJOR_NEWS.search(cluster["title"]))
         if not major_match and len(cluster["sources"]) < 2:
+            rejection_counts["not_major_or_cross_source"] += 1
             continue
         score = max((_SOURCE_WEIGHT.get(source, 1) for source in cluster["sources"]), default=1)
         score += max(0, 5 - cluster["position"]) + len(cluster["sources"]) * 3 + (8 if major_match else 0)
         cluster["cluster_id"] = _hash(key, size=40)
         cluster["score"] = score
         ranked.append(cluster)
+    if stats is not None:
+        stats.update({
+            "scanned_item_count": scanned_item_count,
+            "cluster_count": len(clusters),
+            "prefilter_rejection_counts": rejection_counts,
+        })
     return sorted(ranked, key=lambda item: (-item["score"], item["cluster_id"]))[:20]
 
 
@@ -772,13 +907,22 @@ async def process_news(task, client):
     if not source_items:
         error = errors[0] if errors else MonitorError("news_response_empty", "新闻来源没有数据")
         raise error
-    candidates = prefilter_news(source_items)
+    prefilter_stats = {}
+    candidates = prefilter_news(source_items, prefilter_stats)
+    fetched_item_count = sum(len(items) for items in source_items.values())
+    prefilter_candidate_count = len(candidates)
     prior = task.get("state") if isinstance(task.get("state"), dict) else {}
     fingerprints = list(prior.get("fingerprints") or [])
     status = prior.get("detection_status") if isinstance(prior.get("detection_status"), dict) else {}
     if not candidates:
         state = {"schema_version": 1, "fingerprints": fingerprints[-MAX_NEWS_FINGERPRINTS:], "detection_status": dict(status)}
-        return _validate_monitor_state("news", state), []
+        return MonitorProcessResult(
+            _validate_monitor_state("news", state), [],
+            "no_notification", "prefilter_rejected_all",
+            source_success_count=len(source_items), source_error_count=len(errors),
+            fetched_item_count=fetched_item_count, prefilter_candidate_count=0,
+            **prefilter_stats,
+        )
     now = _utc_now()
     config = task.get("config") if isinstance(task.get("config"), dict) else {}
     dedupe_hours = int(config.get("dedupe_hours", 24))
@@ -805,7 +949,15 @@ async def process_news(task, client):
             "fingerprints": fingerprints[-MAX_NEWS_FINGERPRINTS:],
             "detection_status": {},
         }
-        return _validate_monitor_state("news", state), []
+        return MonitorProcessResult(
+            _validate_monitor_state("news", state), [],
+            "no_notification", "initial_baseline",
+            source_success_count=len(source_items), source_error_count=len(errors),
+            fetched_item_count=fetched_item_count,
+            prefilter_candidate_count=prefilter_candidate_count,
+            baselined_cluster_count=len(candidates),
+            **prefilter_stats,
+        )
     candidates = [item for item in candidates if item["cluster_id"] not in recent_clusters]
     if not candidates:
         state = {
@@ -813,7 +965,15 @@ async def process_news(task, client):
             "fingerprints": fingerprints[-MAX_NEWS_FINGERPRINTS:],
             "detection_status": dict(status),
         }
-        return _validate_monitor_state("news", state), []
+        return MonitorProcessResult(
+            _validate_monitor_state("news", state), [],
+            "no_notification", "all_clusters_recently_seen",
+            source_success_count=len(source_items), source_error_count=len(errors),
+            fetched_item_count=fetched_item_count,
+            prefilter_candidate_count=prefilter_candidate_count,
+            new_candidate_count=0,
+            **prefilter_stats,
+        )
     cooldown_until = _parse_time(status.get("cooldown_until"))
     if cooldown_until is not None and cooldown_until > now:
         state = {
@@ -821,7 +981,15 @@ async def process_news(task, client):
             "fingerprints": fingerprints[-MAX_NEWS_FINGERPRINTS:],
             "detection_status": dict(status),
         }
-        return _validate_monitor_state("news", state), []
+        return MonitorProcessResult(
+            _validate_monitor_state("news", state), [],
+            "no_notification", "cooldown_active",
+            source_success_count=len(source_items), source_error_count=len(errors),
+            fetched_item_count=fetched_item_count,
+            prefilter_candidate_count=prefilter_candidate_count,
+            new_candidate_count=len(candidates),
+            **prefilter_stats,
+        )
     classifier_candidates = [
         {"title": item["title"], "source": "、".join(item["sources"])[:120], "facts": item["facts"]}
         for item in candidates
@@ -836,6 +1004,12 @@ async def process_news(task, client):
         "major_economy", "major_technology",
     })
     accepted = []
+    rejected = {
+        "not_major": 0,
+        "severity_below_high": 0,
+        "confidence_below_threshold": 0,
+        "category_disabled": 0,
+    }
     for verdict in classified["items"]:
         candidate = candidates[verdict["index"]]
         fingerprint = f"news:{candidate['cluster_id']}:{int(now.timestamp())}"
@@ -849,9 +1023,28 @@ async def process_news(task, client):
                 2 if verdict["severity"] == "critical" else 1,
                 float(verdict["confidence"]), candidate["score"], candidate, verdict, fingerprint,
             ))
+        else:
+            if verdict["is_major"] is not True:
+                rejected["not_major"] += 1
+            if verdict["severity"] not in {"high", "critical"}:
+                rejected["severity_below_high"] += 1
+            if float(verdict["confidence"]) < threshold:
+                rejected["confidence_below_threshold"] += 1
+            if verdict["category"] not in categories:
+                rejected["category_disabled"] += 1
     if not accepted:
         state = {"schema_version": 1, "fingerprints": fingerprints[-MAX_NEWS_FINGERPRINTS:], "detection_status": dict(status)}
-        return _validate_monitor_state("news", state), []
+        return MonitorProcessResult(
+            _validate_monitor_state("news", state), [],
+            "no_notification", "classifier_rejected_all",
+            source_success_count=len(source_items), source_error_count=len(errors),
+            fetched_item_count=fetched_item_count,
+            prefilter_candidate_count=prefilter_candidate_count,
+            classified_candidate_count=len(classified["items"]),
+            confidence_threshold=threshold,
+            rejection_counts=rejected,
+            **prefilter_stats,
+        )
     _, _, _, candidate, verdict, fingerprint = max(accepted, key=lambda item: item[:3])
     facts = _trim("；".join(verdict["facts"]), 220)
     source = _trim(candidate["primary_source"], 64)
@@ -894,8 +1087,35 @@ async def process_news(task, client):
             break
         state["fingerprints"].pop(0)
     _validate_monitor_state("news", state)
-    await _create_external_event_idempotently(event)
-    return state, [event["event_id"]]
+    persistence = _event_persistence_outcome(
+        await _create_external_event_idempotently(event)
+    )
+    outcome = "notification_created" if persistence == "created" else (
+        "notification_deduped"
+        if persistence in {"deduped", "authoritative_existing"}
+        else "notification_persistence_unknown"
+    )
+    persistence_reason = "created" if persistence == "created" else (
+        "deduped" if persistence in {"deduped", "authoritative_existing"} else "unknown"
+    )
+    return MonitorProcessResult(
+        state,
+        [event["event_id"]],
+        outcome,
+        f"major_news_{verdict['category']}_{verdict['severity']}_{persistence_reason}",
+        source_success_count=len(source_items),
+        source_error_count=len(errors),
+        fetched_item_count=fetched_item_count,
+        prefilter_candidate_count=prefilter_candidate_count,
+        classified_candidate_count=len(classified["items"]),
+        accepted_candidate_count=len(accepted),
+        selected_cluster_hash=candidate["cluster_id"][:12],
+        selected_category=verdict["category"],
+        selected_severity=verdict["severity"],
+        selected_confidence=float(verdict["confidence"]),
+        persistence=persistence,
+        **prefilter_stats,
+    )
 
 
 class ExternalMonitorRunner:
@@ -946,39 +1166,66 @@ class ExternalMonitorRunner:
 
     async def _process_task(self, task):
         state = task.get("state") if isinstance(task.get("state"), dict) else {}
+        monitor_type = task.get("monitor_type")
+        process_result = None
         try:
-            monitor_type = task.get("monitor_type")
             if monitor_type not in {"weather", "news"}:
                 raise MonitorError("monitor_type_invalid", "未知监测类型")
             for attempt in range(3):
                 try:
                     if monitor_type == "weather":
-                        new_state, _ = await process_weather(task, self.weather)
+                        process_result = await process_weather(task, self.weather)
                     else:
-                        new_state, _ = await process_news(task, self.news)
+                        process_result = await process_news(task, self.news)
+                    if not isinstance(process_result, MonitorProcessResult):
+                        raise MonitorError("monitor_result_invalid", "监测结果结构无效")
+                    new_state, _ = process_result
                     break
                 except MonitorError as error:
                     if not error.retryable or attempt == 2:
                         raise
                     await asyncio.sleep(0.25 * (2 ** attempt))
             await complete_proactive_monitor_task(task, success=True, state=new_state)
+            _log_process_result(task, monitor_type, process_result)
         except asyncio.CancelledError:
             raise
         except MonitorError as error:
-            await self._complete_failure(task, state, error.code)
+            completion_recorded = await self._complete_failure(task, state, error.code)
+            _log_monitor_decision(
+                task,
+                monitor_type or "unknown",
+                "monitor_failed",
+                error.code,
+                retryable=error.retryable,
+                completion_recorded=completion_recorded,
+            )
         except Exception as error:
             logger.bind(tag=TAG).error(
                 "外界监测任务失败: type={}, device_hash={}",
                 type(error).__name__, _hash(task.get("device_id"), size=12),
             )
-            await self._complete_failure(task, state, "monitor_internal_error")
+            reason = "monitor_completion_failed" if process_result is not None else "monitor_internal_error"
+            completion_recorded = await self._complete_failure(task, state, reason)
+            planned = process_result.decision if process_result is not None else None
+            _log_monitor_decision(
+                task,
+                monitor_type or "unknown",
+                "monitor_failed",
+                reason,
+                error_type=type(error).__name__,
+                completion_recorded=completion_recorded,
+                planned_outcome=planned["outcome"] if planned else None,
+                planned_reason=planned["reason"] if planned else None,
+            )
 
     async def _complete_failure(self, task, state, error_code):
         try:
             await complete_proactive_monitor_task(
                 task, success=False, state=state, error_code=_trim(error_code, 64)
             )
+            return True
         except Exception as complete_error:
             logger.bind(tag=TAG).error(
                 "外界监测失败状态回写失败: {}", type(complete_error).__name__
             )
+            return False
