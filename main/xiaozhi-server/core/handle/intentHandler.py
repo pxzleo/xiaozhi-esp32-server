@@ -13,6 +13,7 @@ from core.handle.sendAudioHandle import send_stt_message
 from core.handle.reportHandle import enqueue_tool_report
 from core.utils.util import remove_punctuation_and_length
 from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType
+from core.handle.newsFollowup import classify_news_followup, content_from_asr_text
 
 TAG = __name__
 SERVER_AUDIO_PLAYBACK_FUNCTIONS = {"play_music", "play_netease_music"}
@@ -32,6 +33,25 @@ async def handle_user_intent(conn: "ConnectionHandler", text):
                 conn.current_speaker = parsed_data.get("speaker")  # 保留说话人信息
     except (json.JSONDecodeError, TypeError):
         pass
+
+    if getattr(conn, "_external_news_waiting_response", False):
+        followup_intent = classify_news_followup(content_from_asr_text(text))
+        conn._external_news_waiting_response = False
+        if followup_intent == "detail":
+            conn.logger.bind(tag=TAG).info("新闻追问按详情意图确定性路由")
+            intent_result = json.dumps(
+                {
+                    "function_call": {
+                        "name": "get_news_from_newsnow",
+                        "arguments": {"detail": True, "lang": "zh_CN"},
+                    }
+                },
+                ensure_ascii=False,
+            )
+            return await process_intent_result(conn, intent_result, text)
+        if followup_intent == "exit":
+            conn.logger.bind(tag=TAG).info("新闻追问按退出意图确定性路由")
+            return await perform_direct_exit(conn, "退出")
 
     # 检查是否有明确的退出命令
     _, filtered_text = remove_punctuation_and_length(text)
@@ -62,32 +82,37 @@ async def check_direct_exit(conn: "ConnectionHandler", text):
     for cmd in cmd_exit:
         if text == cmd:
             conn.logger.bind(tag=TAG).info(f"识别到明确的退出命令: {text}")
-            await send_stt_message(conn, text)
-            sentence_id = uuid.uuid4().hex
-            conn.sentence_id = sentence_id
-            conn.close_after_chat = True
-            conn.tts.tts_text_queue.put(
-                TTSMessageDTO(
-                    sentence_id=sentence_id,
-                    sentence_type=SentenceType.FIRST,
-                    content_type=ContentType.ACTION,
-                )
-            )
-            conn.tts.tts_one_sentence(
-                conn,
-                ContentType.TEXT,
-                content_detail="再见",
-                sentence_id=sentence_id,
-            )
-            conn.tts.tts_text_queue.put(
-                TTSMessageDTO(
-                    sentence_id=sentence_id,
-                    sentence_type=SentenceType.LAST,
-                    content_type=ContentType.ACTION,
-                )
-            )
-            return True
+            return await perform_direct_exit(conn, text)
     return False
+
+
+async def perform_direct_exit(conn: "ConnectionHandler", text: str):
+    """执行已确认的退出意图，不再依赖可配置退出词做二次判断。"""
+    await send_stt_message(conn, text)
+    sentence_id = uuid.uuid4().hex
+    conn.sentence_id = sentence_id
+    conn.close_after_chat = True
+    conn.tts.tts_text_queue.put(
+        TTSMessageDTO(
+            sentence_id=sentence_id,
+            sentence_type=SentenceType.FIRST,
+            content_type=ContentType.ACTION,
+        )
+    )
+    conn.tts.tts_one_sentence(
+        conn,
+        ContentType.TEXT,
+        content_detail="再见",
+        sentence_id=sentence_id,
+    )
+    conn.tts.tts_text_queue.put(
+        TTSMessageDTO(
+            sentence_id=sentence_id,
+            sentence_type=SentenceType.LAST,
+            content_type=ContentType.ACTION,
+        )
+    )
+    return True
 
 
 async def analyze_intent_with_llm(conn: "ConnectionHandler", text):

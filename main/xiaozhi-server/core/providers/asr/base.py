@@ -16,6 +16,7 @@ from config.logger import setup_logging
 from core.providers.asr.dto.dto import InterfaceType
 from core.handle.receiveAudioHandle import startToChat
 from core.handle.reportHandle import enqueue_asr_report
+from core.handle.newsFollowup import correct_news_followup_asr
 from core.utils.util import remove_punctuation_and_length
 from core.handle.receiveAudioHandle import handleAudioMessage
 from typing import Optional, Tuple, List, NamedTuple, TYPE_CHECKING
@@ -118,6 +119,14 @@ class ASRProviderBase(ABC):
                 raw_text = ""
             else:
                 raw_text, _ = asr_result
+
+            if getattr(conn, "_external_news_waiting_response", False):
+                corrected_text = correct_news_followup_asr(raw_text)
+                if corrected_text != raw_text:
+                    logger.bind(tag=TAG).info(
+                        f"新闻追问ASR上下文纠错: {raw_text} -> {corrected_text}"
+                    )
+                    raw_text = corrected_text
 
             if isinstance(voiceprint_result, Exception):
                 logger.bind(tag=TAG).error(f"声纹识别失败: {voiceprint_result}")
