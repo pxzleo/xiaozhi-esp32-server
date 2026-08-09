@@ -158,6 +158,9 @@ class NewsFollowupCorrectionTest(unittest.TestCase):
     def test_negated_exit_can_still_request_news_detail(self):
         self.assertEqual("detail", classify_news_followup("不要退出，讲讲详情"))
 
+    def test_colloquial_affirmative_requests_news_detail(self):
+        self.assertEqual("detail", classify_news_followup("好，给我说说"))
+
     def test_short_explicit_exit_variants(self):
         for text in ("不想听", "我不想听", "不需要了", "退出一下", "不用听了"):
             with self.subTest(text=text):

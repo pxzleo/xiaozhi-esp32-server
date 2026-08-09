@@ -165,7 +165,8 @@ public class ProactiveService {
             return createRollingWindowEvent(device, request);
         }
         EventWrite write = upsertEventLocked(device, request, request.getEventId());
-        return new EventCreateResult(write.created(), !write.created(), write.event().eventId(), write.event());
+        return new EventCreateResult(write.created(), !write.created(),
+                write.event().eventId(), write.event(), write.event().createdAt());
     }
 
     private boolean isExternal(EventType eventType) {
@@ -176,7 +177,9 @@ public class ProactiveService {
         String eventType = request.getEventType().name();
         String dedupeHash = sha256(request.getDedupeKey());
         eventDedupeDao.insertIfAbsent(device.getId(), eventType, dedupeHash);
-        if (eventDedupeDao.selectForUpdate(device.getId(), eventType, dedupeHash) == null) {
+        ProactiveEventDedupeEntity ledger = eventDedupeDao.selectForUpdate(
+                device.getId(), eventType, dedupeHash);
+        if (ledger == null) {
             throw new RenException("外界监测事件去重账本创建失败");
         }
         String recentEventId = eventDedupeDao.selectRecentEventId(device.getId(), eventType,
@@ -185,15 +188,26 @@ public class ProactiveService {
             ProactiveEventEntity authoritative = eventDao.selectByDeviceAndEventId(
                     device.getId(), recentEventId);
             if (authoritative == null) throw new RenException("外界监测事件去重账本引用无效");
-            return new EventCreateResult(false, true, recentEventId, toEvent(authoritative));
+            Date dedupeRecordedAt = eventDedupeDao.selectLastCreatedAt(
+                    device.getId(), eventType, dedupeHash);
+            if (dedupeRecordedAt == null) {
+                throw new RenException("外界监测事件去重账本时间无效");
+            }
+            return new EventCreateResult(false, true, recentEventId,
+                    toEvent(authoritative), dedupeRecordedAt);
         }
         EventWrite write = upsertEventLocked(device, request, "ext-" + UUID.randomUUID());
         if (eventDedupeDao.markCreated(device.getId(), eventType, dedupeHash,
                 write.event().eventId()) != 1) {
             throw new RenException("外界监测事件去重账本更新失败");
         }
+        Date dedupeRecordedAt = eventDedupeDao.selectLastCreatedAt(
+                device.getId(), eventType, dedupeHash);
+        if (dedupeRecordedAt == null) {
+            throw new RenException("外界监测事件去重账本时间无效");
+        }
         return new EventCreateResult(write.created(), !write.created(),
-                write.event().eventId(), write.event());
+                write.event().eventId(), write.event(), dedupeRecordedAt);
     }
 
     private EventWrite upsertEventLocked(DeviceEntity device, EventUpsert request, String eventId) {

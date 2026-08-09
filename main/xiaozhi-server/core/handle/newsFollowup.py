@@ -47,6 +47,10 @@ def _is_detail_intent(normalized: str) -> bool:
         "详细",
         "说说",
         "讲讲",
+        "好给我说说",
+        "好的给我说说",
+        "可以给我说说",
+        "行给我说说",
     }:
         return True
     return bool(_DETAIL_INTENT_PATTERN.fullmatch(normalized))

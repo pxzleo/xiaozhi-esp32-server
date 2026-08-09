@@ -301,7 +301,8 @@ public final class ProactiveDTOs {
 
     public record EventCreateResult(boolean created, boolean deduped,
             @JsonProperty("authoritative_event_id") String authoritativeEventId,
-            EventView event) {}
+            EventView event,
+            @JsonProperty("dedupe_recorded_at") Date dedupeRecordedAt) {}
 
     @Data
     public static class EventStatusUpdate extends StrictRequest {

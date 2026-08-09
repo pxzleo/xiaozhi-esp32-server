@@ -15,6 +15,7 @@ import httpx
 from config.logger import setup_logging
 from config.manage_api_client import (
     ManageApiError,
+    ManageApiBusinessError,
     claim_proactive_monitor_tasks,
     complete_proactive_monitor_task,
     create_proactive_monitor_event,
@@ -29,7 +30,10 @@ logger = setup_logging()
 POLL_SECONDS = 30
 MAX_TASKS = 20
 MAX_WEATHER_FINGERPRINTS = 128
-MAX_NEWS_FINGERPRINTS = 32
+MAX_NEWS_FINGERPRINTS = 48
+MAX_NEWS_INCIDENT_FINGERPRINTS = 24
+NEWS_DEDUPE_HOURS = 24
+MANAGER_TIMEZONE = timezone(timedelta(hours=8))
 SOURCE_TIMEOUT = httpx.Timeout(10.0, connect=3.0)
 _SEVERITY_RANK = {"minor": 1, "moderate": 2, "severe": 3, "extreme": 4}
 _SEVERITY_CODE = {"minor": "m", "moderate": "o", "severe": "s", "extreme": "e"}
@@ -52,6 +56,17 @@ _MAJOR_NEWS = re.compile(
     re.IGNORECASE,
 )
 _SOURCE_WEIGHT = {"澎湃新闻": 4, "财联社": 4, "参考消息": 4, "联合早报": 3, "百度热搜": 1}
+_TYPHOON_QUOTED = re.compile(r"(?:超强台风|强台风|台风)[“\"']([^”\"']{2,20})[”\"']")
+_TYPHOON_UNQUOTED = re.compile(
+    r"(?:超强台风|强台风|台风)"
+    r"([0-9A-Za-z\u4e00-\u9fff]{2,12}?)"
+    r"(?=外围|影响|逼近|登陆|中心|路径|预警|来袭|肆虐|升级|"
+    r"已|将|在|预计|带来|造成|导致|$)"
+)
+_TYPHOON_GENERIC_PREFIXES = (
+    "外围", "影响", "逼近", "登陆", "中心", "路径", "预警", "来袭", "肆虐",
+    "升级", "预计", "带来", "造成", "导致",
+)
 
 
 class MonitorError(RuntimeError):
@@ -180,11 +195,66 @@ def _event_persistence_outcome(result):
     return "unknown"
 
 
+def _authoritative_dedupe_recorded_at(result):
+    if not isinstance(result, dict):
+        return None
+    value = result.get("dedupe_recorded_at")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(float(value) / 1000, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=MANAGER_TIMEZONE)
+    return parsed.astimezone(timezone.utc)
+
+
 def _append_fingerprint(state, fingerprint, max_items=MAX_NEWS_FINGERPRINTS):
     values = [item for item in state.get("fingerprints", []) if isinstance(item, str)]
     if fingerprint not in values:
         values.append(fingerprint)
     return values[-max_items:]
+
+
+def _trim_news_fingerprints(values):
+    strings = [item for item in values if isinstance(item, str)]
+    incidents = [
+        item for item in strings if item.startswith("news-incident:")
+    ][-MAX_NEWS_INCIDENT_FINGERPRINTS:]
+    others = [
+        item for item in strings if not item.startswith("news-incident:")
+    ][-(MAX_NEWS_FINGERPRINTS - len(incidents)):]
+    return others + incidents
+
+
+def _append_news_fingerprint(values, fingerprint):
+    updated = [item for item in values if item != fingerprint]
+    updated.append(fingerprint)
+    return _trim_news_fingerprints(updated)
+
+
+def _build_news_state(fingerprints, detection_status):
+    values = _trim_news_fingerprints(fingerprints)
+    state = {
+        "schema_version": 1,
+        "fingerprints": values,
+        "detection_status": dict(detection_status),
+    }
+    while len(json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 4096:
+        removable = next(
+            (index for index, item in enumerate(values) if not item.startswith("news-incident:")),
+            0 if values else None,
+        )
+        if removable is None:
+            break
+        values.pop(removable)
+    return _validate_monitor_state("news", state)
 
 
 def _event(task, *, topic, priority, event_type, reason, payload, dedupe_key,
@@ -819,6 +889,24 @@ def normalize_news_title(value):
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]", "", text)
 
 
+def _news_incident_id(candidate, verdict):
+    """为可确定命名的持续事件生成稳定ID；无法确定时退回标题聚类ID。"""
+    if verdict.get("category") != "natural_disaster":
+        return candidate["cluster_id"]
+    text = str(candidate.get("title") or "")
+    match = _TYPHOON_QUOTED.search(text)
+    name = match.group(1) if match else None
+    if name is None:
+        matches = list(_TYPHOON_UNQUOTED.finditer(text))
+        name = matches[-1].group(1) if matches else None
+        if name and name.startswith(_TYPHOON_GENERIC_PREFIXES):
+            name = None
+    normalized_name = normalize_news_title(name)
+    if len(normalized_name) < 2:
+        return candidate["cluster_id"]
+    return _hash("natural_disaster", "typhoon", normalized_name, size=40)
+
+
 def _similar_news_title(left, right):
     if left == right:
         return True
@@ -915,7 +1003,7 @@ async def process_news(task, client):
     fingerprints = list(prior.get("fingerprints") or [])
     status = prior.get("detection_status") if isinstance(prior.get("detection_status"), dict) else {}
     if not candidates:
-        state = {"schema_version": 1, "fingerprints": fingerprints[-MAX_NEWS_FINGERPRINTS:], "detection_status": dict(status)}
+        state = _build_news_state(fingerprints, status)
         return MonitorProcessResult(
             _validate_monitor_state("news", state), [],
             "no_notification", "prefilter_rejected_all",
@@ -925,30 +1013,41 @@ async def process_news(task, client):
         )
     now = _utc_now()
     config = task.get("config") if isinstance(task.get("config"), dict) else {}
-    dedupe_hours = int(config.get("dedupe_hours", 24))
+    dedupe_hours = NEWS_DEDUPE_HOURS
     cutoff = int((now - timedelta(hours=dedupe_hours)).timestamp())
     recent_clusters = set()
+    recent_incidents = set()
     kept_fingerprints = []
     for fingerprint in fingerprints:
         match = re.fullmatch(r"news:([0-9a-f]{40}):(\d+)", fingerprint)
         if match and int(match.group(2)) >= cutoff:
             kept_fingerprints.append(fingerprint)
             recent_clusters.add(match.group(1))
-        elif not isinstance(fingerprint, str) or not fingerprint.startswith("news:"):
+        elif (
+            (match := re.fullmatch(r"news-incident:([0-9a-f]{40}):(\d+)", fingerprint))
+            and int(match.group(2)) >= cutoff
+        ):
             kept_fingerprints.append(fingerprint)
-    fingerprints = kept_fingerprints[-MAX_NEWS_FINGERPRINTS:]
+            recent_incidents.add(match.group(1))
+        elif not isinstance(fingerprint, str) or not fingerprint.startswith(
+            ("news:", "news-incident:")
+        ):
+            kept_fingerprints.append(fingerprint)
+    fingerprints = _trim_news_fingerprints(kept_fingerprints)
     if "schema_version" not in prior:
         baseline_time = int(now.timestamp())
         for candidate in candidates:
-            fingerprints = _append_fingerprint(
-                {"fingerprints": fingerprints},
-                f"news:{candidate['cluster_id']}:{baseline_time}",
+            fingerprints = _append_news_fingerprint(
+                fingerprints, f"news:{candidate['cluster_id']}:{baseline_time}",
             )
-        state = {
-            "schema_version": 1,
-            "fingerprints": fingerprints[-MAX_NEWS_FINGERPRINTS:],
-            "detection_status": {},
-        }
+            incident_id = _news_incident_id(
+                candidate, {"category": "natural_disaster", "facts": []}
+            )
+            if incident_id != candidate["cluster_id"]:
+                fingerprints = _append_news_fingerprint(
+                    fingerprints, f"news-incident:{incident_id}:{baseline_time}",
+                )
+        state = _build_news_state(fingerprints, {})
         return MonitorProcessResult(
             _validate_monitor_state("news", state), [],
             "no_notification", "initial_baseline",
@@ -960,11 +1059,7 @@ async def process_news(task, client):
         )
     candidates = [item for item in candidates if item["cluster_id"] not in recent_clusters]
     if not candidates:
-        state = {
-            "schema_version": 1,
-            "fingerprints": fingerprints[-MAX_NEWS_FINGERPRINTS:],
-            "detection_status": dict(status),
-        }
+        state = _build_news_state(fingerprints, status)
         return MonitorProcessResult(
             _validate_monitor_state("news", state), [],
             "no_notification", "all_clusters_recently_seen",
@@ -976,11 +1071,7 @@ async def process_news(task, client):
         )
     cooldown_until = _parse_time(status.get("cooldown_until"))
     if cooldown_until is not None and cooldown_until > now:
-        state = {
-            "schema_version": 1,
-            "fingerprints": fingerprints[-MAX_NEWS_FINGERPRINTS:],
-            "detection_status": dict(status),
-        }
+        state = _build_news_state(fingerprints, status)
         return MonitorProcessResult(
             _validate_monitor_state("news", state), [],
             "no_notification", "cooldown_active",
@@ -1019,9 +1110,11 @@ async def process_news(task, client):
             and float(verdict["confidence"]) >= threshold
             and verdict["category"] in categories
         ):
+            incident_id = _news_incident_id(candidate, verdict)
             accepted.append((
                 2 if verdict["severity"] == "critical" else 1,
-                float(verdict["confidence"]), candidate["score"], candidate, verdict, fingerprint,
+                float(verdict["confidence"]), candidate["score"], candidate,
+                verdict, fingerprint, incident_id,
             ))
         else:
             if verdict["is_major"] is not True:
@@ -1033,7 +1126,7 @@ async def process_news(task, client):
             if verdict["category"] not in categories:
                 rejected["category_disabled"] += 1
     if not accepted:
-        state = {"schema_version": 1, "fingerprints": fingerprints[-MAX_NEWS_FINGERPRINTS:], "detection_status": dict(status)}
+        state = _build_news_state(fingerprints, status)
         return MonitorProcessResult(
             _validate_monitor_state("news", state), [],
             "no_notification", "classifier_rejected_all",
@@ -1045,7 +1138,28 @@ async def process_news(task, client):
             rejection_counts=rejected,
             **prefilter_stats,
         )
-    _, _, _, candidate, verdict, fingerprint = max(accepted, key=lambda item: item[:3])
+    eligible = [item for item in accepted if item[6] not in recent_incidents]
+    for item in accepted:
+        if item[6] in recent_incidents:
+            fingerprints = _append_news_fingerprint(fingerprints, item[5])
+    if not eligible:
+        selected = max(accepted, key=lambda item: item[:3])
+        state = _build_news_state(fingerprints, status)
+        return MonitorProcessResult(
+            _validate_monitor_state("news", state), [],
+            "no_notification", "same_incident_recently_notified",
+            source_success_count=len(source_items), source_error_count=len(errors),
+            fetched_item_count=fetched_item_count,
+            prefilter_candidate_count=prefilter_candidate_count,
+            classified_candidate_count=len(classified["items"]),
+            selected_cluster_hash=selected[3]["cluster_id"][:12],
+            selected_incident_hash=selected[6][:12],
+            dedupe_window_hours=dedupe_hours,
+            **prefilter_stats,
+        )
+    _, _, _, candidate, verdict, fingerprint, incident_id = max(
+        eligible, key=lambda item: item[:3]
+    )
     facts = _trim("；".join(verdict["facts"]), 220)
     source = _trim(candidate["primary_source"], 64)
     message = _trim(
@@ -1061,7 +1175,7 @@ async def process_news(task, client):
         "source": source,
     }
     event_bucket = int(now.timestamp()) // 3600
-    news_dedupe_key = f"news:{candidate['cluster_id']}"
+    news_dedupe_key = f"news-incident:{incident_id}"
     event = _event(
         task, topic="news", priority=verdict["severity"], event_type="news_alert",
         reason=f"major news {verdict['category']}", payload=payload,
@@ -1071,25 +1185,46 @@ async def process_news(task, client):
         event_identity=f"{news_dedupe_key}:{event_bucket}",
         stable_time=datetime.fromtimestamp(event_bucket * 3600, tz=timezone.utc),
     )
-    fingerprints = _append_fingerprint({"fingerprints": fingerprints}, fingerprint)
+    fingerprints = _append_news_fingerprint(fingerprints, fingerprint)
     new_status = {
         "last_event_at": _iso(now),
         "cooldown_until": _iso(now + timedelta(minutes=int(config.get("cooldown_minutes", 120)))),
         "last_cluster_id": candidate["cluster_id"],
     }
-    state = {
-        "schema_version": 1,
-        "fingerprints": fingerprints[-MAX_NEWS_FINGERPRINTS:],
-        "detection_status": new_status,
-    }
-    while len(json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 4096:
-        if not state["fingerprints"]:
-            break
-        state["fingerprints"].pop(0)
-    _validate_monitor_state("news", state)
-    persistence = _event_persistence_outcome(
-        await _create_external_event_idempotently(event)
-    )
+    state = _build_news_state(fingerprints, new_status)
+    try:
+        persistence_result = await _create_external_event_idempotently(event)
+    except ManageApiBusinessError as error:
+        if str(error) == "manager-api外界事件创建响应格式错误":
+            raise MonitorError(
+                "news_event_persistence_contract_invalid",
+                "manager-api新闻事件持久化响应无效",
+            ) from error
+        raise
+    persistence = _event_persistence_outcome(persistence_result)
+    authoritative_created_at = _authoritative_dedupe_recorded_at(persistence_result)
+    if (
+        incident_id != candidate["cluster_id"]
+        and persistence in {"created", "deduped", "authoritative_existing"}
+        and authoritative_created_at is None
+    ):
+        raise MonitorError(
+            "news_dedupe_recorded_at_invalid",
+            "manager-api新闻去重账本时间无效",
+        )
+    if (
+        incident_id != candidate["cluster_id"]
+        and authoritative_created_at is not None
+        and authoritative_created_at >= now - timedelta(hours=NEWS_DEDUPE_HOURS)
+    ):
+        incident_timestamp = int(min(authoritative_created_at, now).timestamp())
+        state = _build_news_state(
+            _append_news_fingerprint(
+                state["fingerprints"],
+                f"news-incident:{incident_id}:{incident_timestamp}",
+            ),
+            state["detection_status"],
+        )
     outcome = "notification_created" if persistence == "created" else (
         "notification_deduped"
         if persistence in {"deduped", "authoritative_existing"}
@@ -1110,6 +1245,7 @@ async def process_news(task, client):
         classified_candidate_count=len(classified["items"]),
         accepted_candidate_count=len(accepted),
         selected_cluster_hash=candidate["cluster_id"][:12],
+        selected_incident_hash=incident_id[:12],
         selected_category=verdict["category"],
         selected_severity=verdict["severity"],
         selected_confidence=float(verdict["confidence"]),

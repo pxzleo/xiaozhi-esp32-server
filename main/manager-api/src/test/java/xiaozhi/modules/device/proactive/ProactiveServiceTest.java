@@ -73,6 +73,7 @@ class ProactiveServiceTest {
         when(deviceDao.selectById("device-1")).thenReturn(device);
         when(deviceDao.selectByIdForUpdate("device-1")).thenReturn(device);
         when(globalDao.selectExternalMonitoringValueForUpdate()).thenReturn("true");
+        when(eventDedupeDao.selectLastCreatedAt(any(), any(), any())).thenReturn(new Date());
     }
 
     @Test
@@ -283,6 +284,7 @@ class ProactiveServiceTest {
 
     @Test
     void newsEventPreservesLongHttpsReferenceUrlForAuthoritativeRead() throws Exception {
+        Date ledgerTime = new Date(1_786_248_740_000L);
         String referenceUrl = "https://news.example.com/article?context=" + "a".repeat(1_600);
         EventUpsert request = eventRequest();
         request.setTopic(Topic.NEWS);
@@ -295,6 +297,8 @@ class ProactiveServiceTest {
                 .thenReturn(new ProactiveEventDedupeEntity());
         when(eventDedupeDao.markCreated(eq("device-1"), eq("NEWS_ALERT"), any(), any()))
                 .thenReturn(1);
+        when(eventDedupeDao.selectLastCreatedAt(eq("device-1"), eq("NEWS_ALERT"), any()))
+                .thenReturn(ledgerTime);
         when(eventDao.selectByDeviceAndEventIdForUpdate(eq("device-1"), any()))
                 .thenAnswer(ignored -> inserted.get());
         when(eventDao.insertIfAbsent(any(ProactiveEventEntity.class))).thenAnswer(call -> {
@@ -305,6 +309,7 @@ class ProactiveServiceTest {
                 .thenAnswer(ignored -> inserted.get());
 
         var created = service.createMonitorEvent(request);
+        assertEquals(ledgerTime, created.dedupeRecordedAt());
         assertEquals(referenceUrl, created.event().payload().get("reference_url"));
         verify(eventDao).insertIfAbsent(argThat(event -> event.getPayload().contains(referenceUrl)));
         assertEquals(referenceUrl,

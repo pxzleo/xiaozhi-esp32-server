@@ -36,6 +36,14 @@ public interface ProactiveEventDedupeDao {
             @Param("eventType") String eventType, @Param("dedupeHash") String dedupeHash,
             @Param("windowHours") int windowHours);
 
+    @Select("""
+            SELECT last_created_at
+            FROM ai_device_proactive_event_dedupe
+            WHERE device_id = #{deviceId} AND event_type = #{eventType} AND dedupe_hash = #{dedupeHash}
+            """)
+    java.util.Date selectLastCreatedAt(@Param("deviceId") String deviceId,
+            @Param("eventType") String eventType, @Param("dedupeHash") String dedupeHash);
+
     @Update("""
             UPDATE ai_device_proactive_event_dedupe
             SET last_event_id = #{eventId}, last_created_at = CURRENT_TIMESTAMP,

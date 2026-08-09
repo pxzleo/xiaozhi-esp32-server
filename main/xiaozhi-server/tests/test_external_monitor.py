@@ -16,7 +16,11 @@ from core.proactive_monitor.runner import (
     MonitorError,
     MonitorProcessResult,
     QWeatherClient,
+    _append_news_fingerprint,
+    _authoritative_dedupe_recorded_at,
+    _build_news_state,
     _log_monitor_decision,
+    _news_incident_id,
     _normalized_hourly,
     _validate_monitor_state,
     detect_weather_hazards,
@@ -455,6 +459,7 @@ class NewsDetectionTest(unittest.IsolatedAsyncioTestCase):
         }]}
         create_result = {
             "created": True, "deduped": False,
+            "dedupe_recorded_at": "2026-08-09 12:00:00",
             "authoritative_event_id": "event", "event": {"event_id": "event"},
         }
         with patch("core.proactive_monitor.runner.evaluate_proactive_news_candidates", AsyncMock(return_value=output)), patch(
@@ -476,6 +481,188 @@ class NewsDetectionTest(unittest.IsolatedAsyncioTestCase):
             (result.decision["outcome"], result.decision["reason"]),
         )
         self.assertEqual("created", result.decision["details"]["persistence"])
+
+    async def test_same_named_typhoon_updates_are_deduped_for_24_hours(self):
+        first_items = {
+            "澎湃新闻": [{
+                "title": "中央气象台发布台风橙色预警 强台风白海豚逼近浙闽沿海",
+                "url": "https://news.example/typhoon-warning",
+            }],
+            "财联社": [{
+                "title": "中央气象台发布台风橙色预警 强台风白海豚逼近浙闽沿海",
+                "url": "https://news.example/typhoon-warning",
+            }],
+        }
+        landed_items = {
+            "澎湃新闻": [{
+                "title": "台风白海豚在浙江玉环沿海登陆",
+                "url": "https://news.example/typhoon-landfall",
+            }],
+            "财联社": [{
+                "title": "台风白海豚在浙江玉环沿海登陆",
+                "url": "https://news.example/typhoon-landfall",
+            }],
+        }
+        verdict = {"items": [{
+            "index": 0, "is_major": True, "category": "natural_disaster",
+            "severity": "critical", "confidence": 0.95,
+            "spoken_summary": "台风白海豚带来重大影响。",
+            "facts": ["台风白海豚已登陆"],
+        }]}
+        task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
+        task["config"]["categories"] = ["natural_disaster"]
+        task["config"]["dedupe_hours"] = 1
+        create_result = {
+            "created": True, "deduped": False,
+            "dedupe_recorded_at": "2026-08-09 12:00:00",
+            "authoritative_event_id": "event", "event": {"event_id": "event"},
+        }
+        first_time = datetime(2026, 8, 9, 4, 0, tzinfo=timezone.utc)
+        landed_time = first_time + timedelta(hours=3)
+        with patch(
+            "core.proactive_monitor.runner.evaluate_proactive_news_candidates",
+            AsyncMock(side_effect=[verdict, verdict]),
+        ), patch(
+            "core.proactive_monitor.runner.create_proactive_monitor_event",
+            AsyncMock(return_value=create_result),
+        ) as create, patch(
+            "core.proactive_monitor.runner._utc_now",
+            side_effect=[first_time, first_time, landed_time, landed_time],
+        ):
+            first = await process_news(task, FakeNews(first_items))
+            task["state"] = first.state
+            second = await process_news(task, FakeNews(landed_items))
+
+        self.assertEqual(1, create.await_count)
+        self.assertEqual([], second.created_event_ids)
+        self.assertEqual("same_incident_recently_notified", second.decision["reason"])
+        self.assertTrue(
+            create.await_args.args[0]["dedupe_key"].startswith("news-incident:")
+        )
+
+    def test_named_typhoon_incident_is_stable_across_title_descriptions(self):
+        verdict = {"category": "natural_disaster"}
+        first = {
+            "cluster_id": "a" * 40,
+            "title": "台风白海豚外围云系影响浙江",
+            "facts": "",
+        }
+        second = {
+            "cluster_id": "b" * 40,
+            "title": "台风白海豚中心已进入浙江",
+            "facts": "",
+        }
+
+        self.assertEqual(
+            _news_incident_id(first, verdict),
+            _news_incident_id(second, verdict),
+        )
+
+    def test_generic_typhoon_description_does_not_invent_a_name(self):
+        candidate = {
+            "cluster_id": "c" * 40,
+            "title": "强台风登陆广东",
+            "facts": "",
+        }
+
+        self.assertEqual(
+            candidate["cluster_id"],
+            _news_incident_id(candidate, {"category": "natural_disaster"}),
+        )
+
+    def test_typhoon_incident_identity_ignores_changing_source_facts(self):
+        verdict = {"category": "natural_disaster"}
+        candidate = {
+            "cluster_id": "d" * 40,
+            "title": "台风白海豚登陆浙江",
+            "facts": "台风白海豚已登陆浙江",
+        }
+        first = _news_incident_id(candidate, verdict)
+        candidate["facts"] = "历史台风海燕造成严重损失"
+
+        self.assertEqual(first, _news_incident_id(candidate, verdict))
+
+    def test_news_state_keeps_incident_when_cluster_partition_is_full(self):
+        incident = f"news-incident:{'a' * 40}:1786248000"
+        fingerprints = [incident] + [
+            f"news:{index:040x}:1786248000" for index in range(47)
+        ]
+
+        updated = _append_news_fingerprint(
+            fingerprints, f"news:{48:040x}:1786248000"
+        )
+
+        self.assertEqual(48, len(updated))
+        self.assertIn(incident, updated)
+
+    def test_news_state_builder_trims_near_4kb_state_without_losing_incident(self):
+        incident = f"news-incident:{'b' * 40}:1786248000"
+        long_values = [f"legacy-{index:02d}-" + "x" * 150 for index in range(24)]
+        fingerprints = _append_news_fingerprint(
+            [incident] + long_values,
+            f"news:{'c' * 40}:1786248000",
+        )
+
+        state = _build_news_state(fingerprints, {})
+
+        encoded = json.dumps(
+            state, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        self.assertLessEqual(len(encoded), 4096)
+        self.assertIn(incident, state["fingerprints"])
+
+    async def test_recent_incident_does_not_starve_an_unrelated_major_event(self):
+        now = datetime(2026, 8, 9, 8, 0, tzinfo=timezone.utc)
+        typhoon = {
+            "title": "台风白海豚在浙江玉环沿海登陆",
+            "url": "https://news.example/typhoon", "sources": ["澎湃新闻"],
+            "primary_source": "澎湃新闻", "position": 0,
+            "facts": "台风白海豚已登陆", "cluster_id": "a" * 40, "score": 100,
+        }
+        policy = {
+            "title": "国务院发布重大公共安全新政策",
+            "url": "https://news.example/policy", "sources": ["澎湃新闻"],
+            "primary_source": "澎湃新闻", "position": 1,
+            "facts": "新政策正式发布", "cluster_id": "b" * 40, "score": 90,
+        }
+        typhoon_verdict = {
+            "index": 0, "is_major": True, "category": "natural_disaster",
+            "severity": "critical", "confidence": 0.99,
+            "spoken_summary": "台风白海豚已登陆。", "facts": ["已登陆"],
+        }
+        policy_verdict = {
+            "index": 1, "is_major": True, "category": "major_policy",
+            "severity": "high", "confidence": 0.95,
+            "spoken_summary": "重大公共安全新政策发布。", "facts": ["正式发布"],
+        }
+        incident_id = _news_incident_id(typhoon, typhoon_verdict)
+        state = {
+            "schema_version": 1,
+            "fingerprints": [f"news-incident:{incident_id}:{int(now.timestamp())}"],
+            "detection_status": {},
+        }
+        task = news_task(state)
+        task["config"]["categories"] = ["natural_disaster", "major_policy"]
+        create_result = {
+            "created": True, "deduped": False,
+            "authoritative_event_id": "policy", "event": {"event_id": "policy"},
+        }
+        with patch(
+            "core.proactive_monitor.runner.prefilter_news",
+            return_value=[typhoon, policy],
+        ), patch(
+            "core.proactive_monitor.runner.evaluate_proactive_news_candidates",
+            AsyncMock(return_value={"items": [typhoon_verdict, policy_verdict]}),
+        ), patch(
+            "core.proactive_monitor.runner.create_proactive_monitor_event",
+            AsyncMock(return_value=create_result),
+        ) as create, patch(
+            "core.proactive_monitor.runner._utc_now", return_value=now,
+        ):
+            result = await process_news(task, FakeNews({"澎湃新闻": [], "财联社": []}))
+
+        self.assertEqual(1, len(result.created_event_ids))
+        self.assertEqual("国务院发布重大公共安全新政策", create.await_args.args[0]["payload"]["title"])
 
     async def test_classifier_rejection_logs_each_concrete_reason_without_content(self):
         task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
@@ -527,6 +714,108 @@ class NewsDetectionTest(unittest.IsolatedAsyncioTestCase):
             "major_news_public_safety_high_deduped", result.decision["reason"]
         )
         self.assertEqual("deduped", result.decision["details"]["persistence"])
+
+    async def test_authoritative_dedupe_restores_incident_at_original_created_time(self):
+        now = datetime(2026, 8, 10, 0, 30, tzinfo=timezone.utc)
+        task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
+        task["config"]["categories"] = ["natural_disaster"]
+        items = {"澎湃新闻": [{
+            "title": "台风白海豚登陆浙江",
+            "url": "https://news.example/typhoon",
+        }]}
+        output = {"items": [{
+            "index": 0, "is_major": True, "category": "natural_disaster",
+            "severity": "critical", "confidence": 0.95,
+            "spoken_summary": "台风白海豚已经登陆。", "facts": ["已经登陆"],
+        }]}
+        create_result = {
+            "created": False, "deduped": True,
+            "authoritative_event_id": "existing",
+            "dedupe_recorded_at": "2026-08-09 08:59:00",
+            "event": {
+                "event_id": "existing",
+                "created_at": "2026-08-09 08:00:00",
+            },
+        }
+        with patch(
+            "core.proactive_monitor.runner.evaluate_proactive_news_candidates",
+            AsyncMock(return_value=output),
+        ), patch(
+            "core.proactive_monitor.runner.create_proactive_monitor_event",
+            AsyncMock(return_value=create_result),
+        ), patch("core.proactive_monitor.runner._utc_now", return_value=now):
+            result = await process_news(task, FakeNews(items))
+
+        expected_timestamp = int(datetime(
+            2026, 8, 9, 0, 59, tzinfo=timezone.utc
+        ).timestamp())
+        incident_fingerprints = [
+            item for item in result.state["fingerprints"]
+            if item.startswith("news-incident:")
+        ]
+        self.assertEqual(1, len(incident_fingerprints))
+        self.assertTrue(incident_fingerprints[0].endswith(f":{expected_timestamp}"))
+
+    async def test_named_incident_rejects_dedupe_without_ledger_time(self):
+        task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
+        task["config"]["categories"] = ["natural_disaster"]
+        output = {"items": [{
+            "index": 0, "is_major": True, "category": "natural_disaster",
+            "severity": "critical", "confidence": 0.95,
+            "spoken_summary": "台风白海豚已经登陆。", "facts": ["已经登陆"],
+        }]}
+        create_result = {
+            "created": False, "deduped": True,
+            "authoritative_event_id": "existing", "event": {"event_id": "existing"},
+        }
+        with patch(
+            "core.proactive_monitor.runner.evaluate_proactive_news_candidates",
+            AsyncMock(return_value=output),
+        ), patch(
+            "core.proactive_monitor.runner.create_proactive_monitor_event",
+            AsyncMock(return_value=create_result),
+        ):
+            with self.assertRaises(MonitorError) as raised:
+                await process_news(task, FakeNews({"澎湃新闻": [{
+                    "title": "台风白海豚登陆浙江",
+                    "url": "https://news.example/typhoon",
+                }]}))
+
+        self.assertEqual("news_dedupe_recorded_at_invalid", raised.exception.code)
+
+    async def test_news_persistence_contract_failure_has_specific_reason(self):
+        task = news_task({"schema_version": 1, "fingerprints": [], "detection_status": {}})
+        output = {"items": [{
+            "index": 0, "is_major": True, "category": "public_safety",
+            "severity": "high", "confidence": 0.95,
+            "spoken_summary": "重大事件。", "facts": ["已启动响应"],
+        }]}
+        contract_error = ManageApiBusinessError("manager-api外界事件创建响应格式错误")
+        with patch(
+            "core.proactive_monitor.runner.evaluate_proactive_news_candidates",
+            AsyncMock(return_value=output),
+        ), patch(
+            "core.proactive_monitor.runner.create_proactive_monitor_event",
+            AsyncMock(side_effect=contract_error),
+        ), patch(
+            "core.proactive_monitor.runner.get_proactive_monitor_event",
+            AsyncMock(side_effect=ManageApiBusinessError("事件不存在")),
+        ):
+            with self.assertRaises(MonitorError) as raised:
+                await process_news(task, FakeNews(self.items))
+
+        self.assertEqual(
+            "news_event_persistence_contract_invalid", raised.exception.code
+        )
+
+    def test_authoritative_dedupe_parses_manager_ledger_time(self):
+        created_at = _authoritative_dedupe_recorded_at({
+            "dedupe_recorded_at": "2026-08-09 11:59:00",
+        })
+
+        self.assertEqual(
+            datetime(2026, 8, 9, 3, 59, tzinfo=timezone.utc), created_at
+        )
 
     def test_decision_log_hashes_device_and_does_not_log_raw_identifier(self):
         with patch("core.proactive_monitor.runner.logger") as safe_logger:
@@ -728,6 +1017,7 @@ class ManagerClientContractTest(unittest.IsolatedAsyncioTestCase):
     async def test_monitor_event_create_uses_authoritative_dedupe_endpoint(self):
         response = {
             "created": False, "deduped": True,
+            "dedupe_recorded_at": "2026-08-09 11:59:00",
             "authoritative_event_id": "existing", "event": {"event_id": "existing"},
         }
         with patch.object(

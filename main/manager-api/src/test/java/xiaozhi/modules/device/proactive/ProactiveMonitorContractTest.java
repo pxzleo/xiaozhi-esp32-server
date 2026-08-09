@@ -79,7 +79,12 @@ class ProactiveMonitorContractTest {
         Set<String> fields = Arrays.stream(ProactiveDTOs.EventCreateResult.class.getRecordComponents())
                 .map(java.lang.reflect.RecordComponent::getName)
                 .collect(java.util.stream.Collectors.toSet());
-        assertEquals(Set.of("created", "deduped", "authoritativeEventId", "event"), fields);
+        assertEquals(Set.of("created", "deduped", "authoritativeEventId", "event",
+                "dedupeRecordedAt"), fields);
+        Method ledgerTime = ProactiveEventDedupeDao.class.getMethod(
+                "selectLastCreatedAt", String.class, String.class, String.class);
+        assertTrue(ledgerTime.getAnnotation(Select.class).value()[0]
+                .contains("last_created_at"));
     }
 
     @Test

@@ -287,13 +287,18 @@ async def create_proactive_monitor_event(event: Dict) -> Dict:
     )
     if (
         not isinstance(data, dict)
-        or set(data) != {"created", "deduped", "authoritative_event_id", "event"}
+        or set(data) != {
+            "created", "deduped", "authoritative_event_id", "event",
+            "dedupe_recorded_at",
+        }
         or not isinstance(data["created"], bool)
         or not isinstance(data["deduped"], bool)
         or data["created"] == data["deduped"]
         or not isinstance(data["authoritative_event_id"], str)
         or not data["authoritative_event_id"]
         or not isinstance(data["event"], dict)
+        or not isinstance(data["dedupe_recorded_at"], str)
+        or not data["dedupe_recorded_at"].strip()
     ):
         raise ManageApiBusinessError("manager-api外界事件创建响应格式错误")
     return data
