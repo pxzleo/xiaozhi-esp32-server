@@ -47,6 +47,7 @@ manager-api 请求体中的 `created_at`、`expires_at` 和 `seen_at` 使用 Uni
 - `GET /device/proactive/habits`、`DELETE /device/proactive/habits/{habitId}`：列出本人设备的习惯或删除指定候选；列表可选 `device_id`。
 - `GET|PUT /device/proactive/monitors/{deviceId}`：原子读取或同时更新本人设备的天气、新闻监测配置。天气默认 30 分钟、新闻默认 10 分钟，两类默认启用；配置字段严格校验，未知字段拒绝，普通监测首次运行以空 `state` 建立基线。
 - `GET /device/proactive/pending`：设备使用 `Device-Id`、`Client-Id` 和 Bearer HMAC 令牌鉴权。每次探测更新两类监测的 `last_probe_at`，只返回一个未过期、可领取的 `weather_alert/news_alert` 安全信封，不返回 payload 或 reason；无事件时返回 `pending=false,retry_after_seconds=300`。用户关闭某类 monitor 后该类事件一律拒绝，critical 天气也不能绕过关闭开关；在 monitor 已启用的前提下，仅 critical 天气可以绕过今日静默、安静时段、模式和主题 allow/block，新闻永不绕过；`conservative` 也只允许已启用的 critical 天气。
+- `GET /device/proactive/pending` 必须先按当前 Web MVC 日期和枚举规则序列化为 UTF-8 JSON 字节，再返回与实际字节数完全一致且非零的 `Content-Length`，不得依赖容器的 chunked 默认行为。设备同时兼容服务端或中间代理改写出的 chunked、连接关闭定界响应，但无论是否声明长度都只允许有界读取最多 2048 字节。
 
 外界监测内部接口继续位于 `/config/proactive/**` 并使用 server-secret：
 
