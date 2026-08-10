@@ -32,7 +32,8 @@ import xiaozhi.modules.sys.service.SysParamsService;
 @Service
 public class MobileAssistantService {
     static final int PROTOCOL_VERSION = 1;
-    static final Set<String> ALLOWED_CAPABILITIES = Set.of("text_chat", "voice_session", "notification_gateway");
+    static final Set<String> ALLOWED_CAPABILITIES = Set.of(
+            "text_chat", "voice_session", "notification_gateway", "location_gateway");
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final MobileInstanceDao mobileDao;

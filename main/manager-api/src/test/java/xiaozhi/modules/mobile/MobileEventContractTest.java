@@ -2,6 +2,7 @@ package xiaozhi.modules.mobile;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -16,6 +17,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 class MobileEventContractTest {
     private final ObjectMapper mapper = new MobileJsonHttpMessageConverter().getObjectMapper();
+
+    @Test
+    void legacyM2ConfigOmitsLocationFieldButLocationBindingIncludesIt() throws Exception {
+        var notification = new MobileEventDTOs.NotificationConfig(true, 200, 50, java.util.List.of("message"));
+        String legacy = mapper.writeValueAsString(new MobileEventDTOs.ConfigResponse(1, notification, null));
+        assertFalse(legacy.contains("location_gateway"));
+        String location = mapper.writeValueAsString(new MobileEventDTOs.ConfigResponse(1, notification,
+                new MobileEventDTOs.LocationConfig(true)));
+        assertTrue(location.contains("\"location_gateway\":{\"available\":true}"));
+    }
 
     @Test
     void eventBatchRejectsUnknownFieldsAndTrailingJson() {

@@ -47,6 +47,36 @@ class MobileEventServiceTest {
     }
 
     @Test
+    void acceptsStrictLocationTransitionWithoutCoordinates() {
+        instance.setCapabilities("text_chat,notification_gateway,location_gateway");
+        assertEquals(true, service.config(auth()).locationGateway().available());
+        var result = service.accept(auth(), new BatchRequest(1, List.of(locationEvent(Map.of(
+                "place_id", "place_12345678", "place_name", "公司", "transition", "enter")))));
+        assertEquals("acknowledged", result.results().get(0).status());
+    }
+
+    @Test
+    void rejectsLocationCoordinatesAndRequiresLocationCapability() {
+        assertEquals(null, service.config(auth()).locationGateway());
+        assertEquals("CAPABILITY_REQUIRED", service.accept(auth(), new BatchRequest(1, List.of(locationEvent(Map.of(
+                "place_id", "place_12345678", "place_name", "公司", "transition", "enter")))))
+                .results().get(0).reasonCode());
+        CandidateEvent coordinates = locationEvent(Map.of(
+                "place_id", "place_12345678", "place_name", "公司", "transition", "enter", "latitude", "31.2"));
+        assertEquals("rejected", service.accept(auth(), new BatchRequest(1, List.of(coordinates)))
+                .results().get(0).status());
+
+        instance.setCapabilities("text_chat,notification_gateway,location_gateway");
+        CandidateEvent spoofed = new CandidateEvent(1, "loc_spoof", instance.getMobileInstanceId(),
+                "location.transition", Instant.now(), new EventSource("location", "android.geofence", "coordinates"),
+                "entered", "已进入公司", Map.of("place_id", "place_12345678", "place_name", "公司", "transition", "enter"),
+                "sha256:" + "d".repeat(64), Instant.now().plusSeconds(3600), "medium",
+                Map.of("rule_id", "geofence_transition_v1"));
+        assertEquals("rejected", service.accept(auth(), new BatchRequest(1, List.of(spoofed)))
+                .results().get(0).status());
+    }
+
+    @Test
     void duplicateEventIsExplicitAndIdempotent() {
         when(eventDao.insertIgnore(any(MobileEventEntity.class))).thenReturn(0);
         MobileEventEntity existing = new MobileEventEntity();
@@ -127,5 +157,12 @@ class MobileEventServiceTest {
                 Instant.now(), new EventSource("notification", "com.example.app", "delivery"), "updated",
                 summary, Map.of("category", "parcel"), dedupe, expiresAt, "medium",
                 Map.of("rule_id", "notification_keyword_v1", "transition", "posted->updated"));
+    }
+
+    private CandidateEvent locationEvent(Map<String, String> entities) {
+        return new CandidateEvent(1, "loc_01", instance.getMobileInstanceId(), "location.transition",
+                Instant.now(), new EventSource("location", "android.geofence", null), "entered",
+                "已进入公司", entities, "sha256:" + "e".repeat(64), Instant.now().plusSeconds(3600), "medium",
+                Map.of("rule_id", "geofence_transition_v1"));
     }
 }

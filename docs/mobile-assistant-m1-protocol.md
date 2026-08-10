@@ -26,7 +26,7 @@
 }
 ```
 
-`installation_id` 必须是客户端随机、可重置的 UUID。不得使用或上传 IMEI、Android ID、序列号、MAC 等硬件稳定标识。允许能力只有 `text_chat`、`voice_session`、`notification_gateway`。
+`installation_id` 必须是客户端随机、可重置的 UUID。不得使用或上传 IMEI、Android ID、序列号、MAC 等硬件稳定标识。允许能力只有 `text_chat`、`voice_session`、`notification_gateway`、`location_gateway`。
 
 成功响应的 `data`：
 

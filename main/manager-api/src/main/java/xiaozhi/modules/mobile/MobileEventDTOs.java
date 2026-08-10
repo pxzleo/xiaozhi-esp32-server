@@ -6,6 +6,7 @@ import java.util.Map;
 
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import jakarta.validation.Valid;
@@ -30,12 +31,12 @@ public final class MobileEventDTOs {
             int version,
             @JsonProperty("event_id") @NotBlank @Pattern(regexp = "^[A-Za-z0-9._:-]{1,64}$") String eventId,
             @JsonProperty("mobile_instance_id") @NotBlank @Pattern(regexp = "^mob_[0-9a-f]{32}$") String mobileInstanceId,
-            @NotBlank @Pattern(regexp = "^notification\\.state_changed$") String type,
+            @NotBlank @Pattern(regexp = "^(notification\\.state_changed|location\\.transition)$") String type,
             @JsonProperty("occurred_at") @NotNull Instant occurredAt,
             @NotNull @Valid EventSource source,
-            @NotBlank @Pattern(regexp = "^(posted|updated|removed)$") String state,
+            @NotBlank @Pattern(regexp = "^(posted|updated|removed|entered|exited|dwelled)$") String state,
             @NotBlank @Size(max = 200) String summary,
-            @NotNull @Size(max = 8) Map<@Pattern(regexp = "^(category|sender_hint|thread_hint)$") String,
+            @NotNull @Size(max = 8) Map<@Pattern(regexp = "^(category|sender_hint|thread_hint|place_id|place_name|transition)$") String,
                     @Size(max = 80) String> entities,
             @JsonProperty("dedupe_key") @NotBlank @Pattern(regexp = "^sha256:[0-9a-f]{64}$") String dedupeKey,
             @JsonProperty("expires_at") @NotNull Instant expiresAt,
@@ -49,7 +50,7 @@ public final class MobileEventDTOs {
 
     @JsonIgnoreProperties(ignoreUnknown = false)
     public record EventSource(
-            @NotBlank @Pattern(regexp = "^notification$") String kind,
+            @NotBlank @Pattern(regexp = "^(notification|location)$") String kind,
             @JsonProperty("package") @NotBlank @Pattern(regexp = "^[A-Za-z][A-Za-z0-9_.]{2,199}$") String packageName,
             @Size(max = 100) String channel) {
         @JsonAnySetter public void rejectUnknownField(String name, Object value) {
@@ -62,9 +63,11 @@ public final class MobileEventDTOs {
     public record EventResult(@JsonProperty("event_id") String eventId, String status,
             @JsonProperty("reason_code") String reasonCode) {}
 
-    public record ConfigResponse(int version, @JsonProperty("notification_gateway") NotificationConfig notificationGateway) {}
+    public record ConfigResponse(int version, @JsonProperty("notification_gateway") NotificationConfig notificationGateway,
+            @JsonProperty("location_gateway") @JsonInclude(JsonInclude.Include.NON_NULL) LocationConfig locationGateway) {}
     public record NotificationConfig(boolean available, @JsonProperty("max_summary_length") int maxSummaryLength,
             @JsonProperty("batch_size") int batchSize, List<String> categories) {}
+    public record LocationConfig(boolean available) {}
 
     public record StatusResponse(int version, List<EventStatus> events) {}
     public record EventStatus(@JsonProperty("event_id") String eventId, String status,

@@ -2,7 +2,13 @@ import json
 
 import pytest
 
-from core.mobile_protocol import MobileProtocolError, validate_mobile_frame
+from core.mobile_protocol import MobileProtocolError, parse_capabilities, validate_mobile_frame
+
+
+def test_location_gateway_is_a_strict_supported_capability():
+    assert parse_capabilities("text_chat,location_gateway") == ["text_chat", "location_gateway"]
+    with pytest.raises(MobileProtocolError):
+        parse_capabilities("text_chat,continuous_location")
 
 
 def test_accepts_text_as_existing_listen_detect_semantics():
