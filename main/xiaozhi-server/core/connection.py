@@ -466,6 +466,14 @@ class ConnectionHandler:
                         MobileProtocolError("CAPABILITY_REQUIRED", "手机实例未绑定实时语音能力")
                     )
                     return
+                elif mobile_payload["type"] == "external_context":
+                    if "notification_gateway" not in self.mobile_capabilities:
+                        await self._close_mobile_protocol_error(
+                            MobileProtocolError(
+                                "CAPABILITY_REQUIRED", "手机实例未绑定通知网关能力"
+                            )
+                        )
+                        return
                 message = json.dumps(mobile_payload, ensure_ascii=False)
         # 检查是否已经获取到真实的绑定状态
         if self.client_kind == "mobile":
@@ -501,6 +509,29 @@ class ConnectionHandler:
                 and mobile_payload["state"] == "detect"
             ):
                 await self._route_mobile_text_message(message, mobile_payload)
+            elif (
+                self.client_kind == "mobile"
+                and mobile_payload["type"] == "external_context"
+            ):
+                from core.providers.tools.device_mcp.mcp_handler import (
+                    handle_mobile_external_context,
+                )
+
+                try:
+                    await handle_mobile_external_context(
+                        self,
+                        mobile_payload["event_id"],
+                        mobile_payload["claim_token"],
+                    )
+                except Exception as exception:
+                    self.logger.bind(tag=TAG).warning(
+                        f"手机外界上下文绑定失败: {type(exception).__name__}"
+                    )
+                    await self._close_mobile_protocol_error(
+                        MobileProtocolError(
+                            "EXTERNAL_CONTEXT_REJECTED", "外界事件上下文无效或已过期"
+                        )
+                    )
             else:
                 await handleTextMessage(self, message)
                 if self.client_kind == "mobile" and mobile_payload["type"] == "hello":

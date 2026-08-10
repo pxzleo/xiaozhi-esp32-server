@@ -101,7 +101,7 @@ public class MobileEventService {
         return new StatusResponse(VERSION, statuses);
     }
 
-    private MobileInstanceEntity authenticate(MobileAuth auth) {
+    MobileInstanceEntity authenticate(MobileAuth auth, String requiredCapability) {
         if (auth == null || auth.protocolVersion() != VERSION || StringUtils.isBlank(auth.instanceId())
                 || StringUtils.isBlank(auth.installationId())
                 || StringUtils.isBlank(auth.token())) {
@@ -111,11 +111,15 @@ public class MobileEventService {
         boolean valid = instance != null && instance.getRevokedAt() == null
                 && auth.installationId().equals(instance.getInstallationId())
                 && Integer.valueOf(auth.credentialVersion()).equals(instance.getCredentialVersion())
-                && storedCapabilities(instance).contains("notification_gateway")
+                && storedCapabilities(instance).contains(requiredCapability)
                 && MessageDigest.isEqual(MobileAssistantService.hashCredential(auth.token()).getBytes(StandardCharsets.US_ASCII),
                         StringUtils.defaultString(instance.getCredentialHash()).getBytes(StandardCharsets.US_ASCII));
         if (!valid) throw unauthorized();
         return instance;
+    }
+
+    private MobileInstanceEntity authenticate(MobileAuth auth) {
+        return authenticate(auth, "notification_gateway");
     }
 
     private Set<String> storedCapabilities(MobileInstanceEntity entity) {

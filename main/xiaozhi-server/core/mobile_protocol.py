@@ -8,6 +8,9 @@ MAX_AUDIO_FRAME_BYTES = 16384
 MAX_USER_TEXT_CHARS = 2000
 PROTOCOL_VERSION = 1
 MESSAGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+CLAIM_TOKEN_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 ALLOWED_CAPABILITIES = frozenset(
     {"text_chat", "voice_session", "notification_gateway"}
 )
@@ -60,6 +63,7 @@ def validate_mobile_frame(message: str) -> dict:
         "listen": _validate_listen,
         "abort": _validate_abort,
         "ping": _validate_ping,
+        "external_context": _validate_external_context,
     }
     validator = validators.get(frame_type)
     if validator is None:
@@ -130,6 +134,20 @@ def _validate_abort(payload: dict):
 def _validate_ping(payload: dict):
     _require_exact_fields(payload, {"type", "version"}, {"message_id"})
     _validate_optional_message_id(payload)
+
+
+def _validate_external_context(payload: dict):
+    _require_exact_fields(
+        payload, {"type", "version", "event_id", "claim_token"}, set()
+    )
+    if not isinstance(payload["event_id"], str) or not MESSAGE_ID_PATTERN.fullmatch(
+        payload["event_id"]
+    ):
+        raise MobileProtocolError("INVALID_EVENT_ID", "外界事件ID无效")
+    if not isinstance(payload["claim_token"], str) or not CLAIM_TOKEN_PATTERN.fullmatch(
+        payload["claim_token"]
+    ):
+        raise MobileProtocolError("INVALID_CLAIM_TOKEN", "外界事件领取凭据无效")
 
 
 def _validate_optional_message_id(payload: dict):

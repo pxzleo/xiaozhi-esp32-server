@@ -57,7 +57,7 @@ public final class ProactiveEnums {
         @JsonCreator public static DeliveryStatus fromWire(String value) { return parseWire(DeliveryStatus.class, value); }
     }
     public enum Outcome implements WireEnum {
-        NONE, ACKNOWLEDGED, COMPLETED, DISMISSED, FAILED;
+        NONE, ACKNOWLEDGED, COMPLETED, DISMISSED, FAILED, INTERRUPTED;
         @JsonCreator public static Outcome fromWire(String value) { return parseWire(Outcome.class, value); }
     }
     public enum HabitType implements WireEnum {

@@ -63,6 +63,15 @@ public class ProactiveConfigController {
         return new Result<EventView>().ok(service.monitorEvent(macAddress, eventId));
     }
 
+    @GetMapping("/monitor-events/{eventId}/claimed-context")
+    public Result<EventView> claimedMonitorEvent(
+            @PathVariable @Size(max = 64) String eventId,
+            @RequestParam("mac_address") @NotBlank @Size(max = 50) String macAddress,
+            @RequestParam("claim_token") @NotBlank @Size(max = 64) String claimToken) {
+        return new Result<EventView>().ok(
+                service.claimedMonitorEvent(macAddress, eventId, claimToken));
+    }
+
     @PostMapping("/classifier/evaluate")
     public Result<ClassifierResult> evaluate(@Valid @RequestBody ClassifierEvaluate request) {
         return new Result<ClassifierResult>().ok(monitorService.evaluate(request));

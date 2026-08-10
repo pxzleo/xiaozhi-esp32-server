@@ -15,6 +15,7 @@ import org.apache.ibatis.annotations.Update;
 import org.junit.jupiter.api.Test;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 
 import jakarta.validation.Validation;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceUpdate;
@@ -25,6 +26,21 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Mode;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 
 class ProactiveContractTest {
+    @Test
+    void deliveredContextOlderThanLeaseRemainsReadableWhileClaimedDoesNot() throws Exception {
+        Method claimedContext = ProactiveEventDao.class.getMethod("selectClaimedMonitorEvent",
+                String.class, String.class, String.class, java.util.Date.class);
+        String sql = claimedContext.getAnnotation(Select.class).value()[0];
+        int claimedBranch = sql.indexOf("e.delivery_status = 'CLAIMED'");
+        int leaseGuard = sql.indexOf(
+                "e.claimed_at >= DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)");
+        int deliveredBranch = sql.indexOf("OR e.delivery_status = 'DELIVERED'");
+        assertTrue(claimedBranch >= 0 && leaseGuard > claimedBranch
+                && deliveredBranch > leaseGuard);
+        assertTrue(sql.contains("e.claim_token = #{claimToken}"));
+        assertTrue(sql.contains("e.expires_at > CURRENT_TIMESTAMP(3)"));
+    }
+
     @Test
     void externalRollingPoliciesHaveFixedWindowsAndLegacyEventsNeedNoPolicy() {
         EventUpsert news = new EventUpsert();
@@ -85,6 +101,43 @@ class ProactiveContractTest {
         String globalGateSql = globalGate.getAnnotation(Select.class).value()[0];
         assertTrue(globalGateSql.contains("proactive.external_monitoring_enabled"));
         assertTrue(globalGateSql.contains("FOR UPDATE"));
+    }
+
+    @Test
+    void ownerScopedDeliveryClaimIsDatabaseAtomicAcrossDeviceCopies() throws Exception {
+        String migration = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src/main/resources/db/changelog/202608111300.sql"));
+        assertTrue(migration.contains("PRIMARY KEY (`user_id`, `delivery_group_key`)"));
+        assertTrue(migration.contains("WHEN `event_type` IN ('WEATHER_ALERT', 'NEWS_ALERT')"));
+        assertTrue(migration.contains("THEN `dedupe_key` ELSE `event_id` END"));
+        assertTrue(migration.contains("mobile_terminal_status"));
+        assertTrue(migration.contains("mobile_terminal_reason"));
+
+        Method claim = ProactiveDeliveryClaimDao.class.getMethod("claim", Long.class,
+                String.class, String.class, String.class, String.class, java.util.Date.class,
+                java.util.Date.class, java.util.Date.class, int.class);
+        String sql = claim.getAnnotation(Update.class).value()[0];
+        assertTrue(sql.contains("user_id = #{userId} AND delivery_group_key = #{groupKey}"));
+        assertTrue(sql.contains("delivery_status IN ('PENDING', 'FAILED')"));
+        assertTrue(sql.contains("claimed_at < #{leaseCutoff}"));
+        assertTrue(sql.contains("#{eventCreatedAt} >= DATE_ADD(event_created_at"));
+
+        Method pending = ProactiveEventDao.class.getMethod("selectPendingMonitorEvents",
+                String.class, java.util.Date.class);
+        String pendingSql = pending.getAnnotation(Select.class).value()[0];
+        String executablePending = pendingSql
+                .replace("#{deviceId}", "'device-1'")
+                .replace("#{now}", "CURRENT_TIMESTAMP");
+        CCJSqlParserUtil.parse(executablePending);
+        assertTrue(pendingSql.contains("INNER JOIN ai_device d ON d.id = e.device_id"));
+        assertTrue(pendingSql.contains("ai_proactive_delivery_claim"));
+        assertTrue(pendingSql.contains("dc.user_id = d.user_id"));
+        assertTrue(pendingSql.contains("dc.delivery_group_key = e.delivery_group_key"));
+
+        Method page = ProactiveEventDao.class.getMethod("pageForUser", Long.class,
+                String.class, String.class, String.class, String.class, int.class, long.class);
+        String pageSql = page.getAnnotation(Select.class).value()[0];
+        assertEquals(1, pageSql.split("INNER JOIN ai_device d", -1).length - 1);
     }
 
     @Test
@@ -176,6 +229,24 @@ class ProactiveContractTest {
         assertTrue(eventSql.contains("device_id = #{deviceId} AND event_id = #{eventId}"));
         assertTrue(eventSql.contains("delivery_status = #{expectedStatus}"));
         assertTrue(eventSql.contains("claim_token = #{claimToken}"));
+        assertTrue(eventSql.contains("claim_token IS NULL OR"));
+        assertTrue(eventSql.contains("claimed_at >= DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)"));
+        assertTrue(eventSql.contains("expires_at > CURRENT_TIMESTAMP(3)"));
+
+        Method groupComplete = ProactiveDeliveryClaimDao.class.getMethod("complete", Long.class,
+                String.class, String.class, String.class, java.util.Date.class);
+        String groupCompleteSql = groupComplete.getAnnotation(Update.class).value()[0];
+        assertTrue(groupCompleteSql.contains(
+                "claimed_at >= DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)"));
+
+        Method claimedContext = ProactiveEventDao.class.getMethod("selectClaimedMonitorEvent",
+                String.class, String.class, String.class, java.util.Date.class);
+        String claimedContextSql = claimedContext.getAnnotation(Select.class).value()[0];
+        assertTrue(claimedContextSql.contains(
+                "claimed_at >= DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)"));
+        assertTrue(claimedContextSql.contains("e.delivery_status = 'CLAIMED'"));
+        assertTrue(claimedContextSql.contains("OR e.delivery_status = 'DELIVERED'"));
+        assertTrue(claimedContextSql.contains("expires_at > CURRENT_TIMESTAMP(3)"));
 
         Method findEvent = ProactiveEventDao.class.getMethod("selectByDeviceAndEventId",
                 String.class, String.class);

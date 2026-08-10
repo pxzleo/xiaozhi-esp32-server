@@ -24,6 +24,8 @@ public class ProactiveEventEntity {
     private Date createdAt;
     private Date expiresAt;
     private String dedupeKey;
+    private String deliveryGroupKey;
+    private Integer deliveryGroupWindowHours;
     private Boolean requiresResponse;
     private String deliveryStatus;
     private String outcome;

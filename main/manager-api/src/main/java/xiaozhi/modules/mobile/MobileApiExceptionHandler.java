@@ -13,10 +13,14 @@ import org.springframework.web.bind.MissingRequestHeaderException;
 
 import jakarta.validation.ConstraintViolationException;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Order(Ordered.HIGHEST_PRECEDENCE)
-@RestControllerAdvice(assignableTypes = {MobileAssistantController.class, MobileEventController.class})
+@RestControllerAdvice(assignableTypes = {MobileAssistantController.class, MobileEventController.class,
+        MobileProactiveController.class})
 public class MobileApiExceptionHandler {
+    private static final Logger LOGGER = LoggerFactory.getLogger(MobileApiExceptionHandler.class);
     @ExceptionHandler(MobileApiException.class)
     public ResponseEntity<MobileErrorResponse> handleMobileApiException(MobileApiException exception) {
         return response(exception.getStatus(), exception.getErrorCode(), exception.getMessage());
@@ -34,6 +38,12 @@ public class MobileApiExceptionHandler {
             return response(HttpStatus.UNAUTHORIZED, "MOBILE_CREDENTIAL_MISSING", "缺少手机访问凭据");
         }
         return response(HttpStatus.BAD_REQUEST, "MOBILE_PROTOCOL_HEADER_MISSING", "缺少手机协议请求头");
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<MobileErrorResponse> handleUnexpected(Exception exception) {
+        LOGGER.error("手机接口处理失败: {}", exception.getClass().getSimpleName());
+        return response(HttpStatus.INTERNAL_SERVER_ERROR, "MOBILE_INTERNAL_ERROR", "手机服务暂时不可用");
     }
 
     private ResponseEntity<MobileErrorResponse> response(HttpStatus status, String code, String message) {

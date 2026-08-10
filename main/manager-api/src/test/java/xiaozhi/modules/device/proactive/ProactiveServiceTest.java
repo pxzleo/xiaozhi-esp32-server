@@ -50,6 +50,7 @@ class ProactiveServiceTest {
     private ProactivePreferenceDao preferenceDao;
     private ProactiveEventDao eventDao;
     private ProactiveEventDedupeDao eventDedupeDao;
+    private ProactiveDeliveryClaimDao deliveryClaimDao;
     private ProactiveGlobalDao globalDao;
     private ProactiveHabitDao habitDao;
     private ProactiveService service;
@@ -61,9 +62,10 @@ class ProactiveServiceTest {
         preferenceDao = mock(ProactivePreferenceDao.class);
         eventDao = mock(ProactiveEventDao.class);
         eventDedupeDao = mock(ProactiveEventDedupeDao.class);
+        deliveryClaimDao = mock(ProactiveDeliveryClaimDao.class);
         globalDao = mock(ProactiveGlobalDao.class);
         habitDao = mock(ProactiveHabitDao.class);
-        service = new ProactiveService(deviceDao, preferenceDao, eventDao, eventDedupeDao,
+        service = new ProactiveService(deviceDao, preferenceDao, eventDao, eventDedupeDao, deliveryClaimDao,
                 globalDao, habitDao, new ObjectMapper());
         device = new DeviceEntity();
         device.setId("device-1");
@@ -74,6 +76,9 @@ class ProactiveServiceTest {
         when(deviceDao.selectByIdForUpdate("device-1")).thenReturn(device);
         when(globalDao.selectExternalMonitoringValueForUpdate()).thenReturn("true");
         when(eventDedupeDao.selectLastCreatedAt(any(), any(), any())).thenReturn(new Date());
+        when(deliveryClaimDao.insertIfAbsent(any(), any(), any())).thenReturn(1);
+        when(deliveryClaimDao.claim(any(), any(), any(), any(), any(), any(), any(), any(), anyInt())).thenReturn(1);
+        when(deliveryClaimDao.complete(any(), any(), any(), any(), any())).thenReturn(1);
     }
 
     @Test
@@ -699,12 +704,99 @@ class ProactiveServiceTest {
     }
 
     @Test
+    void ownerGroupConflictRestoresThisDeviceEventInsideTransaction() {
+        EventClaim claim = claim("phone-token");
+        ProactiveEventEntity claimed = eventEntity(eventRequest());
+        claimed.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
+        claimed.setClaimToken("phone-token");
+        when(eventDao.claimPending(eq("device-1"), eq("event-1"), eq("phone-token"), any(), any()))
+                .thenReturn(1);
+        when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(claimed);
+        when(deliveryClaimDao.claim(any(), any(), any(), any(), eq("phone-token"), any(), any(), any(), anyInt()))
+                .thenReturn(0);
+        when(eventDao.releaseClaim(eq("device-1"), eq("event-1"), eq("phone-token"), any()))
+                .thenReturn(1);
+
+        assertFalse(service.claimEvent("event-1", claim));
+        verify(eventDao).releaseClaim(eq("device-1"), eq("event-1"), eq("phone-token"), any());
+    }
+
+    @Test
+    void sameOwnerOfficialWarningCopiesShareGroupAndOnlyOneCanClaim() {
+        DeviceEntity other = new DeviceEntity();
+        other.setId("device-2");
+        other.setMacAddress("AA:BB:CC:DD:EE:FF");
+        other.setUserId(device.getUserId());
+        when(deviceDao.selectList(any())).thenReturn(
+                List.of(device), List.of(other), List.of(device), List.of(other));
+        when(deviceDao.selectByIdForUpdate("device-2")).thenReturn(other);
+
+        EventUpsert first = officialWarning("warning-device-1", device.getMacAddress());
+        EventUpsert second = officialWarning("warning-device-2", other.getMacAddress());
+        Map<String, ProactiveEventEntity> stored = new ConcurrentHashMap<>();
+        when(eventDao.selectByDeviceAndEventIdForUpdate(any(), any())).thenAnswer(call ->
+                stored.get(call.getArgument(0) + ":" + call.getArgument(1)));
+        when(eventDao.insertIfAbsent(any(ProactiveEventEntity.class))).thenAnswer(call -> {
+            ProactiveEventEntity event = call.getArgument(0);
+            stored.put(event.getDeviceId() + ":" + event.getEventId(), event);
+            return 1;
+        });
+
+        service.createMonitorEvent(first);
+        service.createMonitorEvent(second);
+        ProactiveEventEntity left = stored.get("device-1:warning-device-1");
+        ProactiveEventEntity right = stored.get("device-2:warning-device-2");
+        assertEquals(left.getDeliveryGroupKey(), right.getDeliveryGroupKey());
+        assertEquals(0, left.getDeliveryGroupWindowHours());
+
+        AtomicReference<String> groupOwner = new AtomicReference<>();
+        when(eventDao.claimPending(any(), any(), any(), any(), any())).thenAnswer(call -> {
+            ProactiveEventEntity event = stored.get(call.getArgument(0) + ":" + call.getArgument(1));
+            event.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
+            event.setClaimToken(call.getArgument(2));
+            return 1;
+        });
+        when(eventDao.selectByDeviceAndEventId(any(), any())).thenAnswer(call ->
+                stored.get(call.getArgument(0) + ":" + call.getArgument(1)));
+        when(deliveryClaimDao.claim(eq(device.getUserId()), eq(left.getDeliveryGroupKey()),
+                any(), any(), any(), any(), any(), any(), anyInt())).thenAnswer(call ->
+                groupOwner.compareAndSet(null, call.getArgument(4)) ? 1 : 0);
+        when(eventDao.releaseClaim(any(), any(), any(), any())).thenReturn(1);
+
+        EventClaim firstClaim = new EventClaim();
+        firstClaim.setMacAddress(device.getMacAddress());
+        firstClaim.setClaimToken("speaker-token");
+        EventClaim secondClaim = new EventClaim();
+        secondClaim.setMacAddress(other.getMacAddress());
+        secondClaim.setClaimToken("phone-token");
+        assertTrue(service.claimEvent(first.getEventId(), firstClaim));
+        assertFalse(service.claimEvent(second.getEventId(), secondClaim));
+        verify(eventDao).releaseClaim(eq("device-2"), eq(second.getEventId()),
+                eq("phone-token"), any());
+    }
+
+    @Test
     void authoritativeMonitorReadRejectsEventAfterMonitorIsDisabled() {
         when(eventDao.selectMonitorEventByMacAndEventId(device.getMacAddress(), "event-1"))
                 .thenReturn(null);
 
         assertThrows(RenException.class,
                 () -> service.monitorEvent(device.getMacAddress(), "event-1"));
+    }
+
+    @Test
+    void claimedContextRequiresServerStoredClaimTokenAndUnexpiredEvent() {
+        ProactiveEventEntity claimed = eventEntity(officialWarning(
+                "warning-device-1", device.getMacAddress()));
+        claimed.setClaimToken("claim-token");
+        claimed.setDeliveryStatus(DeliveryStatus.DELIVERED.name());
+        when(eventDao.selectClaimedMonitorEvent(eq(device.getMacAddress()),
+                eq("warning-device-1"), eq("claim-token"), any())).thenReturn(claimed);
+
+        assertEquals("warning-device-1", service.claimedMonitorEvent(
+                device.getMacAddress(), "warning-device-1", "claim-token").eventId());
+        assertThrows(RenException.class, () -> service.claimedMonitorEvent(
+                device.getMacAddress(), "warning-device-1", "client-text"));
     }
 
     @Test
@@ -883,6 +975,22 @@ class ProactiveServiceTest {
         return value;
     }
 
+    private EventUpsert officialWarning(String eventId, String macAddress) {
+        EventUpsert value = eventRequest();
+        value.setMacAddress(macAddress);
+        value.setEventId(eventId);
+        value.setTopic(Topic.WEATHER);
+        value.setPriority(Priority.CRITICAL);
+        value.setEventType(EventType.WEATHER_ALERT);
+        value.setPayload(Map.of("title", "暴雨红色预警", "message", "请减少外出",
+                "reference_id", "official-warning-123", "source", "QWeather"));
+        value.setDedupeKey("weather-warning:abcdef0123456789:extreme");
+        value.setDedupePolicy(DedupePolicy.EVENT_ID);
+        value.setRequiresResponse(false);
+        value.setExpiresAt(new Date(System.currentTimeMillis() + 3_600_000));
+        return value;
+    }
+
     private EventStatusUpdate status(DeliveryStatus deliveryStatus, String token) {
         EventStatusUpdate value = new EventStatusUpdate();
         value.setMacAddress(device.getMacAddress());
@@ -915,6 +1023,8 @@ class ProactiveServiceTest {
         value.setPayload("{\"message\":\"hello\"}");
         value.setCreatedAt(request.getCreatedAt());
         value.setDedupeKey(request.getDedupeKey());
+        value.setDeliveryGroupKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        value.setDeliveryGroupWindowHours(24);
         value.setRequiresResponse(true);
         value.setDeliveryStatus(DeliveryStatus.PENDING.name());
         value.setOutcome(Outcome.NONE.name());

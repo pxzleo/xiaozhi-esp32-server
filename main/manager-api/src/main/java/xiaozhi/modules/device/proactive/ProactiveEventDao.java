@@ -44,10 +44,12 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
     @Insert("""
             INSERT INTO ai_device_proactive_event
                 (device_id, mac_address, event_id, topic, priority, reason, event_type, payload,
-                 created_at, expires_at, dedupe_key, requires_response, delivery_status, outcome, updated_at)
+                 created_at, expires_at, dedupe_key, delivery_group_key, delivery_group_window_hours,
+                 requires_response, delivery_status, outcome, updated_at)
             VALUES (#{e.deviceId}, #{e.macAddress}, #{e.eventId}, #{e.topic}, #{e.priority}, #{e.reason},
                     #{e.eventType}, CAST(#{e.payload} AS JSON), #{e.createdAt}, #{e.expiresAt}, #{e.dedupeKey},
-                    #{e.requiresResponse}, #{e.deliveryStatus}, #{e.outcome}, #{e.updatedAt})
+                    #{e.deliveryGroupKey}, #{e.deliveryGroupWindowHours}, #{e.requiresResponse},
+                    #{e.deliveryStatus}, #{e.outcome}, #{e.updatedAt})
             ON DUPLICATE KEY UPDATE id = id
             """)
     int insertIfAbsent(@Param("e") ProactiveEventEntity event);
@@ -59,7 +61,10 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
                 updated_at = #{now}
             WHERE device_id = #{deviceId} AND event_id = #{eventId}
               AND delivery_status = #{expectedStatus}
-              AND (#{expectedStatus} <> 'CLAIMED' OR claim_token = #{claimToken})
+              AND (claim_token IS NULL OR (
+                  claim_token = #{claimToken}
+                  AND claimed_at >= DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)
+                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP(3))))
             """)
     int updateStatusCas(@Param("deviceId") String deviceId, @Param("eventId") String eventId,
             @Param("expectedStatus") String expectedStatus, @Param("claimToken") String claimToken,
@@ -92,6 +97,15 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
     int claimPending(@Param("deviceId") String deviceId, @Param("eventId") String eventId,
             @Param("claimToken") String claimToken, @Param("now") Date now,
             @Param("leaseCutoff") Date leaseCutoff);
+
+    @Update("""
+            UPDATE ai_device_proactive_event
+            SET delivery_status = 'PENDING', claim_token = NULL, claimed_at = NULL, updated_at = #{now}
+            WHERE device_id = #{deviceId} AND event_id = #{eventId}
+              AND delivery_status = 'CLAIMED' AND claim_token = #{claimToken}
+            """)
+    int releaseClaim(@Param("deviceId") String deviceId, @Param("eventId") String eventId,
+            @Param("claimToken") String claimToken, @Param("now") Date now);
 
     @Select("""
             <script>
@@ -139,10 +153,20 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             INNER JOIN sys_params g
               ON g.param_code = 'proactive.external_monitoring_enabled'
              AND LOWER(TRIM(g.param_value)) = 'true'
+            INNER JOIN ai_device d ON d.id = e.device_id
+            LEFT JOIN ai_proactive_delivery_claim dc
+              ON dc.user_id = d.user_id AND dc.delivery_group_key = e.delivery_group_key
             WHERE e.device_id = #{deviceId}
               AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
               AND (e.expires_at IS NULL OR e.expires_at > #{now})
               AND e.delivery_status = 'PENDING'
+              AND (dc.user_id IS NULL OR dc.delivery_status = 'FAILED'
+                   OR (dc.delivery_status = 'CLAIMED'
+                       AND (dc.claimed_at IS NULL OR dc.claimed_at < DATE_SUB(#{now}, INTERVAL 180 SECOND)))
+                   OR (dc.delivery_status = 'DELIVERED' AND e.delivery_group_window_hours > 0
+                       AND dc.event_created_at IS NOT NULL
+                       AND e.created_at >= DATE_ADD(dc.event_created_at,
+                           INTERVAL e.delivery_group_window_hours HOUR)))
             ORDER BY CASE e.priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
                      WHEN 'NORMAL' THEN 2 ELSE 3 END,
                      e.created_at, e.id
@@ -168,4 +192,18 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             """)
     ProactiveEventEntity selectMonitorEventByMacAndEventId(@Param("macAddress") String macAddress,
             @Param("eventId") String eventId);
+
+    @Select("""
+            SELECT e.* FROM ai_device_proactive_event e
+            WHERE e.mac_address = #{macAddress} AND e.event_id = #{eventId}
+              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
+              AND e.claim_token = #{claimToken}
+              AND ((e.delivery_status = 'CLAIMED'
+                    AND e.claimed_at >= DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
+                   OR e.delivery_status = 'DELIVERED')
+              AND (e.expires_at IS NULL OR e.expires_at > CURRENT_TIMESTAMP(3))
+            """)
+    ProactiveEventEntity selectClaimedMonitorEvent(@Param("macAddress") String macAddress,
+            @Param("eventId") String eventId, @Param("claimToken") String claimToken,
+            @Param("now") Date now);
 }

@@ -491,6 +491,26 @@ async def get_proactive_monitor_event(event_id: str, mac_address: str) -> Dict:
         raise ManageApiBusinessError("manager-api外界事件响应格式错误")
     return data
 
+
+async def get_claimed_proactive_context(
+    event_id: str, mac_address: str, claim_token: str
+) -> Dict:
+    """按手机领取凭据读取权威上下文；客户端帧不得携带正文。"""
+    if not isinstance(event_id, str) or not event_id or len(event_id) > 64:
+        raise ValueError("外界事件ID无效")
+    if not isinstance(mac_address, str) or not mac_address or len(mac_address) > 50:
+        raise ValueError("设备MAC无效")
+    if not isinstance(claim_token, str) or not claim_token or len(claim_token) > 64:
+        raise ValueError("外界事件领取凭据无效")
+    query = urlencode({"mac_address": mac_address, "claim_token": claim_token})
+    data = await _execute_proactive_request(
+        "GET",
+        f"/config/proactive/monitor-events/{quote(event_id, safe='')}/claimed-context?{query}",
+    )
+    if not isinstance(data, dict):
+        raise ManageApiBusinessError("manager-api外界事件上下文响应格式错误")
+    return data
+
 async def get_server_config() -> Optional[Dict]:
     """获取服务器基础配置"""
     return await ManageApiClient._instance._execute_async_request(

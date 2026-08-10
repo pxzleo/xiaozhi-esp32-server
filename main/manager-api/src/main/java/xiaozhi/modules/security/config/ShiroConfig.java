@@ -97,6 +97,7 @@ public class ShiroConfig {
         filterMap.put("/mobile/config", "anon");
         filterMap.put("/mobile/events:batch", "anon");
         filterMap.put("/mobile/events/status", "anon");
+        filterMap.put("/mobile/proactive/**", "anon");
         // 将config路径使用server服务过滤器
         filterMap.put("/config/**", "server");
         filterMap.put("/device/netease/**", "device");

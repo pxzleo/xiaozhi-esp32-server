@@ -66,17 +66,20 @@ public class ProactiveService {
     private final ProactivePreferenceDao preferenceDao;
     private final ProactiveEventDao eventDao;
     private final ProactiveEventDedupeDao eventDedupeDao;
+    private final ProactiveDeliveryClaimDao deliveryClaimDao;
     private final ProactiveGlobalDao globalDao;
     private final ProactiveHabitDao habitDao;
     private final ObjectMapper objectMapper;
 
     public ProactiveService(DeviceDao deviceDao, ProactivePreferenceDao preferenceDao,
             ProactiveEventDao eventDao, ProactiveEventDedupeDao eventDedupeDao,
+            ProactiveDeliveryClaimDao deliveryClaimDao,
             ProactiveGlobalDao globalDao, ProactiveHabitDao habitDao, ObjectMapper objectMapper) {
         this.deviceDao = deviceDao;
         this.preferenceDao = preferenceDao;
         this.eventDao = eventDao;
         this.eventDedupeDao = eventDedupeDao;
+        this.deliveryClaimDao = deliveryClaimDao;
         this.globalDao = globalDao;
         this.habitDao = habitDao;
         this.objectMapper = objectMapper;
@@ -230,6 +233,12 @@ public class ProactiveService {
         entity.setCreatedAt(request.getCreatedAt());
         entity.setExpiresAt(request.getExpiresAt());
         entity.setDedupeKey(request.getDedupeKey());
+        boolean rollingGroup = request.getDedupePolicy() == DedupePolicy.ROLLING_WINDOW;
+        // 外界事件可能按设备生成不同 event_id；跨前端竞争键必须来自跨设备稳定的权威去重身份。
+        String groupIdentity = isExternal(request.getEventType())
+                ? request.getDedupeKey() : request.getEventId();
+        entity.setDeliveryGroupKey(sha256(request.getEventType().name() + ":" + groupIdentity));
+        entity.setDeliveryGroupWindowHours(rollingGroup ? request.getDedupeWindowHours() : 0);
         entity.setRequiresResponse(request.getRequiresResponse());
         entity.setDeliveryStatus(DeliveryStatus.PENDING.name());
         entity.setOutcome(Outcome.NONE.name());
@@ -282,6 +291,13 @@ public class ProactiveService {
                 target.name(), request.getOutcome().name(), new Date()) != 1) {
             throw new RenException("主动事件状态已变化");
         }
+        if (source == DeliveryStatus.CLAIMED && StringUtils.isNotBlank(current.getDeliveryGroupKey())) {
+            String groupStatus = target == DeliveryStatus.DELIVERED ? "DELIVERED" : "FAILED";
+            if (deliveryClaimDao.complete(device.getUserId(), current.getDeliveryGroupKey(),
+                    claimToken, groupStatus, new Date()) != 1) {
+                throw new RenException("主动事件跨前端终态更新失败");
+            }
+        }
         ProactiveEventEntity event = eventDao.selectByDeviceAndEventId(device.getId(), eventId);
         return toEvent(event);
     }
@@ -295,10 +311,21 @@ public class ProactiveService {
             return false;
         }
         ProactiveEventEntity event = eventDao.selectByDeviceAndEventId(device.getId(), eventId);
-        return event != null
+        boolean eventClaimed = event != null
                 && DeliveryStatus.CLAIMED.name().equals(event.getDeliveryStatus())
                 && request.getClaimToken().equals(event.getClaimToken())
                 && (event.getExpiresAt() == null || event.getExpiresAt().after(now));
+        if (!eventClaimed || StringUtils.isBlank(event.getDeliveryGroupKey())) return false;
+        deliveryClaimDao.insertIfAbsent(device.getUserId(), event.getDeliveryGroupKey(), now);
+        if (deliveryClaimDao.claim(device.getUserId(), event.getDeliveryGroupKey(), device.getId(),
+                eventId, request.getClaimToken(), now, leaseCutoff, event.getCreatedAt(),
+                event.getDeliveryGroupWindowHours() == null ? 0 : event.getDeliveryGroupWindowHours()) != 1) {
+            if (eventDao.releaseClaim(device.getId(), eventId, request.getClaimToken(), now) != 1) {
+                throw new RenException("主动事件跨前端领取冲突回滚失败");
+            }
+            return false;
+        }
+        return true;
     }
 
     @Transactional
@@ -338,6 +365,16 @@ public class ProactiveService {
         if (StringUtils.isAnyBlank(macAddress, eventId)) throw new RenException("外界事件查询参数不能为空");
         ProactiveEventEntity event = eventDao.selectMonitorEventByMacAndEventId(macAddress, eventId);
         if (event == null) throw new RenException("外界监测事件不存在");
+        return toEvent(event);
+    }
+
+    public EventView claimedMonitorEvent(String macAddress, String eventId, String claimToken) {
+        if (StringUtils.isAnyBlank(macAddress, eventId, claimToken)) {
+            throw new RenException("已领取外界事件查询参数不能为空");
+        }
+        ProactiveEventEntity event = eventDao.selectClaimedMonitorEvent(
+                macAddress, eventId, claimToken, new Date());
+        if (event == null) throw new RenException("已领取外界监测事件不存在或已失效");
         return toEvent(event);
     }
 

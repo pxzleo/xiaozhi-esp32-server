@@ -318,7 +318,7 @@ class ProactiveMonitorContractTest {
         assertTrue(sql.contains("LOWER(TRIM(g.param_value)) = 'true'"));
         assertTrue(sql.contains("event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')"));
         assertTrue(sql.contains("delivery_status = 'PENDING'"));
-        assertFalse(sql.contains("delivery_status = 'CLAIMED'"));
+        assertFalse(sql.contains("e.delivery_status = 'CLAIMED'"));
         assertTrue(sql.indexOf("m.enabled = 1") < sql.indexOf("ORDER BY"));
         assertTrue(sql.indexOf("m.enabled = 1") < sql.indexOf("LIMIT 20"));
         assertFalse(java.util.Arrays.stream(ProactiveDTOs.PendingEnvelope.class.getRecordComponents())
