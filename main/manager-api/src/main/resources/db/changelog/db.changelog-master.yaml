@@ -809,3 +809,11 @@ databaseChangeLog:
         - sqlFile:
             encoding: utf8
             path: classpath:db/changelog/202608101200.sql
+  - changeSet:
+      id: 202608111200
+      author: xu
+      changes:
+        - sqlFile:
+            path: classpath:db/changelog/202608111200.sql
+            encoding: UTF-8
+            splitStatements: true

@@ -93,6 +93,10 @@ public class ShiroConfig {
         filterMap.put("/user/retrieve-password", "anon");
         // 手机实例握手只允许 Python 服务端使用内部密钥校验。
         filterMap.put("/config/mobile/**", "server");
+        // M2 手机 REST 使用独立 mobile credential，由控制器严格验证，不混用账号 OAuth。
+        filterMap.put("/mobile/config", "anon");
+        filterMap.put("/mobile/events:batch", "anon");
+        filterMap.put("/mobile/events/status", "anon");
         // 将config路径使用server服务过滤器
         filterMap.put("/config/**", "server");
         filterMap.put("/device/netease/**", "device");

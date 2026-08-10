@@ -3,17 +3,19 @@ package xiaozhi.modules.mobile;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.bind.MissingRequestHeaderException;
 
 import jakarta.validation.ConstraintViolationException;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 @Order(Ordered.HIGHEST_PRECEDENCE)
-@RestControllerAdvice(assignableTypes = MobileAssistantController.class)
+@RestControllerAdvice(assignableTypes = {MobileAssistantController.class, MobileEventController.class})
 public class MobileApiExceptionHandler {
     @ExceptionHandler(MobileApiException.class)
     public ResponseEntity<MobileErrorResponse> handleMobileApiException(MobileApiException exception) {
@@ -24,6 +26,14 @@ public class MobileApiExceptionHandler {
             HttpMessageNotReadableException.class})
     public ResponseEntity<MobileErrorResponse> handleInvalidRequest(Exception exception) {
         return response(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "手机接口请求参数无效");
+    }
+
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    public ResponseEntity<MobileErrorResponse> handleMissingHeader(MissingRequestHeaderException exception) {
+        if (HttpHeaders.AUTHORIZATION.equalsIgnoreCase(exception.getHeaderName())) {
+            return response(HttpStatus.UNAUTHORIZED, "MOBILE_CREDENTIAL_MISSING", "缺少手机访问凭据");
+        }
+        return response(HttpStatus.BAD_REQUEST, "MOBILE_PROTOCOL_HEADER_MISSING", "缺少手机协议请求头");
     }
 
     private ResponseEntity<MobileErrorResponse> response(HttpStatus status, String code, String message) {
