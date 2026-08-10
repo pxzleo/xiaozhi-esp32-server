@@ -46,6 +46,15 @@ from config.manage_api_client import authorize_mobile_instance
 TAG = __name__
 
 
+def _replace_request_header(headers, name, value):
+    """Replace a request header without leaving duplicate values behind."""
+    try:
+        del headers[name]
+    except KeyError:
+        pass
+    headers[name] = value
+
+
 class WebSocketServer:
     def __init__(self, config: dict):
         self.config = config
@@ -275,10 +284,9 @@ class WebSocketServer:
             or result.get("credential_version") != credential_version
         ):
             raise MobileProtocolError("UNAUTHORIZED", "手机凭据无效或已撤销")
-        websocket.request.headers["device-id"] = instance_id
-        websocket.request.headers["client-id"] = installation_id
-        del websocket.request.headers["authorization"]
-        websocket.request.headers["authorization"] = "Bearer [REDACTED]"
+        _replace_request_header(websocket.request.headers, "device-id", instance_id)
+        _replace_request_header(websocket.request.headers, "client-id", installation_id)
+        _replace_request_header(websocket.request.headers, "authorization", "Bearer [REDACTED]")
         return {
             "instance_id": instance_id,
             "installation_id": installation_id,

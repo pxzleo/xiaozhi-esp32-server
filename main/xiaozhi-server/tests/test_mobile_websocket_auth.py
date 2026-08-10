@@ -2,6 +2,7 @@ from types import SimpleNamespace
 import asyncio
 
 import pytest
+from websockets.datastructures import Headers
 
 import core.websocket_server as websocket_server
 import core.connection as connection_module
@@ -71,6 +72,34 @@ def test_mobile_handshake_maps_authorized_instance_to_existing_device_identity(m
     assert context["capabilities"] == ["text_chat", "voice_session"]
     assert context["credential_version"] == 3
     assert "opaque" not in ws.request.headers["authorization"]
+
+
+def test_mobile_handshake_replaces_client_id_without_duplicate_header(monkeypatch):
+    async def authorize(instance_id, installation_id, token, credential_version, capabilities):
+        return {
+            "authorized": True,
+            "mobile_instance_id": instance_id,
+            "credential_version": credential_version,
+        }
+
+    monkeypatch.setattr(websocket_server, "authorize_mobile_instance", authorize)
+    server = websocket_server.WebSocketServer.__new__(websocket_server.WebSocketServer)
+    instance_id = "mob_0123456789abcdef0123456789abcdef"
+    installation_id = "123e4567-e89b-12d3-a456-426614174000"
+    headers = Headers([
+        ("Mobile-Instance-Id", instance_id),
+        ("Client-Id", installation_id),
+        ("Mobile-Protocol-Version", "1"),
+        ("Mobile-Credential-Version", "3"),
+        ("Mobile-Capabilities", "text_chat,voice_session"),
+        ("Authorization", "Bearer opaque"),
+    ])
+    ws = FakeWebSocket(headers)
+
+    asyncio.run(server._prepare_mobile_connection(ws))
+
+    assert headers.get_all("client-id") == [installation_id]
+    assert dict(headers)["client-id"] == installation_id
 
 
 def test_mobile_handshake_rejects_revoked_credential(monkeypatch):
