@@ -33,6 +33,7 @@ import com.fasterxml.jackson.datatype.jsr310.ser.LocalDateTimeSerializer;
 import com.fasterxml.jackson.datatype.jsr310.ser.LocalTimeSerializer;
 
 import xiaozhi.common.utils.DateUtils;
+import xiaozhi.modules.mobile.MobileJsonHttpMessageConverter;
 
 @Configuration
 public class WebMvcConfig implements WebMvcConfigurer {
@@ -57,6 +58,7 @@ public class WebMvcConfig implements WebMvcConfigurer {
         converters.add(new AllEncompassingFormHttpMessageConverter());
 
         // JSON 转换器
+        converters.add(new MobileJsonHttpMessageConverter());
         converters.add(jackson2HttpMessageConverter());
     }
 

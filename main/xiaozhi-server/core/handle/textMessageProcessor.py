@@ -25,7 +25,10 @@ class TextMessageProcessor:
                 message_type = msg_json.get("type")
 
                 # 记录日志
-                conn.logger.bind(tag=TAG).info(f"收到{message_type}消息：{message}")
+                if getattr(conn, "client_kind", "device") == "mobile":
+                    conn.logger.bind(tag=TAG).info(f"收到手机{message_type}消息")
+                else:
+                    conn.logger.bind(tag=TAG).info(f"收到{message_type}消息：{message}")
 
                 # 获取并执行处理器
                 handler = self.registry.get_handler(message_type)

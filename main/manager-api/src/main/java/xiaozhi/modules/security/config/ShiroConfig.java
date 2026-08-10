@@ -91,6 +91,8 @@ public class ShiroConfig {
         filterMap.put("/user/pub-config", "anon");
         filterMap.put("/user/register", "anon");
         filterMap.put("/user/retrieve-password", "anon");
+        // 手机实例握手只允许 Python 服务端使用内部密钥校验。
+        filterMap.put("/config/mobile/**", "server");
         // 将config路径使用server服务过滤器
         filterMap.put("/config/**", "server");
         filterMap.put("/device/netease/**", "device");

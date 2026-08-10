@@ -61,6 +61,7 @@ public class Oauth2Filter extends AuthenticatingFilter {
             logger.warn("onAccessDenied:token is empty");
 
             HttpServletResponse httpResponse = (HttpServletResponse) response;
+            httpResponse.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
             httpResponse.setContentType("application/json;charset=utf-8");
             httpResponse.setHeader("Access-Control-Allow-Credentials", "true");
             httpResponse.setHeader("Access-Control-Allow-Origin", HttpContextUtils.getOrigin());
@@ -79,6 +80,7 @@ public class Oauth2Filter extends AuthenticatingFilter {
     protected boolean onLoginFailure(AuthenticationToken token, AuthenticationException e, ServletRequest request,
             ServletResponse response) {
         HttpServletResponse httpResponse = (HttpServletResponse) response;
+        httpResponse.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         httpResponse.setContentType("application/json;charset=utf-8");
         httpResponse.setHeader("Access-Control-Allow-Credentials", "true");
         httpResponse.setHeader("Access-Control-Allow-Origin", HttpContextUtils.getOrigin());
@@ -88,7 +90,8 @@ public class Oauth2Filter extends AuthenticatingFilter {
 
             String json = JsonUtils.toJsonString(r);
             httpResponse.getWriter().print(json);
-        } catch (IOException e1) {
+        } catch (IOException exception) {
+            throw new IllegalStateException("账号认证失败响应写入失败", exception);
         }
 
         return false;

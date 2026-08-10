@@ -208,6 +208,71 @@ async def get_proactive_preference(mac_address: str) -> Dict:
     )
 
 
+async def authorize_mobile_instance(
+    mobile_instance_id: str,
+    installation_id: str,
+    token: str,
+    credential_version: int,
+    capabilities: list[str],
+) -> Dict:
+    """使用 manager-api 中的可撤销凭据账本鉴权手机 WS 握手。"""
+    return await _require_manager_client()._execute_async_request(
+        "POST",
+        f"/config/mobile/instances/{quote(mobile_instance_id, safe='')}/authorize",
+        json={
+            "version": 1,
+            "credential_version": credential_version,
+            "installation_id": installation_id,
+            "token": token,
+            "capabilities": capabilities,
+        },
+        timeout=2.0,
+        _max_retries=0,
+    )
+
+
+async def claim_mobile_message(mobile_instance_id: str, message_id: str) -> Dict:
+    """跨重连幂等领取一条手机文字消息。"""
+    data = await _require_manager_client()._execute_async_request(
+        "POST",
+        f"/config/mobile/instances/{quote(mobile_instance_id, safe='')}/messages/"
+        f"{quote(message_id, safe='')}/claim",
+        timeout=2.0,
+        _max_retries=0,
+    )
+    return data or {"status": "revoked", "claim_token": None}
+
+
+async def complete_mobile_message(
+    mobile_instance_id: str, message_id: str, claim_token: str
+) -> bool:
+    data = await _require_manager_client()._execute_async_request(
+        "POST",
+        f"/config/mobile/instances/{quote(mobile_instance_id, safe='')}/messages/"
+        f"{quote(message_id, safe='')}/complete",
+        json={"claim_token": claim_token},
+        timeout=2.0,
+        _max_retries=2,
+        _retry_delay=0.1,
+    )
+    return bool(data and data.get("completed") is True)
+
+
+async def renew_mobile_message(
+    mobile_instance_id: str, message_id: str, claim_token: str
+) -> bool:
+    data = await _require_manager_client()._execute_async_request(
+        "POST",
+        f"/config/mobile/instances/{quote(mobile_instance_id, safe='')}/messages/"
+        f"{quote(message_id, safe='')}/renew",
+        json={"claim_token": claim_token},
+        timeout=2.0,
+        _max_retries=1,
+        _retry_delay=0.1,
+    )
+    return bool(data and data.get("completed") is True)
+
+
 async def update_proactive_preference(mac_address: str, preference: Dict) -> Dict:
     """同步设备端已成功更新的积极主动偏好。"""
     return await _execute_proactive_request(

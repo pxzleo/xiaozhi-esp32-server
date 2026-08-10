@@ -45,6 +45,10 @@ from config.manage_api_client import (
     DeviceBindException,
     generate_and_save_chat_title,
     get_proactive_preference,
+    claim_mobile_message,
+    complete_mobile_message,
+    renew_mobile_message,
+    authorize_mobile_instance,
 )
 from core.providers.tools.device_mcp.proactive_policy import (
     safe_local_preferences,
@@ -54,6 +58,7 @@ from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils.util import get_system_error_response
 from core.utils import textUtils
+from core.mobile_protocol import MAX_AUDIO_FRAME_BYTES, MobileProtocolError, validate_mobile_frame
 
 
 TAG = __name__
@@ -123,6 +128,9 @@ class ConnectionHandler:
 
         self.need_bind = False  # 是否需要绑定设备
         self.bind_completed_event = asyncio.Event()
+        self.components_ready_event = asyncio.Event()
+        self.asr_ready_event = asyncio.Event()
+        self._components_initialized = False
         self.tts_ready_event = asyncio.Event()
         self.bind_code = None  # 绑定设备的验证码
         self.last_bind_prompt_time = 0  # 上次播放绑定提示的时间戳(秒)
@@ -222,6 +230,11 @@ class ConnectionHandler:
 
         # 标记连接是否来自MQTT
         self.conn_from_mqtt_gateway = False
+        self.client_kind = "device"
+        self.mobile_capabilities = set()
+        self.mobile_auth_context = None
+        self.mobile_last_auth_check = 0.0
+        self.mobile_protocol_state = "AWAIT_HELLO"
 
         # 初始化提示词管理器
         self.prompt_manager = PromptManager(self.config, self.logger)
@@ -251,8 +264,11 @@ class ConnectionHandler:
                 self.client_ip = real_ip.split(",")[0].strip()
             else:
                 self.client_ip = ws.remote_address[0]
+            logged_headers = dict(self.headers)
+            if "authorization" in logged_headers:
+                logged_headers["authorization"] = "[REDACTED]"
             self.logger.bind(tag=TAG).info(
-                f"{self.client_ip} conn - Headers: {self.headers}"
+                f"{self.client_ip} conn - Headers: {logged_headers}"
             )
 
             self.device_id = self.headers.get("device-id", None)
@@ -400,7 +416,67 @@ class ConnectionHandler:
 
     async def _route_message(self, message):
         """消息路由"""
+        mobile_payload = None
+        if self.client_kind == "mobile":
+            if not await self._ensure_mobile_authorized(force=not isinstance(message, bytes)):
+                return
+            if isinstance(message, bytes):
+                if self.mobile_protocol_state != "READY":
+                    await self._close_mobile_protocol_error(
+                        MobileProtocolError("HELLO_REQUIRED", "手机首帧必须是 hello")
+                    )
+                    return
+                if "voice_session" not in self.mobile_capabilities:
+                    await self._close_mobile_protocol_error(
+                        MobileProtocolError("CAPABILITY_REQUIRED", "手机实例未绑定实时语音能力")
+                    )
+                    return
+                if len(message) > MAX_AUDIO_FRAME_BYTES:
+                    await self._close_mobile_protocol_error(
+                        MobileProtocolError("FRAME_TOO_LARGE", "手机音频帧超过大小限制")
+                    )
+                    return
+            else:
+                try:
+                    mobile_payload = validate_mobile_frame(message)
+                except MobileProtocolError as exception:
+                    await self._close_mobile_protocol_error(exception)
+                    return
+                if self.mobile_protocol_state == "AWAIT_HELLO" and mobile_payload["type"] != "hello":
+                    await self._close_mobile_protocol_error(
+                        MobileProtocolError("HELLO_REQUIRED", "手机首帧必须是 hello")
+                    )
+                    return
+                if self.mobile_protocol_state == "READY" and mobile_payload["type"] == "hello":
+                    await self._close_mobile_protocol_error(
+                        MobileProtocolError("DUPLICATE_HELLO", "手机 hello 不能重复发送")
+                    )
+                    return
+                if mobile_payload["type"] == "listen" and mobile_payload["state"] == "detect":
+                    if "text_chat" not in self.mobile_capabilities:
+                        await self._close_mobile_protocol_error(
+                            MobileProtocolError("CAPABILITY_REQUIRED", "手机实例未绑定文字对话能力")
+                        )
+                        return
+                elif (
+                    mobile_payload["type"] == "listen"
+                    and "voice_session" not in self.mobile_capabilities
+                ):
+                    await self._close_mobile_protocol_error(
+                        MobileProtocolError("CAPABILITY_REQUIRED", "手机实例未绑定实时语音能力")
+                    )
+                    return
+                message = json.dumps(mobile_payload, ensure_ascii=False)
         # 检查是否已经获取到真实的绑定状态
+        if self.client_kind == "mobile":
+            try:
+                await asyncio.wait_for(self.bind_completed_event.wait(), timeout=10)
+                if not self.need_bind:
+                    await asyncio.wait_for(self.components_ready_event.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                self.logger.bind(tag=TAG).error("手机会话组件初始化超时")
+                await self.websocket.close(code=1011)
+                return
         if not self.bind_completed_event.is_set():
             # 还没有获取到真实状态，等待直到获取到真实状态或超时
             try:
@@ -419,7 +495,16 @@ class ConnectionHandler:
         # 不需要绑定，继续处理消息
 
         if isinstance(message, str):
-            await handleTextMessage(self, message)
+            if (
+                self.client_kind == "mobile"
+                and mobile_payload["type"] == "listen"
+                and mobile_payload["state"] == "detect"
+            ):
+                await self._route_mobile_text_message(message, mobile_payload)
+            else:
+                await handleTextMessage(self, message)
+                if self.client_kind == "mobile" and mobile_payload["type"] == "hello":
+                    self.mobile_protocol_state = "READY"
         elif isinstance(message, bytes):
             if self.vad is None or self.asr is None:
                 return
@@ -434,6 +519,113 @@ class ConnectionHandler:
             pcm_frame = self._decode_opus_packet(message)
             if pcm_frame:
                 self.asr_audio_queue.put(pcm_frame)
+
+    async def _ensure_mobile_authorized(self, force=False):
+        now = time.monotonic()
+        if not force and now - self.mobile_last_auth_check < 5.0:
+            return True
+        context = self.mobile_auth_context or {}
+        try:
+            result = await authorize_mobile_instance(
+                context.get("instance_id"),
+                context.get("installation_id"),
+                context.get("token"),
+                context.get("credential_version"),
+                context.get("capabilities", []),
+            )
+        except Exception as exception:
+            self.logger.bind(tag=TAG).error(
+                f"手机连接撤销复验服务不可用: {type(exception).__name__}"
+            )
+            await self.websocket.close(code=1011)
+            return False
+        if not result or result.get("authorized") is not True:
+            await self.websocket.send(json.dumps({
+                "type": "error", "version": 1, "code": "UNAUTHORIZED",
+                "message": "手机凭据无效或已撤销", "session_id": self.session_id,
+            }, ensure_ascii=False))
+            await self.websocket.close(code=4401)
+            return False
+        self.mobile_last_auth_check = now
+        return True
+
+    async def _route_mobile_text_message(self, message, payload):
+        message_id = payload["message_id"]
+        try:
+            claim = await claim_mobile_message(self.device_id, message_id)
+        except Exception as exception:
+            self.logger.bind(tag=TAG).error(
+                f"手机消息幂等服务不可用: {type(exception).__name__}"
+            )
+            await self.websocket.close(code=1011)
+            return
+        status = claim.get("status")
+        if status == "duplicate":
+            await self._send_mobile_message_ack(message_id, "duplicate")
+            return
+        if status == "revoked":
+            await self.websocket.close(code=4401)
+            return
+        if status != "claimed" or not claim.get("claim_token"):
+            await self.websocket.send(json.dumps({
+                "type": "error", "version": 1, "code": "MESSAGE_IN_PROGRESS",
+                "message": "手机消息正在处理，请稍后重试", "session_id": self.session_id,
+            }, ensure_ascii=False))
+            return
+        claim_token = claim["claim_token"]
+        renewal_task = asyncio.create_task(
+            self._renew_mobile_message_lease(message_id, claim_token)
+        )
+        try:
+            await handleTextMessage(self, message)
+        except Exception:
+            # 一旦调用现有处理器，是否已产生意图或会话副作用就不再可判定，
+            # 因此保留领取并让客户端使用原 message_id 查询/重试。
+            raise
+        finally:
+            renewal_task.cancel()
+            try:
+                await renewal_task
+            except asyncio.CancelledError:
+                pass
+        try:
+            completed = await complete_mobile_message(
+                self.device_id, message_id, claim_token
+            )
+            if not completed:
+                raise RuntimeError("手机消息确认租约已失效")
+        except Exception as exception:
+            self.logger.bind(tag=TAG).error(
+                f"手机消息已处理但持久确认失败: {type(exception).__name__}"
+            )
+            await self.websocket.close(code=1011)
+            raise
+        await self._send_mobile_message_ack(message_id, "accepted")
+
+    async def _renew_mobile_message_lease(self, message_id, claim_token):
+        while True:
+            await asyncio.sleep(10)
+            renewed = await renew_mobile_message(
+                self.device_id, message_id, claim_token
+            )
+            if not renewed:
+                raise RuntimeError("手机消息领取续租失败")
+
+    async def _send_mobile_message_ack(self, message_id, status):
+        await self.websocket.send(json.dumps({
+            "type": "message_ack", "version": 1, "message_id": message_id,
+            "status": status, "session_id": self.session_id,
+        }, ensure_ascii=False))
+
+    async def _close_mobile_protocol_error(self, exception):
+        await self.websocket.send(json.dumps({
+            "type": "error",
+            "version": 1,
+            "code": exception.code,
+            "message": exception.message,
+            "session_id": self.session_id,
+        }, ensure_ascii=False))
+        await self.websocket.close(code=4400)
 
     async def _process_mqtt_audio_message(self, message):
         """
@@ -694,8 +886,8 @@ class ConnectionHandler:
             # 初始化声纹识别
             self._initialize_voiceprint()
             # 打开语音识别通道
-            asyncio.run_coroutine_threadsafe(
-                self.asr.open_audio_channels(self), self.loop
+            self._asr_channels_future = asyncio.run_coroutine_threadsafe(
+                self._open_asr_channels(), self.loop
             )
 
             """加载记忆"""
@@ -708,6 +900,7 @@ class ConnectionHandler:
             self._init_prompt_enhancement()
             """注入工具调用few-shot示例（仅function_call模式）"""
             self._inject_tool_call_fewshot()
+            self.loop.call_soon_threadsafe(self._mark_components_initialized)
 
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
@@ -726,7 +919,32 @@ class ConnectionHandler:
         if self.connection_closed_event.is_set() or self.stop_event.is_set():
             return False
         self.tts_ready_event.set()
+        self._maybe_set_components_ready()
         return True
+
+    async def _open_asr_channels(self):
+        try:
+            await self.asr.open_audio_channels(self)
+        except Exception as error:
+            self.logger.bind(tag=TAG).error(
+                f"ASR通道初始化失败: {type(error).__name__}"
+            )
+            return False
+        self.asr_ready_event.set()
+        self._maybe_set_components_ready()
+        return True
+
+    def _mark_components_initialized(self):
+        self._components_initialized = True
+        self._maybe_set_components_ready()
+
+    def _maybe_set_components_ready(self):
+        if (
+            self._components_initialized
+            and self.tts_ready_event.is_set()
+            and self.asr_ready_event.is_set()
+        ):
+            self.components_ready_event.set()
 
     def _handle_tts_channels_done(self, future):
         """消费跨线程 TTS 初始化结果，避免后台异常静默丢失。"""
