@@ -257,20 +257,20 @@ class ProactiveMonitorServiceTest {
     }
 
     @Test
-    void turningGlobalSwitchBackOnRevealsExistingUnexpiredPendingEvent() {
-        when(paramsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, true))
-                .thenReturn("false", "true");
+    void daoLevelGlobalSwitchFilteringRevealsExistingUnexpiredPendingEvent() {
         when(monitorDao.probeAndRebaselineIfOffline("device-1")).thenReturn(2);
         when(monitorDao.selectByDevice("device-1")).thenReturn(List.of(
                 monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
                 preference(Set.of(), Set.of()));
-        when(eventDao.selectPendingMonitorEvents(eq("device-1"))).thenReturn(List.of(
+        when(eventDao.selectPendingMonitorEvents(eq("device-1"))).thenReturn(List.of(), List.of(
                 event(EventType.NEWS_ALERT, Topic.NEWS, Priority.HIGH)));
 
         assertFalse(service.pending("device-1").pending());
         assertTrue(service.pending("device-1").pending());
-        verify(eventDao).selectPendingMonitorEvents(eq("device-1"));
+        verify(eventDao, org.mockito.Mockito.times(2)).selectPendingMonitorEvents(eq("device-1"));
+        verify(paramsService, never()).getValue(
+                Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, true);
     }
 
     @Test

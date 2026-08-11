@@ -333,12 +333,14 @@ class ProactiveContractTest {
         Method monitorRead = ProactiveEventDao.class.getMethod(
                 "selectMonitorEventByMacAndEventId", String.class, String.class);
         String monitorReadSql = monitorRead.getAnnotation(Select.class).value()[0];
-        assertTrue(monitorReadSql.contains("INNER JOIN ai_device_proactive_monitor m"));
+        assertTrue(monitorReadSql.contains("LEFT JOIN ai_device_proactive_monitor m"));
         assertTrue(monitorReadSql.contains("m.enabled = 1"));
         assertTrue(monitorReadSql.contains("proactive.external_monitoring_enabled"));
         assertTrue(monitorReadSql.contains("LOWER(TRIM(g.param_value)) = 'true'"));
         assertTrue(monitorReadSql.contains("WHEN 'WEATHER_ALERT' THEN 'WEATHER'"));
         assertTrue(monitorReadSql.contains("WHEN 'NEWS_ALERT' THEN 'NEWS'"));
+        assertTrue(monitorReadSql.contains("e.event_type = 'MOBILE_ALERT'"));
+        assertTrue(monitorReadSql.contains("OR (m.enabled = 1 AND LOWER(TRIM(g.param_value)) = 'true')"));
         assertTrue(monitorReadSql.contains("e.expires_at > CURRENT_TIMESTAMP(3)"));
         assertTrue(monitorReadSql.contains("e.delivery_status IN ('PENDING','CLAIMED')"));
     }

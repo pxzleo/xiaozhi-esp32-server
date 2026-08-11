@@ -106,6 +106,7 @@ class MobileMigrationTest {
         String latest = String.join("\n", MobileEventDao.class
                 .getMethod("updateLatestState", MobileEventEntity.class)
                 .getAnnotation(Update.class).value());
+        assertTrue(latest.contains("mobile_instance_id=#{mobileInstanceId} AND dedupe_key=#{dedupeKey}"));
         assertTrue(latest.contains("occurred_at<#{occurredAt}"));
         assertTrue(latest.contains("processing_status='received'"));
         assertTrue(latest.contains("processing_lease_token=NULL"));

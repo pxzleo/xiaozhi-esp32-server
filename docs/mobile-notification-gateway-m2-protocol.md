@@ -20,7 +20,7 @@ Android outbox 按 `mobile_instance_id` 隔离，worker 只能发送当前绑定
 
 状态接口只返回当前手机实例最近 1–100 条逐次接收审计的 ID、状态、原因码和更新时间，不返回摘要或通知正文。`acknowledged/deduped/rejected/expired` 均持久审计；拒绝记录不保存候选正文。专用异常处理器保留真实 HTTP 状态，且所有接口强制 `Mobile-Protocol-Version: 1`。服务端数据库只保存客户端已脱敏且接受的候选；日志禁止记录正文、token 和签名材料。
 
-缺少 Authorization 返回 HTTP 401；缺少其他手机协议头返回 HTTP 400。同一 `dedupe_key` 的新候选返回 `deduped`，但主事件记录仍按 `occurred_at` 单调更新最新状态、脱敏摘要、证据和有效期；每次接收结果继续单独追加审计。
+缺少 Authorization 返回 HTTP 401；缺少其他手机协议头返回 HTTP 400。同一 `dedupe_key` 的新候选返回 `deduped`，但主事件记录仍按 `occurred_at` 单调更新最新状态、脱敏摘要、证据和有效期；每次接收结果继续单独追加审计。Android 必须在 Room `notification_lifecycle` 同一事务内对实际状态变化计算 `effective_at=max(callback_now, previous_updated_at+1)`，持久化该值并作为候选 `occurred_at`，因此同毫秒回调和系统时钟回拨仍严格递增。系统 notification key 在 removed 后复用会递增 generation，且 generation 进入 `event_id/dedupe_key`；服务端更新 SQL 同时限定 `mobile_instance_id+dedupe_key`，所以迟到的旧 generation 只能更新旧状态流，不能覆盖新 generation。
 
 ## 账号侧处理审计与提醒转换
 
@@ -32,6 +32,6 @@ Android outbox 按 `mobile_instance_id` 隔离，worker 只能发送当前绑定
 
 用户在 M5 显式保存并启用的 enter/exit/dwell 是位置主动提醒授权。`location.transition` 不调用 LLM；通过实例、严格形状和有效期校验后，服务端仅用受控地点名重构“已进入/已离开/已驻留 + 地点名”，按 `place_id+transition` 计算 24 小时滚动去重并生成普通优先级提醒。经纬度和客户端自由文本不得进入 payload 或模型。
 
-同一通知生命周期的更晚 `updated/removed` 在更新手机事件的事务中失效旧 `delivery_group` 的未实际投递副本：PENDING 写入 dismissed 真实终态；CLAIMED 保留领取事实但把有效期推进到数据库当前时间，使后续权威读取和 complete CAS 拒绝；DELIVERED 不改写。`updated` 若再次达到提醒门槛，按 `dedupe_key + occurred_at revision` 生成新内部去重键，以新的投递组和最新受控 payload 创建提醒，不能命中旧 24 小时窗口复用旧内容。手机和音箱在实际播报前必须重新读取权威事件；Android 对 `MOBILE_ALERT` 使用同一 token 再次 claim，同 token 幂等且不得刷新 180 秒租约，复验冲突时停止呈现。
+同一通知生命周期的更晚 `updated/removed` 在更新手机事件的事务中失效旧 `delivery_group` 的未实际投递副本：PENDING 写入 dismissed 真实终态；CLAIMED 保留领取事实但把有效期推进到数据库当前时间，使后续权威读取和 complete CAS 拒绝；DELIVERED 不改写。`updated` 若再次达到提醒门槛，按 `dedupe_key + occurred_at revision` 生成新内部去重键，以新的投递组和最新受控 payload 创建提醒，不能命中旧 24 小时窗口复用旧内容。手机和音箱在实际播报前必须重新读取权威事件；Android 对 `MOBILE_ALERT` 使用同一 token 再次 claim，同 token 幂等且不得刷新 180 秒租约，复验冲突时停止呈现。当前 Android `/mobile/proactive/pending` 返回闭集中 `topic=system` 只对应 `MOBILE_ALERT`，因此 Android 以该 topic 触发二次复验；若以后该返回闭集增加其他 SYSTEM 事件，必须先增加可精确区分事件类型的协议字段并同步客户端，不能隐式复用该判断。
 
 账号审计的 `delivery_status` 在 SQL 查询时按数据库当前时间派生，且筛选必须使用相同表达式：`expires_at<=CURRENT_TIMESTAMP(3)` 显示 `expired`；当前关联主动事件副本本身已是 `DISMISSED/DELIVERED/FAILED` 时优先保留该终态，只有当前副本非终态时才参考共享领取账本；底层为 CLAIMED 但领取时间为空或早于当前时间 180 秒的记录显示 `pending`，与可重领语义一致。这样不会让音箱的 fresh CLAIMED 覆盖当前手机副本已 dismissed 的事实，也不会把已过期或租约失效的提醒继续展示为正在领取。
