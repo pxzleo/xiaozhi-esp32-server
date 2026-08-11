@@ -46,6 +46,12 @@ class MobileEventContractTest {
     }
 
     @Test
+    void mobileEventSqlParametersAreNotWrittenToDebugLogs() throws Exception {
+        String config = java.nio.file.Files.readString(java.nio.file.Path.of("src/main/resources/application.yml"));
+        assertTrue(config.contains("xiaozhi.modules.mobile.MobileEventDao: INFO"));
+    }
+
+    @Test
     void eventControllerUsesMobileAdviceAndPreservesRealHttp401() throws Exception {
         MobileEventService service = mock(MobileEventService.class);
         when(service.config(any())).thenThrow(new MobileApiException(org.springframework.http.HttpStatus.UNAUTHORIZED,

@@ -74,3 +74,5 @@ logging:
     # 授权表包含加密凭证，会话表包含二维码原文和加密 key，禁止 MyBatis 输出 SQL 参数。
     xiaozhi.modules.device.netease.DeviceNeteaseAuthDao: INFO
     xiaozhi.modules.device.netease.DeviceNeteaseSessionDao: INFO
+    # 手机事件表包含脱敏摘要，仍不得由 MyBatis DEBUG 输出 SQL 参数。
+    xiaozhi.modules.mobile.MobileEventDao: INFO
