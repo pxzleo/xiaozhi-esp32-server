@@ -279,6 +279,7 @@ public final class ProactiveDTOs {
             return switch (eventType) {
                 case WEATHER_ALERT -> topic == Topic.WEATHER;
                 case NEWS_ALERT -> topic == Topic.NEWS;
+                case MOBILE_ALERT -> topic == Topic.SYSTEM;
                 default -> true;
             };
         }
@@ -294,6 +295,10 @@ public final class ProactiveDTOs {
                 return dedupePolicy == DedupePolicy.EVENT_ID && dedupeWindowHours == null
                         || dedupePolicy == DedupePolicy.ROLLING_WINDOW
                            && Integer.valueOf(12).equals(dedupeWindowHours);
+            }
+            if (eventType == EventType.MOBILE_ALERT) {
+                return dedupePolicy == DedupePolicy.ROLLING_WINDOW
+                        && Integer.valueOf(24).equals(dedupeWindowHours);
             }
             return dedupePolicy == null && dedupeWindowHours == null;
         }

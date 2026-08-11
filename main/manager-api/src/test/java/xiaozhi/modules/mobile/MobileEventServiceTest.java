@@ -90,6 +90,23 @@ class MobileEventServiceTest {
     }
 
     @Test
+    void newerRemovedStateDismissesPendingAlertCopies() {
+        when(eventDao.insertIgnore(any(MobileEventEntity.class))).thenReturn(0);
+        when(eventDao.updateLatestState(any(MobileEventEntity.class))).thenReturn(1);
+        CandidateEvent base = event("evt_removed", "sha256:" + "f".repeat(64));
+        CandidateEvent removed = new CandidateEvent(base.version(), base.eventId(),
+                base.mobileInstanceId(), base.type(), base.occurredAt(), base.source(), "removed",
+                base.summary(), base.entities(), base.dedupeKey(), base.expiresAt(),
+                base.privacyLevel(), Map.of("rule_id", "notification_keyword_v1",
+                        "transition", "updated->removed"));
+
+        service.accept(auth(), new BatchRequest(1, List.of(removed)));
+
+        org.mockito.Mockito.verify(eventDao).dismissPendingMobileAlerts(
+                instance.getMobileInstanceId(), removed.dedupeKey());
+    }
+
+    @Test
     void rejectsExpiredAndSensitivePayloadsWithoutPersistingThem() {
         var expired = event("evt_01", "sha256:" + "a".repeat(64), Instant.now().minusSeconds(5), "安全码 123456");
         assertEquals("expired", service.accept(auth(), new BatchRequest(1, List.of(expired))).results().get(0).status());

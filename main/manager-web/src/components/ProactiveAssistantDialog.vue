@@ -256,6 +256,70 @@
         </div>
       </el-tab-pane>
 
+      <el-tab-pane :label="$t('proactive.mobileEvents')" name="mobileEvents">
+        <div class="section-body">
+          <el-alert v-if="mobileEventsError" :title="mobileEventsError" type="error" :closable="false" show-icon />
+          <div class="filter-row">
+            <el-select v-model="mobileEventFilters.type" clearable size="small" :placeholder="$t('proactive.mobile.type')">
+              <el-option v-for="type in mobileEventTypes" :key="type" :label="enumLabel('mobile.type', type)" :value="type" />
+            </el-select>
+            <el-select v-model="mobileEventFilters.processing_status" clearable size="small" :placeholder="$t('proactive.mobile.stage')">
+              <el-option v-for="status in mobileProcessingStatuses" :key="status" :label="enumLabel('mobile.stage', status)" :value="status" />
+            </el-select>
+            <el-select v-model="mobileEventFilters.delivery_status" clearable size="small" :placeholder="$t('proactive.deliveryStatus')">
+              <el-option v-for="status in deliveryStatuses" :key="status" :label="enumLabel('deliveryStatus', status)" :value="status" />
+            </el-select>
+            <el-date-picker v-model="mobileEventFilters.from" type="datetime" size="small"
+              value-format="yyyy-MM-dd'T'HH:mm:ssXXX" :placeholder="$t('proactive.mobile.from')" />
+            <el-date-picker v-model="mobileEventFilters.to" type="datetime" size="small"
+              value-format="yyyy-MM-dd'T'HH:mm:ssXXX" :placeholder="$t('proactive.mobile.to')" />
+            <el-button type="primary" size="small" icon="el-icon-search" @click="applyMobileEventFilters">
+              {{ $t('proactive.filter') }}
+            </el-button>
+          </div>
+          <div class="table-scroll">
+            <el-table v-loading="mobileEventsLoading" :data="mobileEvents" size="small"
+              class="mobile-audit-table" :empty-text="$t('proactive.mobile.noEvents')">
+              <el-table-column type="expand">
+                <template slot-scope="scope">
+                  <dl class="mobile-event-detail">
+                    <dt>{{ $t('proactive.mobile.instance') }}</dt><dd>{{ scope.row.mobile_instance_id }}</dd>
+                    <dt>{{ $t('proactive.mobile.source') }}</dt><dd>{{ scope.row.source_package || '-' }}</dd>
+                    <dt>{{ $t('proactive.mobile.summary') }}</dt><dd>{{ scope.row.summary || '-' }}</dd>
+                    <dt>{{ $t('proactive.mobile.spokenSummary') }}</dt><dd>{{ scope.row.spoken_summary || '-' }}</dd>
+                    <dt>{{ $t('proactive.mobile.reasonCode') }}</dt><dd>{{ scope.row.reason_code || '-' }}</dd>
+                    <dt>{{ $t('proactive.mobile.proactiveEvent') }}</dt><dd>{{ scope.row.proactive_event_id || '-' }}</dd>
+                  </dl>
+                </template>
+              </el-table-column>
+              <el-table-column :label="$t('proactive.mobile.occurredAt')" width="160">
+                <template slot-scope="scope">{{ formatTime(scope.row.occurred_at) }}</template>
+              </el-table-column>
+              <el-table-column :label="$t('proactive.mobile.type')" width="190">
+                <template slot-scope="scope">{{ enumLabel('mobile.type', scope.row.type) }}</template>
+              </el-table-column>
+              <el-table-column prop="summary" :label="$t('proactive.mobile.summary')" min-width="220" show-overflow-tooltip />
+              <el-table-column prop="category" :label="$t('proactive.mobile.category')" width="110" />
+              <el-table-column :label="$t('proactive.mobile.confidence')" width="100">
+                <template slot-scope="scope">{{ scope.row.confidence == null ? '-' : scope.row.confidence }}</template>
+              </el-table-column>
+              <el-table-column :label="$t('proactive.mobile.stage')" width="135">
+                <template slot-scope="scope">{{ enumLabel('mobile.stage', scope.row.processing_status) }}</template>
+              </el-table-column>
+              <el-table-column :label="$t('proactive.deliveryStatus')" width="115">
+                <template slot-scope="scope">{{ enumLabel('deliveryStatus', scope.row.delivery_status) }}</template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <div class="pagination-row">
+            <el-pagination :current-page="mobileEventFilters.page" :page-size="mobileEventFilters.limit"
+              :page-sizes="[10, 20, 50]" :total="mobileEventTotal"
+              layout="sizes, prev, pager, next, total" small
+              @size-change="handleMobileEventSizeChange" @current-change="handleMobileEventPageChange" />
+          </div>
+        </div>
+      </el-tab-pane>
+
       <el-tab-pane :label="$t('proactive.habits')" name="habits">
         <div class="section-body">
           <el-alert v-if="habitsError" :title="habitsError" type="error" :closable="false" show-icon />
@@ -291,6 +355,8 @@
 import Api from '@/apis/api';
 import MacAddressMask from '@/components/MacAddressMask.vue';
 import {
+  MOBILE_EVENT_TYPES,
+  MOBILE_PROCESSING_STATUSES,
   PROACTIVE_DELIVERY_STATUSES,
   PROACTIVE_EVENT_TYPES,
   PROACTIVE_MODES,
@@ -305,6 +371,7 @@ import {
   createPreferenceForm,
   defaultDailyLimit,
   listBelongsToDevice,
+  mobileAuditBelongsToContext,
   monitorPreset,
   monitorClassifierStatus,
   monitorGlobalStatus,
@@ -354,6 +421,15 @@ export default {
       eventsLoading: false,
       eventsError: '',
       eventFilters: { topic: '', event_type: '', delivery_status: '', page: 1, limit: 20 },
+      mobileEventTypes: MOBILE_EVENT_TYPES,
+      mobileProcessingStatuses: MOBILE_PROCESSING_STATUSES,
+      mobileEvents: [],
+      mobileEventTotal: 0,
+      mobileEventsLoading: false,
+      mobileEventsError: '',
+      mobileEventFilters: {
+        type: '', processing_status: '', delivery_status: '', from: '', to: '', page: 1, limit: 20,
+      },
       habits: [],
       habitsLoading: false,
       habitsError: '',
@@ -430,6 +506,13 @@ export default {
       this.eventTotal = 0;
       this.eventsLoading = false;
       this.eventsError = '';
+      this.mobileEventFilters = {
+        type: '', processing_status: '', delivery_status: '', from: '', to: '', page: 1, limit: 20,
+      };
+      this.mobileEvents = [];
+      this.mobileEventTotal = 0;
+      this.mobileEventsLoading = false;
+      this.mobileEventsError = '';
       this.habits = [];
       this.habitsLoading = false;
       this.habitsError = '';
@@ -457,6 +540,7 @@ export default {
         this.loadMonitors();
       }
       if (this.activeTab === 'events') this.loadEvents();
+      if (this.activeTab === 'mobileEvents') this.loadMobileEvents();
       if (this.activeTab === 'habits') this.loadHabits();
     },
     responseData(response) {
@@ -702,6 +786,55 @@ export default {
       this.eventFilters.page = page;
       this.loadEvents();
     },
+    applyMobileEventFilters() {
+      this.mobileEventFilters.page = 1;
+      this.loadMobileEvents();
+    },
+    loadMobileEvents() {
+      const request = this.requestGate.begin('mobileEvents');
+      const instanceId = this.device.macAddress || '';
+      if (!request.deviceId || !/^mob_[0-9a-f]{32}$/.test(instanceId)) {
+        this.mobileEvents = [];
+        this.mobileEventTotal = 0;
+        this.mobileEventsLoading = false;
+        this.mobileEventsError = this.$t('proactive.mobile.instanceUnavailable');
+        return;
+      }
+      this.mobileEventsLoading = true;
+      this.mobileEventsError = '';
+      Api.proactive.getMobileEvents({
+        ...this.mobileEventFilters, mobile_instance_id: instanceId,
+      }, response => {
+        if (!this.requestGate.isCurrent(request) || instanceId !== (this.device.macAddress || '')) return;
+        this.mobileEventsLoading = false;
+        const data = this.responseData(response) || {};
+        if (!mobileAuditBelongsToContext(data.list, request.deviceId, instanceId)) {
+          this.mobileEvents = [];
+          this.mobileEventTotal = 0;
+          this.mobileEventsError = this.$t('proactive.mobile.loadFailed');
+          this.$message.error(this.mobileEventsError);
+          return;
+        }
+        this.mobileEvents = data.list;
+        this.mobileEventTotal = Number(data.total) || 0;
+      }, error => {
+        if (!this.requestGate.isCurrent(request) || instanceId !== (this.device.macAddress || '')) return;
+        this.mobileEventsLoading = false;
+        this.mobileEvents = [];
+        this.mobileEventTotal = 0;
+        this.mobileEventsError = this.errorMessage(error, 'proactive.mobile.loadFailed');
+        this.$message.error(this.mobileEventsError);
+      });
+    },
+    handleMobileEventSizeChange(limit) {
+      this.mobileEventFilters.limit = limit;
+      this.mobileEventFilters.page = 1;
+      this.loadMobileEvents();
+    },
+    handleMobileEventPageChange(page) {
+      this.mobileEventFilters.page = page;
+      this.loadMobileEvents();
+    },
     loadHabits() {
       const request = this.requestGate.begin('habits');
       if (!request.deviceId) {
@@ -806,6 +939,10 @@ export default {
 .filter-row .el-select { width: 190px; max-width: 100%; }
 .table-scroll { max-width: 100%; overflow-x: auto; }
 .audit-table { min-width: 865px; }
+.mobile-audit-table { min-width: 1040px; }
+.mobile-event-detail { display: grid; grid-template-columns: 130px 1fr; gap: 7px 12px; margin: 0; }
+.mobile-event-detail dt { color: #909399; }
+.mobile-event-detail dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .habits-table { min-width: 880px; }
 .pagination-row { display: flex; justify-content: flex-end; padding-top: 16px; overflow-x: auto; }
 .delete-button { color: #f56c6c; }

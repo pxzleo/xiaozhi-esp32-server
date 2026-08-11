@@ -9,6 +9,18 @@ from core.providers.tools.device_mcp.proactive_policy import reset_proactive_pol
 
 
 def event(kind="news"):
+    if kind == "mobile":
+        return {
+            "event_id": "ext-1", "mac_address": "AA:BB",
+            "event_type": "mobile_alert", "topic": "system",
+            "priority": "normal", "delivery_status": "pending",
+            "requires_response": False,
+            "expires_at": int((time.time() + 3600) * 1000),
+            "payload": {
+                "title": "地点提醒", "summary": "已进入公司",
+                "source": "location", "category": "location",
+            },
+        }
     is_news = kind == "news"
     return {
         "event_id": "ext-1", "mac_address": "AA:BB",
@@ -87,6 +99,31 @@ class ExternalTriggeredTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertFalse(conn._external_news_waiting_response)
         self.assertEqual("failed", status.await_args.args[2])
+
+    async def test_mobile_alert_uses_controlled_summary_without_followup_context(self):
+        conn = connection()
+        with patch.object(
+            mcp_handler, "get_proactive_monitor_event",
+            AsyncMock(return_value=event("mobile")),
+        ), patch.object(
+            mcp_handler, "claim_proactive_event", AsyncMock(return_value=True)
+        ), patch.object(
+            mcp_handler, "_speak_proactive_notification", AsyncMock(return_value=None)
+        ) as speak, patch.object(
+            mcp_handler, "update_proactive_event_status", AsyncMock()
+        ):
+            await mcp_handler._handle_external_triggered_notification(
+                conn, {"version": 1, "event_id": "ext-1", "speak": True}
+            )
+        speak.assert_awaited_once()
+        self.assertEqual("已进入公司", speak.await_args.args[1])
+        self.assertFalse(conn._external_news_waiting_response)
+
+    def test_mobile_alert_rejects_uncontrolled_payload_fields(self):
+        malicious = event("mobile")
+        malicious["payload"]["latitude"] = "23.1"
+        with self.assertRaisesRegex(ValueError, "内容无效"):
+            mcp_handler._validated_external_event(malicious, "ext-1", "AA:BB")
 
     async def test_user_interrupt_completion_writes_failed(self):
         conn = connection()

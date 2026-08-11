@@ -56,7 +56,8 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 @Service
 public class ProactiveService {
     private static final Set<String> EVENT_PAYLOAD_KEYS = Set.of(
-            "title", "message", "reference_id", "reference_url", "scheduled_at", "action", "source");
+            "title", "message", "summary", "category", "reference_id", "reference_url",
+            "scheduled_at", "action", "source");
     private static final Set<String> HABIT_PAYLOAD_KEYS = Set.of(
             "description", "suggested_mode", "suggested_time", "topic");
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
@@ -129,6 +130,9 @@ public class ProactiveService {
 
     @Transactional
     public EventView upsertEvent(EventUpsert request) {
+        if (request.getEventType() == EventType.MOBILE_ALERT) {
+            throw new RenException("手机感知事件只能使用内部受控入口");
+        }
         if (isExternal(request.getEventType())) {
             throw new RenException("外界监测事件必须使用monitor-events接口");
         }
@@ -141,6 +145,57 @@ public class ProactiveService {
             throw new RenException("monitor-events接口仅允许外界监测事件");
         }
         return createEvent(request);
+    }
+
+    @Transactional
+    public EventCreateResult createMobileAlert(String mobileInstanceId, Long userId, String agentId,
+            String sourceEventId,
+            String dedupeKey, String title, String summary, String source, String category,
+            Priority priority, Date createdAt, Date expiresAt) {
+        if (StringUtils.isAnyBlank(mobileInstanceId, sourceEventId, dedupeKey, title, summary,
+                source, category, agentId) || userId == null
+                || !mobileInstanceId.matches("^mob_[0-9a-f]{32}$")
+                || !sourceEventId.matches("^[A-Za-z0-9._:-]{1,64}$")
+                || !dedupeKey.matches("^sha256:[0-9a-f]{64}$")
+                || !Set.of("security", "call", "parcel", "appointment", "message", "other", "location")
+                        .contains(category)
+                || priority == null || createdAt == null || expiresAt == null
+                || !expiresAt.after(createdAt)) {
+            throw new RenException("手机主动事件内部参数无效");
+        }
+        EventUpsert request = new EventUpsert();
+        request.setEventId(sourceEventId);
+        request.setTopic(Topic.SYSTEM);
+        request.setPriority(priority);
+        request.setReason("mobile_event_classified");
+        request.setEventType(EventType.MOBILE_ALERT);
+        request.setPayload(Map.of("title", title, "summary", summary,
+                "source", source, "category", category));
+        request.setCreatedAt(createdAt);
+        request.setExpiresAt(expiresAt);
+        request.setDedupeKey(dedupeKey);
+        request.setDedupePolicy(DedupePolicy.ROLLING_WINDOW);
+        request.setDedupeWindowHours(24);
+        request.setRequiresResponse(false);
+        if (!request.isMonitorTopicValid() || !request.isDedupePolicyValid()) {
+            throw new RenException("手机主动事件内部契约无效");
+        }
+        validateEventPayload(request.getPayload());
+        List<DeviceEntity> targets = deviceDao.selectByAgentIdForUpdate(agentId).stream()
+                .filter(device -> userId.equals(device.getUserId()))
+                .toList();
+        if (targets.isEmpty() || targets.stream()
+                .noneMatch(device -> mobileInstanceId.equals(device.getMacAddress()))) {
+            throw new RenException("手机主动事件目标设备不存在");
+        }
+        EventCreateResult mobileResult = null;
+        for (DeviceEntity target : targets) {
+            request.setMacAddress(target.getMacAddress());
+            EventCreateResult result = createRollingWindowEvent(target, request);
+            if (mobileInstanceId.equals(target.getMacAddress())) mobileResult = result;
+        }
+        if (mobileResult == null) throw new RenException("手机主动事件目标设备不存在");
+        return mobileResult;
     }
 
     private EventCreateResult createEvent(EventUpsert request) {
@@ -235,6 +290,7 @@ public class ProactiveService {
         boolean rollingGroup = request.getDedupePolicy() == DedupePolicy.ROLLING_WINDOW;
         // 外界事件可能按设备生成不同 event_id；跨前端竞争键必须来自跨设备稳定的权威去重身份。
         String groupIdentity = isExternal(request.getEventType())
+                || request.getEventType() == EventType.MOBILE_ALERT
                 ? request.getDedupeKey() : request.getEventId();
         entity.setDeliveryGroupKey(sha256(request.getEventType().name() + ":" + groupIdentity));
         entity.setDeliveryGroupWindowHours(rollingGroup ? request.getDedupeWindowHours() : 0);

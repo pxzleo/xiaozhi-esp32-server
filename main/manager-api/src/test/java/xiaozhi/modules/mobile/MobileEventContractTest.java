@@ -43,6 +43,30 @@ class MobileEventContractTest {
         assertTrue(source.contains("/mobile/config\", \"anon"));
         assertTrue(source.contains("/mobile/events:batch\", \"anon"));
         assertTrue(source.contains("/mobile/events/status\", \"anon"));
+        assertFalse(source.contains("/mobile/events/audit\", \"anon"));
+        var permission = MobileEventAuditController.class.getAnnotation(
+                org.apache.shiro.authz.annotation.RequiresPermissions.class);
+        assertTrue(java.util.List.of(permission.value()).contains("sys:role:normal"));
+    }
+
+    @Test
+    void mobileAuditDtoSerializesOnlyControlledFields() throws Exception {
+        var view = new MobileEventAuditDTOs.AuditView(
+                "mob_0123456789abcdef0123456789abcdef", "device-1", "evt-1",
+                "notification.state_changed", "com.example.app", "posted", "脱敏摘要",
+                "security", "high", 0.91, "安全提醒", "security_risk", "converted",
+                new java.util.Date(), new java.util.Date(), new java.util.Date(),
+                "ext-1", "delivered");
+
+        String json = mapper.writeValueAsString(view);
+
+        assertTrue(json.contains("\"summary\":\"脱敏摘要\""));
+        assertTrue(json.contains("\"delivery_status\":\"delivered\""));
+        assertFalse(json.contains("credential"));
+        assertFalse(json.contains("lease"));
+        assertFalse(json.contains("evidence"));
+        assertFalse(json.contains("latitude"));
+        assertFalse(json.contains("reasoning"));
     }
 
     @Test

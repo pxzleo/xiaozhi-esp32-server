@@ -124,3 +124,11 @@ manager-web 在设备管理列表的单台设备操作区提供“主动助理�
 `self.proactive.*` 由设备权威执行；成功结果的 `data` 立即更新当前连接并后台 PUT manager-api，失败重试一次且不改变设备成功播报。`self.schedule.complete_recent/follow_up/dismiss_follow_up` 成功后分别更新当前 follow-up outcome 为 `completed/acknowledged/dismissed`；成功结果 `data.source_id` 必须为正整数且与当前 follow-up 的 `source_id` 完全一致，否则拒绝回写。
 
 每日简报的雨天建议先识别“没有雨、无雨、不下雨、不会下雨、未下雨、雨已停”等否定语义；命中否定时，即使文本包含“雨”字也不得追加带伞建议。
+
+## 手机感知提醒闭环
+
+手机处理器通过内部受控方法创建 `event_type=MOBILE_ALERT`、`topic=SYSTEM` 的主动事件，公开通用事件入口不得接受该类型。payload 恰好只含 `title/summary/source/category`，不含原通知正文、坐标、token、证据或推理；`requires_response=false`。通知 `high/critical` 分别映射同名优先级，位置转换为 `normal`。去重身份来自手机事件 `dedupe_key`，滚动窗口固定 24 小时；位置使用服务端计算的 `place_id+transition` 散列。服务端为该手机实例同账号、同智能体的设备创建权威副本，各副本共享相同 `delivery_group_key`。事件继续复用 `ProactiveService` 的权威事件表、安静时段/额度策略、owner-scoped delivery ledger、领取租约和真实终态，手机与音箱竞争同一组事件，不建立第二套投递表。
+
+音箱端权威事件校验新增且只新增 `mobile_alert/system` 组合，严格要求 payload 四字段完整、受控类别和 `requires_response=false`；播报 `summary` 后不建立新闻 follow-up 上下文。普通手机提醒仍受安静时段、主题和每日额度约束，不能按类别或热度绕过策略。TTS 完成才写 `delivered`，失败或打断写 `failed`；手机感知审计中的投递状态直接关联这条主动事件，因此 `converted` 只表示已生成提醒，不等于已经播报。
+
+manager-web 的“主动助理”新增独立“手机感知事件”标签，不把原始感知事件伪装成主动事件。页面按实例上下文、类型、处理阶段、真实投递状态和时间分页筛选，且每次响应必须同时属于当前设备和手机实例；切换设备或重复请求时丢弃旧响应。详情仅展示脱敏摘要、来源应用、类别、置信度、受控原因和关联主动事件。

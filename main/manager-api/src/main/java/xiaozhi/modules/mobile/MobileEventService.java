@@ -94,7 +94,11 @@ public class MobileEventService {
                     result = new EventResult(event.eventId(), "acknowledged", null);
                 } else {
                     MobileEventEntity sameId = eventDao.selectByEventId(instance.getMobileInstanceId(), event.eventId());
-                    eventDao.updateLatestState(entity);
+                    int updated = eventDao.updateLatestState(entity);
+                    if (updated == 1 && "removed".equals(entity.getEventState())) {
+                        eventDao.dismissPendingMobileAlerts(
+                                entity.getMobileInstanceId(), entity.getDedupeKey());
+                    }
                     result = new EventResult(event.eventId(), "deduped",
                             sameId == null ? "DUPLICATE_STATE_FLOW" : null);
                 }
@@ -253,6 +257,7 @@ public class MobileEventService {
         entity.setEvidenceJson(json(event.evidence()));
         entity.setPrivacyLevel(event.privacyLevel());
         entity.setStatus("acknowledged");
+        entity.setProcessingStatus("received");
         entity.setOccurredAt(Date.from(event.occurredAt()));
         entity.setExpiresAt(Date.from(event.expiresAt()));
         Date now = new Date();

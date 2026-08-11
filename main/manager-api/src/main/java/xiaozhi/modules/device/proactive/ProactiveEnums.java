@@ -43,7 +43,8 @@ public final class ProactiveEnums {
         @JsonCreator public static Priority fromWire(String value) { return parseWire(Priority.class, value); }
     }
     public enum EventType implements WireEnum {
-        REMINDER, DUE_SOON, SCHEDULE_CHANGE, WEATHER_ALERT, NEWS_ALERT, MUSIC_STATUS, HABIT_SUGGESTION, SYSTEM;
+        REMINDER, DUE_SOON, SCHEDULE_CHANGE, WEATHER_ALERT, NEWS_ALERT, MOBILE_ALERT,
+        MUSIC_STATUS, HABIT_SUGGESTION, SYSTEM;
         @JsonCreator public static EventType fromWire(String value) { return parseWire(EventType.class, value); }
     }
     public enum DedupePolicy implements WireEnum {

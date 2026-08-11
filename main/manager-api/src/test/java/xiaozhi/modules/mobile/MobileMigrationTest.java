@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.charset.StandardCharsets;
 
 import org.junit.jupiter.api.Test;
+import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
 class MobileMigrationTest {
     @Test
@@ -58,5 +60,59 @@ class MobileMigrationTest {
             assertTrue(followup.contains("DROP CHECK `chk_mobile_event_state`"));
             assertTrue(followup.contains("'entered','exited','dwelled'"));
         }
+    }
+
+    @Test
+    void processingMigrationAddsStrictLeaseClassificationAndAuditIndexesLast() throws Exception {
+        String sql;
+        try (var stream = getClass().getResourceAsStream("/db/changelog/202608111600.sql")) {
+            sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertTrue(sql.contains("`processing_status` varchar(16)"));
+        assertTrue(sql.contains("'received','prefiltered','classified','ignored','converted','error'"));
+        assertTrue(sql.contains("`processing_lease_owner` varchar(64)"));
+        assertTrue(sql.contains("`processing_lease_token` char(36) CHARACTER SET ascii"));
+        assertTrue(sql.contains("`processing_lease_until` datetime(3)"));
+        assertTrue(sql.contains("`processing_attempt` int unsigned"));
+        assertTrue(sql.contains("`next_attempt_at` datetime(3)"));
+        assertTrue(sql.contains("`proactive_event_id` varchar(64) CHARACTER SET ascii"));
+        assertTrue(sql.contains("CHECK (`confidence` IS NULL OR (`confidence` >= 0 AND `confidence` <= 1))"));
+        assertTrue(sql.contains("idx_mobile_event_processing_due"));
+        assertTrue(sql.contains("DROP CHECK `chk_proactive_event_dedupe_type`"));
+        assertTrue(sql.contains("'WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT'"));
+
+        String yaml;
+        try (var stream = getClass().getResourceAsStream("/db/changelog/db.changelog-master.yaml")) {
+            yaml = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertTrue(yaml.indexOf("id: 202608111600") > yaml.indexOf("id: 202608111400"));
+    }
+
+    @Test
+    void processingClaimUsesDatabaseTimeCasAndAllowsExpiredLeaseTakeover() throws Exception {
+        String candidates = String.join("\n", MobileEventDao.class
+                .getMethod("selectProcessingCandidates", int.class)
+                .getAnnotation(Select.class).value());
+        String claim = String.join("\n", MobileEventDao.class
+                .getMethod("claimProcessing", String.class, String.class, String.class, String.class)
+                .getAnnotation(Update.class).value());
+
+        assertTrue(candidates.contains("processing_lease_until < CURRENT_TIMESTAMP(3)"));
+        assertTrue(claim.contains("processing_lease_until < CURRENT_TIMESTAMP(3)"));
+        assertTrue(claim.contains("processing_attempt=processing_attempt+1"));
+        assertTrue(claim.contains("expires_at > CURRENT_TIMESTAMP(3)"));
+
+        String latest = String.join("\n", MobileEventDao.class
+                .getMethod("updateLatestState", MobileEventEntity.class)
+                .getAnnotation(Update.class).value());
+        assertTrue(latest.contains("occurred_at<#{occurredAt}"));
+        assertTrue(latest.contains("processing_status='received'"));
+        assertTrue(latest.contains("processing_lease_token=NULL"));
+        String dismiss = String.join("\n", MobileEventDao.class
+                .getMethod("dismissPendingMobileAlerts", String.class, String.class)
+                .getAnnotation(Update.class).value());
+        assertTrue(dismiss.contains("source.delivery_group_key=copies.delivery_group_key"));
+        assertTrue(dismiss.contains("copies.delivery_status='PENDING'"));
+        assertTrue(dismiss.contains("copies.delivery_status='DISMISSED'"));
     }
 }

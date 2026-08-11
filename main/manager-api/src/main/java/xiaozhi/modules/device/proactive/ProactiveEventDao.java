@@ -18,7 +18,7 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             SET delivery_status = 'PENDING', claim_token = NULL, claimed_at = NULL,
                 updated_at = CURRENT_TIMESTAMP(3)
             WHERE device_id = #{deviceId}
-              AND event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
+              AND event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT')
               AND delivery_status = 'CLAIMED'
               AND (claimed_at IS NULL OR claimed_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
               AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP(3))
@@ -144,23 +144,25 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
 
     @Select("""
             SELECT e.* FROM ai_device_proactive_event e
-            INNER JOIN ai_device_proactive_monitor m
+            LEFT JOIN ai_device_proactive_monitor m
               ON m.device_id = e.device_id
              AND m.enabled = 1
              AND m.monitor_type = CASE e.event_type
                     WHEN 'WEATHER_ALERT' THEN 'WEATHER'
                     WHEN 'NEWS_ALERT' THEN 'NEWS'
                  END
-            INNER JOIN sys_params g
+            LEFT JOIN sys_params g
               ON g.param_code = 'proactive.external_monitoring_enabled'
              AND LOWER(TRIM(g.param_value)) = 'true'
             INNER JOIN ai_device d ON d.id = e.device_id
             LEFT JOIN ai_proactive_delivery_claim dc
               ON dc.user_id = d.user_id AND dc.delivery_group_key = e.delivery_group_key
             WHERE e.device_id = #{deviceId}
-              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
+              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT')
               AND (e.expires_at IS NULL OR e.expires_at > CURRENT_TIMESTAMP(3))
               AND e.delivery_status = 'PENDING'
+              AND (e.event_type = 'MOBILE_ALERT'
+                   OR (m.enabled = 1 AND LOWER(TRIM(g.param_value)) = 'true'))
               AND (dc.user_id IS NULL OR dc.delivery_status = 'FAILED'
                    OR (dc.delivery_status = 'CLAIMED'
                        AND (dc.claimed_at IS NULL OR dc.claimed_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)))
@@ -177,18 +179,20 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
 
     @Select("""
             SELECT e.* FROM ai_device_proactive_event e
-            INNER JOIN ai_device_proactive_monitor m
+            LEFT JOIN ai_device_proactive_monitor m
               ON m.device_id = e.device_id
              AND m.enabled = 1
              AND m.monitor_type = CASE e.event_type
                     WHEN 'WEATHER_ALERT' THEN 'WEATHER'
                     WHEN 'NEWS_ALERT' THEN 'NEWS'
                  END
-            INNER JOIN sys_params g
+            LEFT JOIN sys_params g
               ON g.param_code = 'proactive.external_monitoring_enabled'
              AND LOWER(TRIM(g.param_value)) = 'true'
             WHERE e.mac_address = #{macAddress} AND e.event_id = #{eventId}
-              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
+              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT')
+              AND (e.event_type = 'MOBILE_ALERT'
+                   OR (m.enabled = 1 AND LOWER(TRIM(g.param_value)) = 'true'))
             """)
     ProactiveEventEntity selectMonitorEventByMacAndEventId(@Param("macAddress") String macAddress,
             @Param("eventId") String eventId);
@@ -196,7 +200,7 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
     @Select("""
             SELECT e.* FROM ai_device_proactive_event e
             WHERE e.mac_address = #{macAddress} AND e.event_id = #{eventId}
-              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT')
+              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT')
               AND e.claim_token = #{claimToken}
               AND ((e.delivery_status = 'CLAIMED'
                     AND e.claimed_at >= DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))

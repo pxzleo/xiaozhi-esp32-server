@@ -9,12 +9,14 @@ import {
   applyMonitorPreset,
   belongsToDevice,
   buildEventQuery,
+  buildMobileEventQuery,
   classifierModelId,
   createMonitorsForm,
   createPreferenceForm,
   inheritedWeatherLocation,
   inheritedWeatherLocationError,
   listBelongsToDevice,
+  mobileAuditBelongsToContext,
   monitorPreset,
   monitorClassifierStatus,
   monitorGlobalStatus,
@@ -35,6 +37,7 @@ test('exposes claimed events in the delivery status filter', () => {
   assert.equal(PROACTIVE_TOPICS.includes('news'), true);
   assert.equal(PROACTIVE_TOPICS.length, 8);
   assert.equal(PROACTIVE_EVENT_TYPES.includes('news_alert'), true);
+  assert.equal(PROACTIVE_EVENT_TYPES.includes('mobile_alert'), true);
 });
 
 test('creates manager-api monitor defaults and exact payloads', () => {
@@ -259,4 +262,25 @@ test('builds an exact preference payload and omits empty event filters', () => {
     device_id: 'device id', page: 2, limit: 20, topic: 'weather', delivery_status: '', event_type: '',
   });
   assert.equal(query, 'device_id=device+id&page=2&limit=20&topic=weather');
+});
+
+test('builds strict mobile audit filters and rejects cross-device response rows', () => {
+  const query = buildMobileEventQuery({
+    mobile_instance_id: 'mob_0123456789abcdef0123456789abcdef',
+    page: 2,
+    limit: 20,
+    type: 'notification.state_changed',
+    processing_status: 'converted',
+    delivery_status: 'delivered',
+    from: '2026-08-10T00:00:00Z',
+    to: '',
+  });
+  assert.equal(query, 'mobile_instance_id=mob_0123456789abcdef0123456789abcdef&page=2&limit=20&type=notification.state_changed&processing_status=converted&delivery_status=delivered&from=2026-08-10T00%3A00%3A00Z');
+  assert.equal(mobileAuditBelongsToContext([], 'device-a', 'mob-a'), true);
+  assert.equal(mobileAuditBelongsToContext([
+    { device_id: 'device-a', mobile_instance_id: 'mob-a' },
+  ], 'device-a', 'mob-a'), true);
+  assert.equal(mobileAuditBelongsToContext([
+    { device_id: 'device-b', mobile_instance_id: 'mob-a' },
+  ], 'device-a', 'mob-a'), false);
 });

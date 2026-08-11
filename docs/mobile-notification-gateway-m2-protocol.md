@@ -21,3 +21,13 @@ Android outbox 按 `mobile_instance_id` 隔离，worker 只能发送当前绑定
 状态接口只返回当前手机实例最近 1–100 条逐次接收审计的 ID、状态、原因码和更新时间，不返回摘要或通知正文。`acknowledged/deduped/rejected/expired` 均持久审计；拒绝记录不保存候选正文。专用异常处理器保留真实 HTTP 状态，且所有接口强制 `Mobile-Protocol-Version: 1`。服务端数据库只保存客户端已脱敏且接受的候选；日志禁止记录正文、token 和签名材料。
 
 缺少 Authorization 返回 HTTP 401；缺少其他手机协议头返回 HTTP 400。同一 `dedupe_key` 的新候选返回 `deduped`，但主事件记录仍按 `occurred_at` 单调更新最新状态、脱敏摘要、证据和有效期；每次接收结果继续单独追加审计。
+
+## 账号侧处理审计与提醒转换
+
+`GET /mobile/events/audit` 是账号 OAuth 的 `sys:role:normal` 接口，不使用手机凭据，且不属于匿名手机协议路由。请求必须提供 `mobile_instance_id`；服务端先按当前 `user_id` 校验手机实例所有权，再执行分页查询。可选筛选为 `type`、`processing_status`、`delivery_status`、ISO-8601 `from/to`，分页 `page=1..1000`、`limit=1..100`。响应只包含实例/设备/事件 ID、类型、来源包、状态、已脱敏摘要、类别、级别、置信度、受控播报摘要、受控原因码、处理阶段、时间、关联主动事件 ID 及其真实投递状态；不得返回 mobile token、证据 JSON、租约、坐标、原始正文或模型自由推理。原 `GET /mobile/events/status` 的手机凭据兼容接口保持不变。
+
+后续迁移 `202608111600` 扩展 `ai_mobile_event`，处理阶段为 `received/prefiltered/classified/ignored/converted/error`，并保存受控分类结果、关联主动事件 ID、120 秒数据库租约、尝试次数、下次重试和处理时间。领取、到期和租约接管均使用数据库 `CURRENT_TIMESTAMP(3)`；失败按指数退避。`removed`、已过期事件和已终结状态的重复更新不进入分类或播报。
+
+通知先执行确定性预筛，只有 `security/call/parcel/appointment/message/other` 中命中严格规则的少量候选才调用全局独立主动分类模型。输入只有已脱敏 `summary/category/source_package/state`；外部文本是低信任数据。模型必须返回且只返回 `should_notify/category/severity/confidence/spoken_summary/reason_code` 单一 JSON 根对象；模型未配置、不可用、调用失败或 JSON 不严格时写 `error` 并退避，禁止回退设备智能体模型。仅 `high/critical` 且 `confidence>=0.85` 转换为提醒。
+
+用户在 M5 显式保存并启用的 enter/exit/dwell 是位置主动提醒授权。`location.transition` 不调用 LLM；通过实例、严格形状和有效期校验后，服务端仅用受控地点名重构“已进入/已离开/已驻留 + 地点名”，按 `place_id+transition` 计算 24 小时滚动去重并生成普通优先级提醒。经纬度和客户端自由文本不得进入 payload 或模型。

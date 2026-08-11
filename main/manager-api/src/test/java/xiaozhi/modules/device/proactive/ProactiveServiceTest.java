@@ -71,9 +71,11 @@ class ProactiveServiceTest {
         device.setId("device-1");
         device.setMacAddress("11:22:33:44:55:66");
         device.setUserId(7L);
+        device.setAgentId("agent-1");
         when(deviceDao.selectList(any())).thenReturn(List.of(device));
         when(deviceDao.selectById("device-1")).thenReturn(device);
         when(deviceDao.selectByIdForUpdate("device-1")).thenReturn(device);
+        when(deviceDao.selectByAgentIdForUpdate("agent-1")).thenReturn(List.of(device));
         when(globalDao.selectExternalMonitoringValueForUpdate()).thenReturn("true");
         when(eventDedupeDao.selectLastCreatedAt(any(), any(), any())).thenReturn(new Date());
         when(deliveryClaimDao.insertIfAbsent(any(), any())).thenReturn(1);
@@ -393,6 +395,64 @@ class ProactiveServiceTest {
         verify(eventDao, times(1)).insertIfAbsent(any(ProactiveEventEntity.class));
         verify(eventDedupeDao, times(1)).markCreated(eq("device-1"), eq("NEWS_ALERT"),
                 argThat(hash -> hash.length() == 64 && !hash.contains("news-cluster")), any());
+    }
+
+    @Test
+    void controlledMobileAlertUsesRolling24HourLedgerAndPublicEntryRejectsIt() {
+        String mobileId = "mob_0123456789abcdef0123456789abcdef";
+        String dedupeKey = "sha256:" + "a".repeat(64);
+        device.setMacAddress(mobileId);
+        DeviceEntity speaker = new DeviceEntity();
+        speaker.setId("device-2");
+        speaker.setMacAddress("11:22:33:44:55:77");
+        speaker.setUserId(7L);
+        speaker.setAgentId("agent-1");
+        when(deviceDao.selectByAgentIdForUpdate("agent-1")).thenReturn(List.of(device, speaker));
+        Map<String, String> recentEventIds = new ConcurrentHashMap<>();
+        Map<String, ProactiveEventEntity> stored = new ConcurrentHashMap<>();
+        when(eventDedupeDao.selectForUpdate(any(), eq("MOBILE_ALERT"), any()))
+                .thenReturn(new ProactiveEventDedupeEntity());
+        when(eventDedupeDao.selectRecentEventId(
+                any(), eq("MOBILE_ALERT"), any(), eq(24)))
+                .thenAnswer(call -> recentEventIds.get(call.getArgument(0)));
+        when(eventDedupeDao.markCreated(any(), eq("MOBILE_ALERT"), any(), any()))
+                .thenAnswer(call -> {
+                    recentEventIds.put(call.getArgument(0), call.getArgument(3));
+                    return 1;
+                });
+        when(eventDao.selectByDeviceAndEventIdForUpdate(any(), any()))
+                .thenAnswer(call -> stored.get(call.getArgument(0) + ":" + call.getArgument(1)));
+        when(eventDao.insertIfAbsent(any(ProactiveEventEntity.class))).thenAnswer(call -> {
+            ProactiveEventEntity event = call.getArgument(0);
+            stored.put(event.getDeviceId() + ":" + event.getEventId(), event);
+            return 1;
+        });
+        when(eventDao.selectByDeviceAndEventId(any(), any()))
+                .thenAnswer(call -> stored.get(call.getArgument(0) + ":" + call.getArgument(1)));
+        Date createdAt = new Date();
+        Date expiresAt = new Date(createdAt.getTime() + 3_600_000);
+
+        var first = service.createMobileAlert(mobileId, 7L, "agent-1", "evt-1", dedupeKey, "安全提醒",
+                "账户出现安全风险", "com.example.app", "security", Priority.HIGH,
+                createdAt, expiresAt);
+        var second = service.createMobileAlert(mobileId, 7L, "agent-1", "evt-1", dedupeKey, "安全提醒",
+                "账户出现安全风险", "com.example.app", "security", Priority.HIGH,
+                createdAt, expiresAt);
+
+        assertTrue(first.created());
+        assertTrue(second.deduped());
+        assertEquals(first.authoritativeEventId(), second.authoritativeEventId());
+        verify(eventDao, times(2)).insertIfAbsent(argThat(event ->
+                "MOBILE_ALERT".equals(event.getEventType())
+                        && "SYSTEM".equals(event.getTopic())
+                        && event.getPayload().contains("\"summary\":\"账户出现安全风险\"")
+                        && !event.getPayload().contains("token")));
+        assertEquals(1, stored.values().stream().map(ProactiveEventEntity::getDeliveryGroupKey)
+                .distinct().count());
+
+        EventUpsert publicRequest = eventRequest();
+        publicRequest.setEventType(EventType.MOBILE_ALERT);
+        assertThrows(RenException.class, () -> service.upsertEvent(publicRequest));
     }
 
     @Test

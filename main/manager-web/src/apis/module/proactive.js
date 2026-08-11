@@ -1,6 +1,6 @@
 import { getServiceUrl } from '../api';
 import RequestService from '../httpRequest';
-import { buildEventQuery } from '../../utils/proactiveAssistant.mjs';
+import { buildEventQuery, buildMobileEventQuery } from '../../utils/proactiveAssistant.mjs';
 
 function send(path, method, data, callback, failCallback) {
   const request = RequestService.sendRequest()
@@ -54,6 +54,9 @@ export default {
   },
   getEvents(filters, callback, failCallback) {
     return send(`/device/proactive/events?${buildEventQuery(filters)}`, 'GET', undefined, callback, failCallback);
+  },
+  getMobileEvents(filters, callback, failCallback) {
+    return send(`/mobile/events/audit?${buildMobileEventQuery(filters)}`, 'GET', undefined, callback, failCallback);
   },
   getHabits(deviceId, callback, failCallback) {
     const query = new URLSearchParams({ device_id: deviceId }).toString();

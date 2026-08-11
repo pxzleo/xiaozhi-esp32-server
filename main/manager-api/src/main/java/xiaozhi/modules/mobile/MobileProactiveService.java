@@ -122,7 +122,8 @@ public class MobileProactiveService {
     private Authority authority(EventView event) {
         Map<String, Object> payload = event.payload();
         String title = requireText(payload, "title", 100);
-        String summary = requireText(payload, "message", 300);
+        String summary = event.eventType() == xiaozhi.modules.device.proactive.ProactiveEnums.EventType.MOBILE_ALERT
+                ? requireText(payload, "summary", 120) : requireText(payload, "message", 300);
         boolean news = event.topic() == Topic.NEWS;
         String tts = news && !summary.endsWith("要了解详情吗？")
                 ? summary + " 要了解详情吗？" : summary;

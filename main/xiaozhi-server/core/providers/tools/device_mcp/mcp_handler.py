@@ -1261,7 +1261,8 @@ def _validated_external_event(event, event_id, mac_address, *, claimed_context=F
     event_type = event.get("event_type")
     topic = event.get("topic")
     if (event_type, topic) not in {
-        ("weather_alert", "weather"), ("news_alert", "news")
+        ("weather_alert", "weather"), ("news_alert", "news"),
+        ("mobile_alert", "system"),
     }:
         raise ValueError("外界事件类型无效")
     priority = event.get("priority")
@@ -1287,9 +1288,15 @@ def _validated_external_event(event, event_id, mac_address, *, claimed_context=F
     if expires_timestamp <= time.time():
         raise ValueError("外界事件已过期")
     payload = event.get("payload")
-    if not isinstance(payload, dict) or not set(payload) <= {
+    mobile_payload_fields = {"title", "summary", "source", "category"}
+    external_payload_fields = {
         "title", "message", "reference_id", "reference_url", "scheduled_at", "action", "source"
-    }:
+    }
+    if not isinstance(payload, dict):
+        raise ValueError("外界事件内容无效")
+    if event_type == "mobile_alert" and set(payload) != mobile_payload_fields:
+        raise ValueError("外界事件内容无效")
+    if event_type != "mobile_alert" and not set(payload) <= external_payload_fields:
         raise ValueError("外界事件内容无效")
     if any(
         not isinstance(value, str) or not value.strip()
@@ -1297,13 +1304,29 @@ def _validated_external_event(event, event_id, mac_address, *, claimed_context=F
     ):
         raise ValueError("外界事件内容字段无效")
     title = payload.get("title")
-    message = payload.get("message")
     if not isinstance(title, str) or not title.strip() or len(title) > 100:
         raise ValueError("外界事件标题无效")
-    if not isinstance(message, str) or not message.strip() or len(message) > 300:
+    if event_type == "mobile_alert":
+        summary = payload.get("summary")
+        source = payload.get("source")
+        category = payload.get("category")
+        if not isinstance(summary, str) or not summary.strip() or len(summary) > 120:
+            raise ValueError("手机感知事件摘要无效")
+        if not isinstance(source, str) or not source.strip() or len(source) > 200:
+            raise ValueError("手机感知事件来源无效")
+        if category not in {
+            "security", "call", "parcel", "appointment", "message", "other", "location"
+        }:
+            raise ValueError("手机感知事件类别无效")
+    message = payload.get("message")
+    if event_type != "mobile_alert" and (
+        not isinstance(message, str) or not message.strip() or len(message) > 300
+    ):
         raise ValueError("外界事件播报内容无效")
     reference_id = payload.get("reference_id")
-    if not isinstance(reference_id, str) or not reference_id.strip() or len(reference_id) > 128:
+    if event_type != "mobile_alert" and (
+        not isinstance(reference_id, str) or not reference_id.strip() or len(reference_id) > 128
+    ):
         raise ValueError("外界事件引用无效")
     if event_type == "news_alert":
         reference_url = payload.get("reference_url")
@@ -1466,11 +1489,15 @@ async def _handle_external_triggered_notification(
     critical_weather = (
         event["event_type"] == "weather_alert" and event["priority"] == "critical"
     )
-    cooldown = 12 * 3600 if event["topic"] == "weather" else 2 * 3600
-    opportunity_key = (
-        f"external_weather:{event['payload'].get('reference_id')}"
-        if event["topic"] == "weather" else "external_news"
-    )
+    if event["event_type"] == "mobile_alert":
+        cooldown = 0
+        opportunity_key = f"mobile_event:{event_id}"
+    else:
+        cooldown = 12 * 3600 if event["topic"] == "weather" else 2 * 3600
+        opportunity_key = (
+            f"external_weather:{event['payload'].get('reference_id')}"
+            if event["topic"] == "weather" else "external_news"
+        )
     decision = reserve_proactive_opportunity_with_reason(
         conn,
         opportunity_key,
@@ -1510,7 +1537,8 @@ async def _handle_external_triggered_notification(
 
     payload = event["payload"]
     is_news = event["event_type"] == "news_alert"
-    text = payload["message"].strip()
+    is_mobile = event["event_type"] == "mobile_alert"
+    text = payload["summary"].strip() if is_mobile else payload["message"].strip()
     news_context = None
     if is_news:
         text = text.rstrip("。！？?!") + "。要了解详情吗？"
@@ -1537,7 +1565,7 @@ async def _handle_external_triggered_notification(
         sentence_id = await _speak_proactive_notification(
             conn,
             text,
-            "重大新闻" if is_news else "天气预警",
+            "重大新闻" if is_news else payload["title"].strip(),
             notification_state,
             completion_event=completion,
         )
