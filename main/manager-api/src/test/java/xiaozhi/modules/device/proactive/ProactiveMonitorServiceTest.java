@@ -195,7 +195,7 @@ class ProactiveMonitorServiceTest {
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(preference(Set.of(), Set.of()));
         ProactiveEventEntity event = event(EventType.NEWS_ALERT, Topic.NEWS, Priority.HIGH);
         event.setPayload("{\"message\":\"secret\"}");
-        when(eventDao.selectPendingMonitorEvents(eq("device-1"), any())).thenReturn(List.of(event));
+        when(eventDao.selectPendingMonitorEvents(eq("device-1"))).thenReturn(List.of(event));
 
         var envelope = service.pending("device-1");
 
@@ -204,8 +204,8 @@ class ProactiveMonitorServiceTest {
         assertEquals(0, envelope.retryAfterSeconds());
         assertFalse(envelope.toString().contains("secret"));
         verify(monitorDao).probeAndRebaselineIfOffline("device-1");
-        verify(eventDao).releaseExpiredMonitorClaims(eq("device-1"), any(), any());
-        verify(eventDao).selectPendingMonitorEvents(eq("device-1"), any());
+        verify(eventDao).releaseExpiredMonitorClaims(eq("device-1"));
+        verify(eventDao).selectPendingMonitorEvents(eq("device-1"));
     }
 
     @Test
@@ -218,8 +218,8 @@ class ProactiveMonitorServiceTest {
 
         assertFalse(envelope.pending());
         assertEquals(300, envelope.retryAfterSeconds());
-        verify(eventDao, never()).releaseExpiredMonitorClaims(any(), any(), any());
-        verify(eventDao, never()).selectPendingMonitorEvents(any(), any());
+        verify(eventDao, never()).releaseExpiredMonitorClaims(any());
+        verify(eventDao, never()).selectPendingMonitorEvents(any());
         verify(monitorDao, never()).updateConfiguration(any(), any(), anyBoolean(),
                 anyInt(), any(), any());
     }
@@ -252,12 +252,12 @@ class ProactiveMonitorServiceTest {
                 monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
                 preference(Set.of(), Set.of()));
-        when(eventDao.selectPendingMonitorEvents(eq("device-1"), any())).thenReturn(List.of(
+        when(eventDao.selectPendingMonitorEvents(eq("device-1"))).thenReturn(List.of(
                 event(EventType.NEWS_ALERT, Topic.NEWS, Priority.HIGH)));
 
         assertFalse(service.pending("device-1").pending());
         assertTrue(service.pending("device-1").pending());
-        verify(eventDao).selectPendingMonitorEvents(eq("device-1"), any());
+        verify(eventDao).selectPendingMonitorEvents(eq("device-1"));
     }
 
     @Test
@@ -267,7 +267,7 @@ class ProactiveMonitorServiceTest {
                 monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
                 preference(Mode.TODAY_SILENT, Set.of(), Set.of()));
-        when(eventDao.selectPendingMonitorEvents(eq("device-1"), any())).thenReturn(List.of(
+        when(eventDao.selectPendingMonitorEvents(eq("device-1"))).thenReturn(List.of(
                 event(EventType.NEWS_ALERT, Topic.NEWS, Priority.CRITICAL),
                 event(EventType.WEATHER_ALERT, Topic.WEATHER, Priority.CRITICAL)));
 
@@ -284,7 +284,7 @@ class ProactiveMonitorServiceTest {
                 monitor(MonitorType.WEATHER, false, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
                 preference(Mode.TODAY_SILENT, Set.of(), Set.of()));
-        when(eventDao.selectPendingMonitorEvents(eq("device-1"), any())).thenReturn(List.of(
+        when(eventDao.selectPendingMonitorEvents(eq("device-1"))).thenReturn(List.of(
                 event(EventType.WEATHER_ALERT, Topic.WEATHER, Priority.CRITICAL)));
 
         assertFalse(service.pending("device-1").pending());
@@ -304,7 +304,7 @@ class ProactiveMonitorServiceTest {
         ProactiveEventEntity news = event(EventType.NEWS_ALERT, Topic.NEWS, Priority.HIGH);
         news.setEventId("news-after-disabled-weather");
         candidates.add(news);
-        when(eventDao.selectPendingMonitorEvents(eq("device-1"), any()))
+        when(eventDao.selectPendingMonitorEvents(eq("device-1")))
                 .thenReturn(candidates);
 
         var envelope = service.pending("device-1");
@@ -734,7 +734,7 @@ class ProactiveMonitorServiceTest {
                 monitor(MonitorType.WEATHER, true, 30), monitor(MonitorType.NEWS, true, 10)));
         when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
                 preference(Mode.CONSERVATIVE, Set.of(), Set.of()));
-        when(eventDao.selectPendingMonitorEvents(eq("device-1"), any())).thenReturn(List.of(
+        when(eventDao.selectPendingMonitorEvents(eq("device-1"))).thenReturn(List.of(
                 event(EventType.NEWS_ALERT, Topic.NEWS, Priority.CRITICAL),
                 event(EventType.WEATHER_ALERT, Topic.WEATHER, Priority.HIGH)));
 

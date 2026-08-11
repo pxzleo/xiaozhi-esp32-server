@@ -298,17 +298,23 @@ class ProactiveMonitorContractTest {
     @Test
     void pendingQueryOnlySelectsMonitorEventsAndNoPayloadProjectionContractLeaks() throws Exception {
         Method release = ProactiveEventDao.class.getMethod("releaseExpiredMonitorClaims",
-                String.class, java.util.Date.class, java.util.Date.class);
+                String.class);
         String releaseSql = release.getAnnotation(Update.class).value()[0];
         assertTrue(releaseSql.contains("delivery_status = 'CLAIMED'"));
-        assertTrue(releaseSql.contains("claimed_at < #{claimCutoff}"));
+        assertTrue(releaseSql.contains("claimed_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)"));
+        assertTrue(releaseSql.contains("updated_at = CURRENT_TIMESTAMP(3)"));
+        assertFalse(releaseSql.contains("#{now}"));
+        assertFalse(releaseSql.contains("#{claimCutoff}"));
         assertTrue(releaseSql.contains("delivery_status = 'PENDING'"));
         assertTrue(releaseSql.contains("claim_token = NULL"));
         assertTrue(releaseSql.contains("claimed_at = NULL"));
 
         Method pending = ProactiveEventDao.class.getMethod("selectPendingMonitorEvents",
-                String.class, java.util.Date.class);
+                String.class);
         String sql = pending.getAnnotation(Select.class).value()[0];
+        assertTrue(sql.contains("e.expires_at > CURRENT_TIMESTAMP(3)"));
+        assertTrue(sql.contains("dc.claimed_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)"));
+        assertFalse(sql.contains("#{now}"));
         assertTrue(sql.contains("INNER JOIN ai_device_proactive_monitor m"));
         assertTrue(sql.contains("m.enabled = 1"));
         assertTrue(sql.contains("WHEN 'WEATHER_ALERT' THEN 'WEATHER'"));

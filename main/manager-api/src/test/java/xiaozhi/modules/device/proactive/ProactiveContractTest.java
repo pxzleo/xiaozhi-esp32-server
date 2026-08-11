@@ -115,19 +115,23 @@ class ProactiveContractTest {
 
         Method claim = ProactiveDeliveryClaimDao.class.getMethod("claim", Long.class,
                 String.class, String.class, String.class, String.class, java.util.Date.class,
-                java.util.Date.class, java.util.Date.class, int.class);
+                int.class);
         String sql = claim.getAnnotation(Update.class).value()[0];
         assertTrue(sql.contains("user_id = #{userId} AND delivery_group_key = #{groupKey}"));
         assertTrue(sql.contains("delivery_status IN ('PENDING', 'FAILED')"));
-        assertTrue(sql.contains("claimed_at < #{leaseCutoff}"));
+        assertTrue(sql.contains("claimed_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)"));
+        assertTrue(sql.contains("WHEN claim_token = #{claimToken}"));
+        assertTrue(sql.contains("THEN claimed_at"));
+        assertTrue(sql.contains("ELSE CURRENT_TIMESTAMP(3) END"));
+        assertFalse(sql.contains("#{now}"));
+        assertFalse(sql.contains("#{leaseCutoff}"));
         assertTrue(sql.contains("#{eventCreatedAt} >= DATE_ADD(event_created_at"));
 
         Method pending = ProactiveEventDao.class.getMethod("selectPendingMonitorEvents",
-                String.class, java.util.Date.class);
+                String.class);
         String pendingSql = pending.getAnnotation(Select.class).value()[0];
         String executablePending = pendingSql
-                .replace("#{deviceId}", "'device-1'")
-                .replace("#{now}", "CURRENT_TIMESTAMP");
+                .replace("#{deviceId}", "'device-1'");
         CCJSqlParserUtil.parse(executablePending);
         assertTrue(pendingSql.contains("INNER JOIN ai_device d ON d.id = e.device_id"));
         assertTrue(pendingSql.contains("ai_proactive_delivery_claim"));
@@ -306,12 +310,15 @@ class ProactiveContractTest {
         assertTrue(insertSql.contains("ON DUPLICATE KEY UPDATE id = id"));
 
         Method claim = ProactiveEventDao.class.getMethod("claimPending", String.class,
-                String.class, String.class, java.util.Date.class, java.util.Date.class);
+                String.class, String.class);
         String claimSql = claim.getAnnotation(Update.class).value()[0];
         assertTrue(claimSql.contains("delivery_status = 'CLAIMED'"));
         assertTrue(claimSql.contains("delivery_status = 'PENDING'"));
         assertTrue(claimSql.contains("claim_token = #{claimToken}"));
-        assertTrue(claimSql.contains("claimed_at < #{leaseCutoff}"));
+        assertTrue(claimSql.contains("claimed_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)"));
+        assertTrue(claimSql.contains("ELSE CURRENT_TIMESTAMP(3) END"));
+        assertFalse(claimSql.contains("#{now}"));
+        assertFalse(claimSql.contains("#{leaseCutoff}"));
         assertTrue(claimSql.contains("claimed_at IS NULL"));
         assertTrue(claimSql.contains("e.device_id = #{deviceId} AND e.event_id = #{eventId}"));
         assertTrue(claimSql.contains("LEFT JOIN ai_device_proactive_monitor m"));

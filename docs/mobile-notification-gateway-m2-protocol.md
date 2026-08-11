@@ -2,6 +2,8 @@
 
 M2/M5 冻结三个手机 REST 接口：`GET /mobile/config`、`POST /mobile/events:batch`、`GET /mobile/events/status`。三者使用 M1 绑定返回的 mobile access token；通知事件要求 `notification_gateway`，位置事件要求 `location_gateway`，不得使用账号 OAuth 或 `Device-Id`。
 
+`POST /mobile/events:batch` 的顶层批次和每条事件都必须在 JSON 中显式包含整数 `version=1`。客户端不得依赖语言默认值而省略该字段；服务端对缺失版本按 0 处理并严格拒绝。
+
 请求必须携带 `Authorization: Bearer <mobile token>`、`Mobile-Instance-Id`、`Client-Id=<installation UUID>`、`Mobile-Credential-Version` 和 `Mobile-Protocol-Version: 1`。服务端对实例、安装 UUID、凭据版本、token 哈希、撤销状态和能力做联合校验，失败返回 HTTP 401 `MOBILE_CREDENTIAL_INVALID`。
 
 配置接口始终返回版本 1 的 `notification_gateway={available,max_summary_length,batch_size,categories}`；只有实例能力包含 `location_gateway` 时才额外返回 `location_gateway={available:true}`。旧 M2 绑定响应不得出现该字段或 null，以保持原 JSON 形状兼容。接口支持 ETag/304；客户端只有保存了严格解析的完整配置正文时才能使用 304。批次接受 `notification.state_changed` 和 `location.transition`，每条候选按 type 使用严格白名单字段。

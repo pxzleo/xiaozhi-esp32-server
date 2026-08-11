@@ -76,8 +76,8 @@ class ProactiveServiceTest {
         when(deviceDao.selectByIdForUpdate("device-1")).thenReturn(device);
         when(globalDao.selectExternalMonitoringValueForUpdate()).thenReturn("true");
         when(eventDedupeDao.selectLastCreatedAt(any(), any(), any())).thenReturn(new Date());
-        when(deliveryClaimDao.insertIfAbsent(any(), any(), any())).thenReturn(1);
-        when(deliveryClaimDao.claim(any(), any(), any(), any(), any(), any(), any(), any(), anyInt())).thenReturn(1);
+        when(deliveryClaimDao.insertIfAbsent(any(), any())).thenReturn(1);
+        when(deliveryClaimDao.claim(any(), any(), any(), any(), any(), any(), anyInt())).thenReturn(1);
         when(deliveryClaimDao.complete(any(), any(), any(), any(), any())).thenReturn(1);
     }
 
@@ -637,7 +637,7 @@ class ProactiveServiceTest {
         EventClaim first = claim("token-1");
         EventClaim second = claim("token-2");
         AtomicReference<String> owner = new AtomicReference<>();
-        when(eventDao.claimPending(eq("device-1"), eq("event-1"), any(), any(), any()))
+        when(eventDao.claimPending(eq("device-1"), eq("event-1"), any()))
                 .thenAnswer(call -> owner.compareAndSet(null, call.getArgument(2)) ? 1 : 0);
         when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenAnswer(ignored -> {
             ProactiveEventEntity event = eventEntity(eventRequest());
@@ -667,7 +667,7 @@ class ProactiveServiceTest {
         ProactiveEventEntity claimed = eventEntity(eventRequest());
         claimed.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
         claimed.setClaimToken("same-token");
-        when(eventDao.claimPending(eq("device-1"), eq("event-1"), eq("same-token"), any(), any()))
+        when(eventDao.claimPending(eq("device-1"), eq("event-1"), eq("same-token")))
                 .thenReturn(1);
         when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(claimed);
 
@@ -681,13 +681,12 @@ class ProactiveServiceTest {
         ProactiveEventEntity reclaimed = eventEntity(eventRequest());
         reclaimed.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
         reclaimed.setClaimToken("new-token");
-        when(eventDao.claimPending(eq("device-1"), eq("event-1"), eq("new-token"), any(), any()))
+        when(eventDao.claimPending(eq("device-1"), eq("event-1"), eq("new-token")))
                 .thenReturn(1);
         when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(reclaimed);
 
         assertTrue(service.claimEvent("event-1", claim));
-        verify(eventDao).claimPending(eq("device-1"), eq("event-1"), eq("new-token"),
-                any(), any());
+        verify(eventDao).claimPending(eq("device-1"), eq("event-1"), eq("new-token"));
     }
 
     @Test
@@ -695,7 +694,7 @@ class ProactiveServiceTest {
         for (Priority priority : List.of(Priority.NORMAL, Priority.CRITICAL)) {
             EventClaim claim = claim("cached-" + priority.name().toLowerCase());
             when(eventDao.claimPending(eq("device-1"), eq("event-1"),
-                    eq(claim.getClaimToken()), any(), any())).thenReturn(0);
+                    eq(claim.getClaimToken()))).thenReturn(0);
 
             assertFalse(service.claimEvent("event-1", claim));
         }
@@ -709,16 +708,16 @@ class ProactiveServiceTest {
         ProactiveEventEntity claimed = eventEntity(eventRequest());
         claimed.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
         claimed.setClaimToken("phone-token");
-        when(eventDao.claimPending(eq("device-1"), eq("event-1"), eq("phone-token"), any(), any()))
+        when(eventDao.claimPending(eq("device-1"), eq("event-1"), eq("phone-token")))
                 .thenReturn(1);
         when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(claimed);
-        when(deliveryClaimDao.claim(any(), any(), any(), any(), eq("phone-token"), any(), any(), any(), anyInt()))
+        when(deliveryClaimDao.claim(any(), any(), any(), any(), eq("phone-token"), any(), anyInt()))
                 .thenReturn(0);
-        when(eventDao.releaseClaim(eq("device-1"), eq("event-1"), eq("phone-token"), any()))
+        when(eventDao.releaseClaim(eq("device-1"), eq("event-1"), eq("phone-token")))
                 .thenReturn(1);
 
         assertFalse(service.claimEvent("event-1", claim));
-        verify(eventDao).releaseClaim(eq("device-1"), eq("event-1"), eq("phone-token"), any());
+        verify(eventDao).releaseClaim(eq("device-1"), eq("event-1"), eq("phone-token"));
     }
 
     @Test
@@ -750,7 +749,7 @@ class ProactiveServiceTest {
         assertEquals(0, left.getDeliveryGroupWindowHours());
 
         AtomicReference<String> groupOwner = new AtomicReference<>();
-        when(eventDao.claimPending(any(), any(), any(), any(), any())).thenAnswer(call -> {
+        when(eventDao.claimPending(any(), any(), any())).thenAnswer(call -> {
             ProactiveEventEntity event = stored.get(call.getArgument(0) + ":" + call.getArgument(1));
             event.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
             event.setClaimToken(call.getArgument(2));
@@ -759,9 +758,9 @@ class ProactiveServiceTest {
         when(eventDao.selectByDeviceAndEventId(any(), any())).thenAnswer(call ->
                 stored.get(call.getArgument(0) + ":" + call.getArgument(1)));
         when(deliveryClaimDao.claim(eq(device.getUserId()), eq(left.getDeliveryGroupKey()),
-                any(), any(), any(), any(), any(), any(), anyInt())).thenAnswer(call ->
+                any(), any(), any(), any(), anyInt())).thenAnswer(call ->
                 groupOwner.compareAndSet(null, call.getArgument(4)) ? 1 : 0);
-        when(eventDao.releaseClaim(any(), any(), any(), any())).thenReturn(1);
+        when(eventDao.releaseClaim(any(), any(), any())).thenReturn(1);
 
         EventClaim firstClaim = new EventClaim();
         firstClaim.setMacAddress(device.getMacAddress());
@@ -772,7 +771,7 @@ class ProactiveServiceTest {
         assertTrue(service.claimEvent(first.getEventId(), firstClaim));
         assertFalse(service.claimEvent(second.getEventId(), secondClaim));
         verify(eventDao).releaseClaim(eq("device-2"), eq(second.getEventId()),
-                eq("phone-token"), any());
+                eq("phone-token"));
     }
 
     @Test

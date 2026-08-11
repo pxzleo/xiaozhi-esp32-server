@@ -145,9 +145,8 @@ public class ProactiveMonitorService {
         }
         Map<MonitorType, ProactiveMonitorEntity> monitors = monitorMap(monitorDao.selectByDevice(deviceId));
         PreferenceView preference = proactiveService.getPreferenceByMac(device.getMacAddress());
-        Date claimCutoff = new Date(now.getTime() - 180_000L);
-        eventDao.releaseExpiredMonitorClaims(deviceId, now, claimCutoff);
-        for (ProactiveEventEntity event : eventDao.selectPendingMonitorEvents(deviceId, now)) {
+        eventDao.releaseExpiredMonitorClaims(deviceId);
+        for (ProactiveEventEntity event : eventDao.selectPendingMonitorEvents(deviceId)) {
             if (isVisible(event, monitors, preference, now)) {
                 return new PendingEnvelope(true, event.getEventId(), Topic.valueOf(event.getTopic()),
                         Priority.valueOf(event.getPriority()), event.getCreatedAt(), event.getExpiresAt(), 0);

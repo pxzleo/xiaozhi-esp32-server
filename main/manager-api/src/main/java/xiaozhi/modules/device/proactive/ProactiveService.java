@@ -55,7 +55,6 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 
 @Service
 public class ProactiveService {
-    private static final long CLAIM_LEASE_MILLIS = 180_000L;
     private static final Set<String> EVENT_PAYLOAD_KEYS = Set.of(
             "title", "message", "reference_id", "reference_url", "scheduled_at", "action", "source");
     private static final Set<String> HABIT_PAYLOAD_KEYS = Set.of(
@@ -305,22 +304,19 @@ public class ProactiveService {
     @Transactional
     public boolean claimEvent(String eventId, EventClaim request) {
         DeviceEntity device = resolveByMac(request.getMacAddress());
-        Date now = new Date();
-        Date leaseCutoff = new Date(now.getTime() - CLAIM_LEASE_MILLIS);
-        if (eventDao.claimPending(device.getId(), eventId, request.getClaimToken(), now, leaseCutoff) != 1) {
+        if (eventDao.claimPending(device.getId(), eventId, request.getClaimToken()) != 1) {
             return false;
         }
         ProactiveEventEntity event = eventDao.selectByDeviceAndEventId(device.getId(), eventId);
         boolean eventClaimed = event != null
                 && DeliveryStatus.CLAIMED.name().equals(event.getDeliveryStatus())
-                && request.getClaimToken().equals(event.getClaimToken())
-                && (event.getExpiresAt() == null || event.getExpiresAt().after(now));
+                && request.getClaimToken().equals(event.getClaimToken());
         if (!eventClaimed || StringUtils.isBlank(event.getDeliveryGroupKey())) return false;
-        deliveryClaimDao.insertIfAbsent(device.getUserId(), event.getDeliveryGroupKey(), now);
+        deliveryClaimDao.insertIfAbsent(device.getUserId(), event.getDeliveryGroupKey());
         if (deliveryClaimDao.claim(device.getUserId(), event.getDeliveryGroupKey(), device.getId(),
-                eventId, request.getClaimToken(), now, leaseCutoff, event.getCreatedAt(),
+                eventId, request.getClaimToken(), event.getCreatedAt(),
                 event.getDeliveryGroupWindowHours() == null ? 0 : event.getDeliveryGroupWindowHours()) != 1) {
-            if (eventDao.releaseClaim(device.getId(), eventId, request.getClaimToken(), now) != 1) {
+            if (eventDao.releaseClaim(device.getId(), eventId, request.getClaimToken()) != 1) {
                 throw new RenException("主动事件跨前端领取冲突回滚失败");
             }
             return false;
