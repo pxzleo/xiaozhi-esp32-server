@@ -127,8 +127,10 @@ manager-web 在设备管理列表的单台设备操作区提供“主动助理�
 
 ## 手机感知提醒闭环
 
-手机处理器通过内部受控方法创建 `event_type=MOBILE_ALERT`、`topic=SYSTEM` 的主动事件，公开通用事件入口不得接受该类型。payload 恰好只含 `title/summary/source/category`，不含原通知正文、坐标、token、证据或推理；`requires_response=false`。通知 `high/critical` 分别映射同名优先级，位置转换为 `normal`。去重身份来自手机事件 `dedupe_key`，滚动窗口固定 24 小时；位置使用服务端计算的 `place_id+transition` 散列。服务端为该手机实例同账号、同智能体的设备创建权威副本，各副本共享相同 `delivery_group_key`。事件继续复用 `ProactiveService` 的权威事件表、安静时段/额度策略、owner-scoped delivery ledger、领取租约和真实终态，手机与音箱竞争同一组事件，不建立第二套投递表。
+手机处理器通过内部受控方法创建 `event_type=MOBILE_ALERT`、`topic=SYSTEM` 的主动事件，公开通用事件入口不得接受该类型。payload 恰好只含 `title/summary/source/category`，不含原通知正文、坐标、token、证据或推理；`requires_response=false`。通知 `high/critical` 分别映射同名优先级，位置转换为 `normal`。通知按手机事件 `dedupe_key + occurred_at revision` 生成内部去重身份，使同一状态版本在 24 小时窗口内只创建一次，而更晚 updated 可使用最新受控 payload；位置使用服务端计算的 `place_id+transition` 散列并保留 24 小时滚动窗口。服务端为该手机实例同账号、同智能体的设备创建权威副本，各副本共享相同 `delivery_group_key`。事件继续复用 `ProactiveService` 的权威事件表、安静时段/额度策略、owner-scoped delivery ledger、领取租约和真实终态，手机与音箱竞争同一组事件，不建立第二套投递表。
+
+更晚 `updated/removed` 在手机状态流事务中原子失效旧组的未实际投递副本：PENDING 写 dismissed，CLAIMED 保留领取记录但立即按数据库时间过期，DELIVERED 不改写。manager-api 的 claim、权威上下文读取和 complete 均校验有效期；Android 对 `MOBILE_ALERT` 在真正通知/TTS 前使用同一 token 再次 claim，音箱在播报前重新读取权威上下文，因此旧 CLAIMED 副本被更新或移除后不能继续播放。同 token 重试不得刷新 180 秒租约。
 
 音箱端权威事件校验新增且只新增 `mobile_alert/system` 组合，严格要求 payload 四字段完整、受控类别和 `requires_response=false`；播报 `summary` 后不建立新闻 follow-up 上下文。普通手机提醒仍受安静时段、主题和每日额度约束，不能按类别或热度绕过策略。TTS 完成才写 `delivered`，失败或打断写 `failed`；手机感知审计中的投递状态直接关联这条主动事件，因此 `converted` 只表示已生成提醒，不等于已经播报。
 
-manager-web 的“主动助理”新增独立“手机感知事件”标签，不把原始感知事件伪装成主动事件。页面按实例上下文、类型、处理阶段、真实投递状态和时间分页筛选，且每次响应必须同时属于当前设备和手机实例；切换设备或重复请求时丢弃旧响应。详情仅展示脱敏摘要、来源应用、类别、置信度、受控原因和关联主动事件。
+manager-web 的“主动助理”新增独立“手机感知事件”标签，不把原始感知事件伪装成主动事件。页面按实例上下文、类型、处理阶段、真实投递状态和时间分页筛选，且每次响应必须同时属于当前设备和手机实例；切换设备或重复请求时丢弃旧响应。详情仅展示脱敏摘要、来源应用、类别、置信度、受控原因和关联主动事件。投递状态按数据库当前时间派生：有效期已到为 expired，CLAIMED 租约超过 180 秒为 pending；筛选使用相同表达式，避免列表与可重领语义不一致。

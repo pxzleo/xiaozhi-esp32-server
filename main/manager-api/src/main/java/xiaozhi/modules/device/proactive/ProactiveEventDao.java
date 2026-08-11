@@ -191,6 +191,8 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
              AND LOWER(TRIM(g.param_value)) = 'true'
             WHERE e.mac_address = #{macAddress} AND e.event_id = #{eventId}
               AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT')
+              AND e.delivery_status IN ('PENDING','CLAIMED')
+              AND (e.expires_at IS NULL OR e.expires_at > CURRENT_TIMESTAMP(3))
               AND (e.event_type = 'MOBILE_ALERT'
                    OR (m.enabled = 1 AND LOWER(TRIM(g.param_value)) = 'true'))
             """)

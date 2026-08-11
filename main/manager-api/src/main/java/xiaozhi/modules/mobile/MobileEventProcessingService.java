@@ -130,7 +130,7 @@ public class MobileEventProcessingService {
             return CLASSIFIED;
         }
         return convert(event, token, result.category(), result.severity(), result.confidence(),
-                result.spokenSummary(), title(result.category()), event.getDedupeKey(),
+                result.spokenSummary(), title(result.category()), notificationRevisionDedupe(event),
                 event.getSourcePackage(), "critical".equals(result.severity())
                         ? Priority.CRITICAL : Priority.HIGH);
     }
@@ -252,5 +252,12 @@ public class MobileEventProcessingService {
         } catch (NoSuchAlgorithmException error) {
             throw new IllegalStateException("JVM不支持SHA-256", error);
         }
+    }
+
+    private String notificationRevisionDedupe(MobileEventEntity event) {
+        if (event.getOccurredAt() == null || StringUtils.isBlank(event.getDedupeKey())) {
+            throw new RenException("手机通知修订去重参数无效");
+        }
+        return "sha256:" + sha256(event.getDedupeKey() + ":" + event.getOccurredAt().getTime());
     }
 }

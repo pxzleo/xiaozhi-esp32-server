@@ -1535,6 +1535,21 @@ async def _handle_external_triggered_notification(
         )
         return
 
+    if event["event_type"] == "mobile_alert":
+        try:
+            authoritative = await get_claimed_proactive_context(
+                event_id, mac_address, claim_token
+            )
+            event = _validated_external_event(
+                authoritative, event_id, mac_address, claimed_context=True
+            )
+        except Exception as error:
+            release_proactive_opportunity(reservation)
+            logger.bind(tag=TAG).info(
+                "手机感知提醒播放前权威复验失败: {}", type(error).__name__
+            )
+            return
+
     payload = event["payload"]
     is_news = event["event_type"] == "news_alert"
     is_mobile = event["event_type"] == "mobile_alert"

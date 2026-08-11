@@ -102,22 +102,40 @@ class ExternalTriggeredTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_mobile_alert_uses_controlled_summary_without_followup_context(self):
         conn = connection()
-        with patch.object(
-            mcp_handler, "get_proactive_monitor_event",
-            AsyncMock(return_value=event("mobile")),
-        ), patch.object(
-            mcp_handler, "claim_proactive_event", AsyncMock(return_value=True)
-        ), patch.object(
-            mcp_handler, "_speak_proactive_notification", AsyncMock(return_value=None)
-        ) as speak, patch.object(
-            mcp_handler, "update_proactive_event_status", AsyncMock()
+        with (
+            patch.object(mcp_handler, "get_proactive_monitor_event",
+                         AsyncMock(return_value=event("mobile"))),
+            patch.object(mcp_handler, "claim_proactive_event", AsyncMock(return_value=True)),
+            patch.object(mcp_handler, "get_claimed_proactive_context",
+                         AsyncMock(return_value={**event("mobile"), "delivery_status": "claimed"})) as revalidate,
+            patch.object(mcp_handler, "_speak_proactive_notification",
+                         AsyncMock(return_value=None)) as speak,
+            patch.object(mcp_handler, "update_proactive_event_status", AsyncMock()),
         ):
             await mcp_handler._handle_external_triggered_notification(
                 conn, {"version": 1, "event_id": "ext-1", "speak": True}
             )
         speak.assert_awaited_once()
+        revalidate.assert_awaited_once()
         self.assertEqual("已进入公司", speak.await_args.args[1])
         self.assertFalse(conn._external_news_waiting_response)
+
+    async def test_superseded_claimed_mobile_alert_is_not_spoken(self):
+        conn = connection()
+        with patch.object(
+            mcp_handler, "get_proactive_monitor_event", AsyncMock(return_value=event("mobile"))
+        ), patch.object(
+            mcp_handler, "claim_proactive_event", AsyncMock(return_value=True)
+        ), patch.object(
+            mcp_handler, "get_claimed_proactive_context",
+            AsyncMock(side_effect=RuntimeError("superseded")),
+        ), patch.object(
+            mcp_handler, "_speak_proactive_notification", AsyncMock()
+        ) as speak:
+            await mcp_handler._handle_external_triggered_notification(
+                conn, {"version": 1, "event_id": "ext-1", "speak": True}
+            )
+        speak.assert_not_awaited()
 
     def test_mobile_alert_rejects_uncontrolled_payload_fields(self):
         malicious = event("mobile")

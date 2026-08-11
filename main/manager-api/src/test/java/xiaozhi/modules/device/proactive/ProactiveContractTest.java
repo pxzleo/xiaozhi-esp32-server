@@ -339,5 +339,7 @@ class ProactiveContractTest {
         assertTrue(monitorReadSql.contains("LOWER(TRIM(g.param_value)) = 'true'"));
         assertTrue(monitorReadSql.contains("WHEN 'WEATHER_ALERT' THEN 'WEATHER'"));
         assertTrue(monitorReadSql.contains("WHEN 'NEWS_ALERT' THEN 'NEWS'"));
+        assertTrue(monitorReadSql.contains("e.expires_at > CURRENT_TIMESTAMP(3)"));
+        assertTrue(monitorReadSql.contains("e.delivery_status IN ('PENDING','CLAIMED')"));
     }
 }

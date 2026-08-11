@@ -95,8 +95,8 @@ public class MobileEventService {
                 } else {
                     MobileEventEntity sameId = eventDao.selectByEventId(instance.getMobileInstanceId(), event.eventId());
                     int updated = eventDao.updateLatestState(entity);
-                    if (updated == 1 && "removed".equals(entity.getEventState())) {
-                        eventDao.dismissPendingMobileAlerts(
+                    if (updated == 1 && Set.of("updated", "removed").contains(entity.getEventState())) {
+                        eventDao.supersedeUndeliveredMobileAlerts(
                                 entity.getMobileInstanceId(), entity.getDedupeKey());
                     }
                     result = new EventResult(event.eventId(), "deduped",

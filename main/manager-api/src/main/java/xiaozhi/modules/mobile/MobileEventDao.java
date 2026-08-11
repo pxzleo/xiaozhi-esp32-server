@@ -33,12 +33,20 @@ public interface MobileEventDao {
             INNER JOIN ai_mobile_event me
                 ON me.mobile_instance_id=mi.mobile_instance_id
                AND me.proactive_event_id=source.event_id
-            SET copies.delivery_status='DISMISSED', copies.outcome='DISMISSED',
+            SET copies.expires_at=CASE
+                    WHEN copies.delivery_status='CLAIMED' THEN CURRENT_TIMESTAMP(3)
+                    ELSE copies.expires_at END,
+                copies.outcome=CASE
+                    WHEN copies.delivery_status='PENDING' THEN 'DISMISSED'
+                    ELSE copies.outcome END,
+                copies.delivery_status=CASE
+                    WHEN copies.delivery_status='PENDING' THEN 'DISMISSED'
+                    ELSE copies.delivery_status END,
                 copies.updated_at=CURRENT_TIMESTAMP(3)
             WHERE me.mobile_instance_id=#{instanceId} AND me.dedupe_key=#{dedupeKey}
-              AND copies.delivery_status='PENDING'
+              AND copies.delivery_status IN ('PENDING','CLAIMED')
             """)
-    int dismissPendingMobileAlerts(@Param("instanceId") String instanceId,
+    int supersedeUndeliveredMobileAlerts(@Param("instanceId") String instanceId,
             @Param("dedupeKey") String dedupeKey);
 
     @Select("SELECT * FROM ai_mobile_event WHERE mobile_instance_id=#{instanceId} AND event_id=#{eventId} LIMIT 1")
@@ -156,7 +164,14 @@ public interface MobileEventDao {
                    e.source_package, e.event_state, e.summary, e.category, e.severity,
                    e.confidence, e.spoken_summary, e.reason_code, e.processing_status,
                    e.occurred_at, e.created_at, e.processed_at, e.proactive_event_id,
-                   LOWER(COALESCE(dc.delivery_status,p.delivery_status)) AS delivery_status
+                   LOWER(CASE
+                     WHEN p.expires_at IS NOT NULL AND p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                     WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
+                       AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL
+                         OR COALESCE(dc.claimed_at,p.claimed_at) < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
+                       THEN 'PENDING'
+                     ELSE COALESCE(dc.delivery_status,p.delivery_status)
+                   END) AS delivery_status
             FROM ai_mobile_event e
             INNER JOIN ai_mobile_instance mi ON mi.mobile_instance_id=e.mobile_instance_id
                 AND mi.user_id=#{userId}
@@ -167,7 +182,14 @@ public interface MobileEventDao {
             WHERE e.mobile_instance_id=#{instanceId}
               <if test="type != null">AND e.event_type=#{type}</if>
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
-              <if test="deliveryStatus != null">AND COALESCE(dc.delivery_status,p.delivery_status)=#{deliveryStatus}</if>
+              <if test="deliveryStatus != null">AND (CASE
+                WHEN p.expires_at IS NOT NULL AND p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
+                  AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL
+                    OR COALESCE(dc.claimed_at,p.claimed_at) &lt; DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
+                  THEN 'PENDING'
+                ELSE COALESCE(dc.delivery_status,p.delivery_status)
+              END)=#{deliveryStatus}</if>
               <if test="fromTime != null">AND e.occurred_at &gt;= #{fromTime}</if>
               <if test="toTime != null">AND e.occurred_at &lt;= #{toTime}</if>
             ORDER BY e.occurred_at DESC, e.event_id DESC LIMIT #{limit} OFFSET #{offset}
@@ -192,7 +214,14 @@ public interface MobileEventDao {
             WHERE e.mobile_instance_id=#{instanceId}
               <if test="type != null">AND e.event_type=#{type}</if>
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
-              <if test="deliveryStatus != null">AND COALESCE(dc.delivery_status,p.delivery_status)=#{deliveryStatus}</if>
+              <if test="deliveryStatus != null">AND (CASE
+                WHEN p.expires_at IS NOT NULL AND p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
+                  AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL
+                    OR COALESCE(dc.claimed_at,p.claimed_at) &lt; DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
+                  THEN 'PENDING'
+                ELSE COALESCE(dc.delivery_status,p.delivery_status)
+              END)=#{deliveryStatus}</if>
               <if test="fromTime != null">AND e.occurred_at &gt;= #{fromTime}</if>
               <if test="toTime != null">AND e.occurred_at &lt;= #{toTime}</if>
             </script>

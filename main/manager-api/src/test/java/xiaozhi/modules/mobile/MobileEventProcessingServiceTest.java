@@ -83,8 +83,8 @@ class MobileEventProcessingServiceTest {
     }
 
     @Test
-    void classifierThresholdIsInclusiveAndCreatesOnlyOneAuthoritativeEvent() {
-        MobileEventEntity event = event("notification.state_changed", "posted", "security", "账户存在异常登录风险");
+    void updatedNotificationUsesRevisionDedupeAndLatestControlledPayload() {
+        MobileEventEntity event = event("notification.state_changed", "updated", "security", "账户风险状态已更新");
         when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(instance());
         when(classifier.classifyMobileEvent(event.getSummary(), "security",
                 event.getSourcePackage(), event.getEventState()))
@@ -92,7 +92,9 @@ class MobileEventProcessingServiceTest {
                         true, "security", "high", 0.85, "账户出现安全风险", "security_risk"));
         when(proactive.createMobileAlert(eq(event.getMobileInstanceId()), eq(7L), eq("agent-1"),
                 eq(event.getEventId()),
-                eq(event.getDedupeKey()), eq("安全提醒"), eq("账户出现安全风险"),
+                org.mockito.ArgumentMatchers.argThat(key -> key.matches("sha256:[0-9a-f]{64}")
+                        && !key.equals(event.getDedupeKey())),
+                eq("安全提醒"), eq("账户出现安全风险"),
                 eq(event.getSourcePackage()), eq("security"), eq(Priority.HIGH), any(), any()))
                 .thenReturn(new EventCreateResult(true, false, "mobile-1", null, new Date()));
 
@@ -100,7 +102,9 @@ class MobileEventProcessingServiceTest {
                 service.processClaimed(event, "worker", "token"));
         verify(proactive).createMobileAlert(eq(event.getMobileInstanceId()), eq(7L), eq("agent-1"),
                 eq(event.getEventId()),
-                eq(event.getDedupeKey()), any(), any(), any(), any(), eq(Priority.HIGH), any(), any());
+                org.mockito.ArgumentMatchers.argThat(key -> key.matches("sha256:[0-9a-f]{64}")
+                        && !key.equals(event.getDedupeKey())),
+                any(), eq("账户出现安全风险"), any(), any(), eq(Priority.HIGH), any(), any());
         verify(eventDao).finishConverted(event.getMobileInstanceId(), event.getEventId(), "token",
                 "security", "high", 0.85, "账户出现安全风险", "mobile-1");
     }
@@ -127,9 +131,9 @@ class MobileEventProcessingServiceTest {
     }
 
     @Test
-    void ordinaryNotificationStopsAtDeterministicPrefilter() {
+    void updatedLowValueNotificationStopsAtDeterministicPrefilter() {
         MobileEventEntity event = event(
-                "notification.state_changed", "posted", "message", "今日内容更新");
+                "notification.state_changed", "updated", "message", "今日内容更新");
 
         assertEquals(MobileEventProcessingService.PREFILTERED,
                 service.processClaimed(event, "worker", "token"));

@@ -28,6 +28,13 @@ class MobileEventAuditServiceTest {
         verify(eventDao).countAuditForUser(7L, instance.getMobileInstanceId(), null, null,
                 null, null, null);
 
+        when(eventDao.pageAuditForUser(7L, instance.getMobileInstanceId(), null, null,
+                "EXPIRED", null, null, 10, 0)).thenReturn(List.of());
+        service.audit(7L, instance.getMobileInstanceId(), null, null,
+                "expired", null, null, 1, 10);
+        verify(eventDao).countAuditForUser(7L, instance.getMobileInstanceId(), null, null,
+                "EXPIRED", null, null);
+
         assertThrows(xiaozhi.common.exception.RenException.class,
                 () -> service.audit(8L, instance.getMobileInstanceId(), null, null,
                         null, null, null, 1, 20));

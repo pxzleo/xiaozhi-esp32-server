@@ -109,10 +109,29 @@ class MobileMigrationTest {
         assertTrue(latest.contains("processing_status='received'"));
         assertTrue(latest.contains("processing_lease_token=NULL"));
         String dismiss = String.join("\n", MobileEventDao.class
-                .getMethod("dismissPendingMobileAlerts", String.class, String.class)
+                .getMethod("supersedeUndeliveredMobileAlerts", String.class, String.class)
                 .getAnnotation(Update.class).value());
         assertTrue(dismiss.contains("source.delivery_group_key=copies.delivery_group_key"));
-        assertTrue(dismiss.contains("copies.delivery_status='PENDING'"));
-        assertTrue(dismiss.contains("copies.delivery_status='DISMISSED'"));
+        assertTrue(dismiss.contains("copies.delivery_status IN ('PENDING','CLAIMED')"));
+        assertTrue(dismiss.contains("WHEN copies.delivery_status='PENDING' THEN 'DISMISSED'"));
+        assertTrue(dismiss.contains("WHEN copies.delivery_status='CLAIMED' THEN CURRENT_TIMESTAMP(3)"));
+    }
+
+    @Test
+    void auditDeliveryStatusUsesDatabaseTimeDerivedExpressionForSelectAndFilter() throws Exception {
+        String page = String.join("\n", MobileEventDao.class.getMethod("pageAuditForUser",
+                Long.class, String.class, String.class, String.class, String.class,
+                java.util.Date.class, java.util.Date.class, int.class, long.class)
+                .getAnnotation(Select.class).value());
+        String count = String.join("\n", MobileEventDao.class.getMethod("countAuditForUser",
+                Long.class, String.class, String.class, String.class, String.class,
+                java.util.Date.class, java.util.Date.class)
+                .getAnnotation(Select.class).value());
+        for (String sql : java.util.List.of(page, count)) {
+            assertTrue(sql.contains("p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'"));
+            assertTrue(sql.contains("DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)"));
+            assertTrue(sql.contains("THEN 'PENDING'"));
+            assertTrue(sql.contains("=#{deliveryStatus}"));
+        }
     }
 }

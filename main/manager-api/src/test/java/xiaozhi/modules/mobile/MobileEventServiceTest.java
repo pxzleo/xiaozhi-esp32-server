@@ -102,8 +102,20 @@ class MobileEventServiceTest {
 
         service.accept(auth(), new BatchRequest(1, List.of(removed)));
 
-        org.mockito.Mockito.verify(eventDao).dismissPendingMobileAlerts(
+        org.mockito.Mockito.verify(eventDao).supersedeUndeliveredMobileAlerts(
                 instance.getMobileInstanceId(), removed.dedupeKey());
+    }
+
+    @Test
+    void newerUpdatedStateAlsoSupersedesOldUndeliveredAlertCopies() {
+        when(eventDao.insertIgnore(any(MobileEventEntity.class))).thenReturn(0);
+        when(eventDao.updateLatestState(any(MobileEventEntity.class))).thenReturn(1);
+        CandidateEvent updated = event("evt_updated", "sha256:" + "e".repeat(64));
+
+        service.accept(auth(), new BatchRequest(1, List.of(updated)));
+
+        org.mockito.Mockito.verify(eventDao).supersedeUndeliveredMobileAlerts(
+                instance.getMobileInstanceId(), updated.dedupeKey());
     }
 
     @Test

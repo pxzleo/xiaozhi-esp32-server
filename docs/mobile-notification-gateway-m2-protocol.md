@@ -28,6 +28,10 @@ Android outbox 按 `mobile_instance_id` 隔离，worker 只能发送当前绑定
 
 后续迁移 `202608111600` 扩展 `ai_mobile_event`，处理阶段为 `received/prefiltered/classified/ignored/converted/error`，并保存受控分类结果、关联主动事件 ID、120 秒数据库租约、尝试次数、下次重试和处理时间。领取、到期和租约接管均使用数据库 `CURRENT_TIMESTAMP(3)`；失败按指数退避。`removed`、已过期事件和已终结状态的重复更新不进入分类或播报。
 
-通知先执行确定性预筛，只有 `security/call/parcel/appointment/message/other` 中命中严格规则的少量候选才调用全局独立主动分类模型。输入只有已脱敏 `summary/category/source_package/state`；外部文本是低信任数据。模型必须返回且只返回 `should_notify/category/severity/confidence/spoken_summary/reason_code` 单一 JSON 根对象；模型未配置、不可用、调用失败或 JSON 不严格时写 `error` 并退避，禁止回退设备智能体模型。仅 `high/critical` 且 `confidence>=0.85` 转换为提醒。
+通知先执行确定性预筛，低价值候选以 `processing_status=prefiltered/reason_code=prefilter_low_value` 结束且不调用模型；只有 `security/call/parcel/appointment/message/other` 中命中严格规则的少量候选才调用全局独立主动分类模型。输入只有已脱敏 `summary/category/source_package/state`；外部文本是低信任数据。模型必须返回且只返回 `should_notify/category/severity/confidence/spoken_summary/reason_code` 单一 JSON 根对象；模型未配置、不可用、调用失败或 JSON 不严格时写 `error` 并退避，禁止回退设备智能体模型。仅 `high/critical` 且 `confidence>=0.85` 转换为提醒。
 
 用户在 M5 显式保存并启用的 enter/exit/dwell 是位置主动提醒授权。`location.transition` 不调用 LLM；通过实例、严格形状和有效期校验后，服务端仅用受控地点名重构“已进入/已离开/已驻留 + 地点名”，按 `place_id+transition` 计算 24 小时滚动去重并生成普通优先级提醒。经纬度和客户端自由文本不得进入 payload 或模型。
+
+同一通知生命周期的更晚 `updated/removed` 在更新手机事件的事务中失效旧 `delivery_group` 的未实际投递副本：PENDING 写入 dismissed 真实终态；CLAIMED 保留领取事实但把有效期推进到数据库当前时间，使后续权威读取和 complete CAS 拒绝；DELIVERED 不改写。`updated` 若再次达到提醒门槛，按 `dedupe_key + occurred_at revision` 生成新内部去重键，以新的投递组和最新受控 payload 创建提醒，不能命中旧 24 小时窗口复用旧内容。手机和音箱在实际播报前必须重新读取权威事件；Android 对 `MOBILE_ALERT` 使用同一 token 再次 claim，同 token 幂等且不得刷新 180 秒租约，复验冲突时停止呈现。
+
+账号审计的 `delivery_status` 在 SQL 查询时按数据库当前时间派生，且筛选必须使用相同表达式：`expires_at<=CURRENT_TIMESTAMP(3)` 显示 `expired`；底层为 CLAIMED 但领取时间为空或早于当前时间 180 秒的记录显示 `pending`，与可重领语义一致；其余状态保留底层真实值。这样不会把已过期或租约失效的提醒继续展示为正在领取，也不覆盖真实投递历史。
