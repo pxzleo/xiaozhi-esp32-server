@@ -128,6 +128,30 @@ class MobileEventServiceTest {
     }
 
     @Test
+    void acceptsOpaqueNumericNotificationMetadataWithoutTreatingItAsContent() {
+        CandidateEvent base = event("numeric_metadata", "sha256:" + "9".repeat(64));
+        CandidateEvent candidate = new CandidateEvent(base.version(), base.eventId(), base.mobileInstanceId(),
+                base.type(), base.occurredAt(), new EventSource("notification", "com.example.app", "123456789012"),
+                base.state(), base.summary(), base.entities(), base.dedupeKey(), base.expiresAt(),
+                base.privacyLevel(), Map.of("rule_id", "notification_category_v1",
+                        "notification_key_hash", "9".repeat(64)));
+        assertEquals("acknowledged", service.accept(auth(), new BatchRequest(1, List.of(candidate)))
+                .results().get(0).status());
+    }
+
+    @Test
+    void rejectsMalformedNotificationMetadataInsteadOfScanningItAsContent() {
+        CandidateEvent base = event("bad_metadata", "sha256:" + "8".repeat(64));
+        CandidateEvent candidate = new CandidateEvent(base.version(), base.eventId(), base.mobileInstanceId(),
+                base.type(), base.occurredAt(), base.source(), base.state(), base.summary(), base.entities(),
+                base.dedupeKey(), base.expiresAt(), base.privacyLevel(),
+                Map.of("rule_id", "notification_category_v1", "notification_key_hash", "token=secret"));
+        var result = service.accept(auth(), new BatchRequest(1, List.of(candidate))).results().get(0);
+        assertEquals("rejected", result.status());
+        assertEquals("INVALID_EVENT_SHAPE", result.reasonCode());
+    }
+
+    @Test
     void rejectsUnknownProtocolVersionBeforeReadingEvents() {
         var invalid = new MobileEventService.MobileAuth(instance.getMobileInstanceId(), instance.getInstallationId(), 2,
                 2, "secret");

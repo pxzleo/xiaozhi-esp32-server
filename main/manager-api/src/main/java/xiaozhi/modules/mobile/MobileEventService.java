@@ -30,12 +30,17 @@ import xiaozhi.modules.mobile.MobileEventDTOs.StatusResponse;
 @Service
 public class MobileEventService {
     private static final int VERSION = 1;
-    private static final Pattern SENSITIVE = Pattern.compile(
+    private static final String LABELED_SECRET =
             "(?iu)(验证码|校验码|动态码|otp)\\s*(?:为|是|[:：=])?\\s*[^,，。；;!?！？、\\r\\n]{1,512}(?=$|[,，。；;!?！？、\\r\\n])"
             + "|(?:\\d[ -]?){4,8}[^\\p{L}\\p{N}]{0,8}(验证码|校验码|动态码|otp)"
-            + "|(access[ _-]?token|访问令牌|令牌|token|bearer|password|密码|口令)\\s*(?:为|是|[:：=])?\\s*[^,，。；;!?！？、\\r\\n]{1,512}(?=$|[,，。；;!?！？、\\r\\n])"
-            + "|https?://\\S{41,}|(?<!\\d)(?:\\d[ -]?){9,}(?!\\d)");
+            + "|(access[ _-]?token|访问令牌|令牌|token|bearer|password|密码|口令)\\s*(?:为|是|[:：=])?\\s*[^,，。；;!?！？、\\r\\n]{1,512}(?=$|[,，。；;!?！？、\\r\\n])";
+    private static final Pattern SENSITIVE = Pattern.compile(
+            LABELED_SECRET + "|https?://\\S{41,}|(?<!\\d)(?:\\d[ -]?){9,}(?!\\d)");
+    private static final Pattern SENSITIVE_METADATA = Pattern.compile(LABELED_SECRET + "|https?://\\S+");
     private static final Pattern PACKAGE_NAME = Pattern.compile("^[A-Za-z][A-Za-z0-9_.]{2,199}$");
+    private static final Pattern NOTIFICATION_HASH = Pattern.compile("^[0-9a-f]{64}$");
+    private static final Pattern NOTIFICATION_TRANSITION = Pattern.compile(
+            "^(posted|updated|removed)(->(posted|updated|removed))?$");
     private static final Pattern PLACE_ID = Pattern.compile("^place_[0-9a-f]{8,32}$");
     private static final Pattern PLACE_NAME = Pattern.compile("^[\\p{L}\\p{N} _-]{1,40}$");
     private final MobileInstanceDao instanceDao;
@@ -81,9 +86,7 @@ public class MobileEventService {
             } else if (event.occurredAt().isAfter(Instant.now().plusSeconds(300))
                     || event.expiresAt().isAfter(Instant.now().plusSeconds(604800))) {
                 result = new EventResult(event.eventId(), "rejected", "INVALID_EVENT_TIME");
-            } else if (containsSensitive(event.summary()) || containsSensitive(event.source().channel())
-                    || valuesContainSensitive(event.entities())
-                    || valuesContainSensitive(event.evidence())) {
+            } else if (containsSensitiveContent(event)) {
                 result = new EventResult(event.eventId(), "rejected", "SENSITIVE_CONTENT");
             } else {
                 MobileEventEntity entity = toEntity(instance.getMobileInstanceId(), event);
@@ -165,13 +168,21 @@ public class MobileEventService {
     }
 
     private boolean validNotificationShape(MobileEventDTOs.CandidateEvent event) {
+        String category = event.entities().get("category");
+        String ruleId = event.evidence().get("rule_id");
+        String transition = event.evidence().get("transition");
+        String notificationHash = event.evidence().get("notification_key_hash");
         return "notification".equals(event.source().kind())
                 && PACKAGE_NAME.matcher(event.source().packageName()).matches()
                 && Set.of("posted", "updated", "removed").contains(event.state())
                 && event.entities().keySet().stream().allMatch(Set.of("category", "sender_hint", "thread_hint")::contains)
-                && event.entities().containsKey("category")
+                && category != null
+                && Set.of("message", "call", "parcel", "appointment", "security", "other").contains(category)
                 && event.evidence().keySet().stream().allMatch(Set.of("rule_id", "transition", "notification_key_hash")::contains)
-                && event.evidence().containsKey("rule_id");
+                && ruleId != null
+                && Set.of("notification_keyword_v1", "notification_category_v1").contains(ruleId)
+                && (transition == null || NOTIFICATION_TRANSITION.matcher(transition).matches())
+                && (notificationHash == null || NOTIFICATION_HASH.matcher(notificationHash).matches());
     }
 
     private boolean validLocationShape(MobileEventDTOs.CandidateEvent event) {
@@ -201,6 +212,19 @@ public class MobileEventService {
     }
 
     private boolean containsSensitive(String value) { return value != null && SENSITIVE.matcher(value).find(); }
+    private boolean containsSensitiveMetadata(String value) {
+        return value != null && SENSITIVE_METADATA.matcher(value).find();
+    }
+    private boolean containsSensitiveContent(MobileEventDTOs.CandidateEvent event) {
+        if ("notification.state_changed".equals(event.type())) {
+            return containsSensitive(event.summary())
+                    || containsSensitiveMetadata(event.source().channel())
+                    || containsSensitive(event.entities().get("sender_hint"))
+                    || containsSensitive(event.entities().get("thread_hint"));
+        }
+        return containsSensitive(event.summary()) || containsSensitive(event.source().channel())
+                || valuesContainSensitive(event.entities()) || valuesContainSensitive(event.evidence());
+    }
     private boolean valuesContainSensitive(java.util.Map<String, String> values) {
         return values != null && values.values().stream().anyMatch(this::containsSensitive);
     }

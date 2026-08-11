@@ -16,6 +16,8 @@ Android outbox 按 `mobile_instance_id` 隔离，worker 只能发送当前绑定
 
 敏感标签后的受控 Unicode/符号跨度必须整体判为敏感，例如中文密码及包含 `@ + / =` 的密码或 token，禁止部分脱敏后残留后缀。
 
+通知二次隐私检查按字段职责执行：`summary/sender_hint/thread_hint` 使用完整敏感内容规则；`source.channel` 只检查敏感标签和 URL，允许合法纯数字系统频道；`evidence.rule_id/transition/notification_key_hash` 先按封闭枚举或格式验证，其中通知 key 哈希只允许 64 位小写十六进制。合法哈希或数字频道不得按长号码误拒，畸形元数据返回 `INVALID_EVENT_SHAPE`。
+
 状态接口只返回当前手机实例最近 1–100 条逐次接收审计的 ID、状态、原因码和更新时间，不返回摘要或通知正文。`acknowledged/deduped/rejected/expired` 均持久审计；拒绝记录不保存候选正文。专用异常处理器保留真实 HTTP 状态，且所有接口强制 `Mobile-Protocol-Version: 1`。服务端数据库只保存客户端已脱敏且接受的候选；日志禁止记录正文、token 和签名材料。
 
 缺少 Authorization 返回 HTTP 401；缺少其他手机协议头返回 HTTP 400。同一 `dedupe_key` 的新候选返回 `deduped`，但主事件记录仍按 `occurred_at` 单调更新最新状态、脱敏摘要、证据和有效期；每次接收结果继续单独追加审计。
