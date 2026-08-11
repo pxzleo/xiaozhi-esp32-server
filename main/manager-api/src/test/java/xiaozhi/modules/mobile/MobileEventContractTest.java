@@ -11,12 +11,34 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import org.junit.jupiter.api.Test;
+import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.mapping.SqlSource;
+import org.apache.ibatis.scripting.xmltags.XMLLanguageDriver;
+import org.apache.ibatis.session.Configuration;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 class MobileEventContractTest {
     private final ObjectMapper mapper = new MobileJsonHttpMessageConverter().getObjectMapper();
+
+    @Test
+    void dynamicSelectAnnotationsAreValidMyBatisXml() {
+        var driver = new XMLLanguageDriver();
+        var configuration = new Configuration();
+        for (var method : MobileEventDao.class.getDeclaredMethods()) {
+            var select = method.getAnnotation(Select.class);
+            if (select == null) {
+                continue;
+            }
+            String script = String.join(" ", select.value());
+            if (!script.contains("<script>")) {
+                continue;
+            }
+            SqlSource source = driver.createSqlSource(configuration, script, method.getReturnType());
+            assertTrue(source != null, method.getName());
+        }
+    }
 
     @Test
     void legacyM2ConfigOmitsLocationFieldButLocationBindingIncludesIt() throws Exception {

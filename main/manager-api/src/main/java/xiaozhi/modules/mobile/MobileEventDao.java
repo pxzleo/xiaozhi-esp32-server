@@ -169,11 +169,11 @@ public interface MobileEventDao {
                    e.confidence, e.spoken_summary, e.reason_code, e.processing_status,
                    e.occurred_at, e.created_at, e.processed_at, e.proactive_event_id,
                    LOWER(CASE
-                     WHEN p.expires_at IS NOT NULL AND p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                     WHEN p.expires_at IS NOT NULL AND p.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
                      WHEN p.delivery_status IN ('DELIVERED','FAILED','DISMISSED') THEN p.delivery_status
                      WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
                        AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL
-                         OR COALESCE(dc.claimed_at,p.claimed_at) < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
+                         OR COALESCE(dc.claimed_at,p.claimed_at) &lt; DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
                        THEN 'PENDING'
                      ELSE COALESCE(dc.delivery_status,p.delivery_status)
                    END) AS delivery_status
@@ -188,7 +188,7 @@ public interface MobileEventDao {
               <if test="type != null">AND e.event_type=#{type}</if>
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
               <if test="deliveryStatus != null">AND (CASE
-                WHEN p.expires_at IS NOT NULL AND p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                WHEN p.expires_at IS NOT NULL AND p.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
                 WHEN p.delivery_status IN ('DELIVERED','FAILED','DISMISSED') THEN p.delivery_status
                 WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
                   AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL
@@ -221,7 +221,7 @@ public interface MobileEventDao {
               <if test="type != null">AND e.event_type=#{type}</if>
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
               <if test="deliveryStatus != null">AND (CASE
-                WHEN p.expires_at IS NOT NULL AND p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                WHEN p.expires_at IS NOT NULL AND p.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
                 WHEN p.delivery_status IN ('DELIVERED','FAILED','DISMISSED') THEN p.delivery_status
                 WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
                   AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL

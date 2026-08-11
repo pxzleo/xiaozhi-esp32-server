@@ -130,7 +130,7 @@ class MobileMigrationTest {
                 java.util.Date.class, java.util.Date.class)
                 .getAnnotation(Select.class).value());
         for (String sql : java.util.List.of(page, count)) {
-            assertTrue(sql.contains("p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'"));
+            assertTrue(sql.contains("p.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'"));
             assertTrue(sql.contains("p.delivery_status IN ('DELIVERED','FAILED','DISMISSED')"));
             assertTrue(sql.contains("DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)"));
             assertTrue(sql.contains("THEN 'PENDING'"));
