@@ -52,6 +52,10 @@ public interface MobileEventDao {
     @Select("SELECT * FROM ai_mobile_event WHERE mobile_instance_id=#{instanceId} AND event_id=#{eventId} LIMIT 1")
     MobileEventEntity selectByEventId(@Param("instanceId") String instanceId, @Param("eventId") String eventId);
 
+    @Select("SELECT * FROM ai_mobile_event WHERE mobile_instance_id=#{instanceId} AND event_id=#{eventId} LIMIT 1 FOR UPDATE")
+    MobileEventEntity selectByEventIdForUpdate(@Param("instanceId") String instanceId,
+            @Param("eventId") String eventId);
+
     @Select("SELECT * FROM ai_mobile_event WHERE mobile_instance_id=#{instanceId} ORDER BY updated_at DESC LIMIT #{limit}")
     List<MobileEventEntity> selectRecent(@Param("instanceId") String instanceId, @Param("limit") int limit);
 
@@ -166,6 +170,7 @@ public interface MobileEventDao {
                    e.occurred_at, e.created_at, e.processed_at, e.proactive_event_id,
                    LOWER(CASE
                      WHEN p.expires_at IS NOT NULL AND p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                     WHEN p.delivery_status IN ('DELIVERED','FAILED','DISMISSED') THEN p.delivery_status
                      WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
                        AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL
                          OR COALESCE(dc.claimed_at,p.claimed_at) < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
@@ -184,6 +189,7 @@ public interface MobileEventDao {
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
               <if test="deliveryStatus != null">AND (CASE
                 WHEN p.expires_at IS NOT NULL AND p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                WHEN p.delivery_status IN ('DELIVERED','FAILED','DISMISSED') THEN p.delivery_status
                 WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
                   AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL
                     OR COALESCE(dc.claimed_at,p.claimed_at) &lt; DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
@@ -216,6 +222,7 @@ public interface MobileEventDao {
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
               <if test="deliveryStatus != null">AND (CASE
                 WHEN p.expires_at IS NOT NULL AND p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                WHEN p.delivery_status IN ('DELIVERED','FAILED','DISMISSED') THEN p.delivery_status
                 WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
                   AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL
                     OR COALESCE(dc.claimed_at,p.claimed_at) &lt; DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))

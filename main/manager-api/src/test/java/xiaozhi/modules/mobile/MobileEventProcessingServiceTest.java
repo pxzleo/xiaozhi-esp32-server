@@ -28,6 +28,7 @@ class MobileEventProcessingServiceTest {
     private MobileInstanceDao instanceDao;
     private ProactiveMonitorService classifier;
     private ProactiveService proactive;
+    private MobileEventProcessingTransactionService transactions;
     private MobileEventProcessingService service;
 
     @BeforeEach
@@ -36,8 +37,8 @@ class MobileEventProcessingServiceTest {
         instanceDao = mock(MobileInstanceDao.class);
         classifier = mock(ProactiveMonitorService.class);
         proactive = mock(ProactiveService.class);
-        service = new MobileEventProcessingService(eventDao, instanceDao, classifier, proactive,
-                new ObjectMapper());
+        transactions = new MobileEventProcessingTransactionService(eventDao, instanceDao, proactive);
+        service = new MobileEventProcessingService(eventDao, classifier, transactions, new ObjectMapper());
         when(eventDao.finishIgnored(any(), any(), any(), any())).thenReturn(1);
         when(eventDao.finishPrefiltered(any(), any(), any(), any())).thenReturn(1);
         when(eventDao.finishClassified(any(), any(), any(), any(), any(),
@@ -68,7 +69,10 @@ class MobileEventProcessingServiceTest {
     void locationUsesServerRebuiltSummaryAndNeverCallsModel() {
         MobileEventEntity location = event("location.transition", "entered", null, "客户端文本");
         location.setEntitiesJson("{\"place_id\":\"place_12345678\",\"place_name\":\"公司\",\"transition\":\"enter\"}");
+        location.setProcessingLeaseToken("token");
         when(instanceDao.selectById(location.getMobileInstanceId())).thenReturn(instance());
+        when(eventDao.selectByEventIdForUpdate(location.getMobileInstanceId(), location.getEventId()))
+                .thenReturn(location);
         when(proactive.createMobileAlert(eq(location.getMobileInstanceId()), eq(7L), eq("agent-1"),
                 eq(location.getEventId()),
                 org.mockito.ArgumentMatchers.startsWith("sha256:"), eq("地点提醒"), eq("已进入公司"),
@@ -85,7 +89,10 @@ class MobileEventProcessingServiceTest {
     @Test
     void updatedNotificationUsesRevisionDedupeAndLatestControlledPayload() {
         MobileEventEntity event = event("notification.state_changed", "updated", "security", "账户风险状态已更新");
+        event.setProcessingLeaseToken("token");
         when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(instance());
+        when(eventDao.selectByEventIdForUpdate(event.getMobileInstanceId(), event.getEventId()))
+                .thenReturn(event);
         when(classifier.classifyMobileEvent(event.getSummary(), "security",
                 event.getSourcePackage(), event.getEventState()))
                 .thenReturn(new ProactiveMonitorService.MobileAlertClassification(
@@ -175,6 +182,28 @@ class MobileEventProcessingServiceTest {
         verify(eventDao).finishIgnored(eq(removed.getMobileInstanceId()), eq(removed.getEventId()),
                 any(), eq("notification_removed"));
         verify(classifier, never()).classifyMobileEvent(any(), any(), any(), any());
+    }
+
+    @Test
+    void newerRevisionWinsBeforeProactiveCreationInsideFinalTransaction() {
+        MobileEventEntity stale = event(
+                "notification.state_changed", "posted", "security", "账户存在异常登录风险");
+        MobileEventEntity updated = event(
+                "notification.state_changed", "updated", "message", "今日内容更新");
+        updated.setOccurredAt(Date.from(stale.getOccurredAt().toInstant().plusSeconds(1)));
+        when(eventDao.selectByEventIdForUpdate(stale.getMobileInstanceId(), stale.getEventId()))
+                .thenReturn(updated);
+
+        var command = new MobileEventProcessingTransactionService.ConversionCommand(
+                stale, "old-token", "security", "high", 0.9, "账户存在安全风险",
+                "安全提醒", "sha256:" + "b".repeat(64), stale.getSourcePackage(), Priority.HIGH);
+
+        assertEquals(MobileEventProcessingTransactionService.SUPERSEDED,
+                transactions.convert(command).status());
+        verify(proactive, never()).createMobileAlert(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any());
+        verify(eventDao, never()).finishConverted(any(), any(), any(), any(), any(),
+                org.mockito.ArgumentMatchers.anyDouble(), any(), any());
     }
 
     private MobileEventEntity event(String type, String state, String category, String summary) {

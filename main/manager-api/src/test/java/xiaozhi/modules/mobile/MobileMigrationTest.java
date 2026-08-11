@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
+import org.springframework.transaction.annotation.Transactional;
 
 class MobileMigrationTest {
     @Test
@@ -129,9 +130,47 @@ class MobileMigrationTest {
                 .getAnnotation(Select.class).value());
         for (String sql : java.util.List.of(page, count)) {
             assertTrue(sql.contains("p.expires_at <= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'"));
+            assertTrue(sql.contains("p.delivery_status IN ('DELIVERED','FAILED','DISMISSED')"));
             assertTrue(sql.contains("DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)"));
             assertTrue(sql.contains("THEN 'PENDING'"));
             assertTrue(sql.contains("=#{deliveryStatus}"));
         }
+    }
+
+    @Test
+    void linkedDismissedCopyWinsOverAnotherDeviceFreshClaimInAuditAndFilter() throws Exception {
+        String page = String.join("\n", MobileEventDao.class.getMethod("pageAuditForUser",
+                Long.class, String.class, String.class, String.class, String.class,
+                java.util.Date.class, java.util.Date.class, int.class, long.class)
+                .getAnnotation(Select.class).value());
+        String count = String.join("\n", MobileEventDao.class.getMethod("countAuditForUser",
+                Long.class, String.class, String.class, String.class, String.class,
+                java.util.Date.class, java.util.Date.class)
+                .getAnnotation(Select.class).value());
+        for (String sql : java.util.List.of(page, count)) {
+            int linkedTerminal = sql.indexOf(
+                    "p.delivery_status IN ('DELIVERED','FAILED','DISMISSED') THEN p.delivery_status");
+            int sharedClaim = sql.indexOf("COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'");
+            assertTrue(linkedTerminal >= 0 && sharedClaim > linkedTerminal,
+                    "当前关联副本终态必须先于共享领取账本派生");
+        }
+    }
+
+    @Test
+    void processingUsesSeparateShortSpringTransactionsAroundRemoteClassification() throws Exception {
+        assertTrue(MobileEventProcessingService.class
+                .getMethod("processBatch", String.class, int.class)
+                .getAnnotation(Transactional.class) == null);
+        assertTrue(MobileEventProcessingTransactionService.class
+                .getMethod("claimAndRead", MobileEventEntity.class, String.class, String.class)
+                .isAnnotationPresent(Transactional.class));
+        assertTrue(MobileEventProcessingTransactionService.class
+                .getMethod("convert", MobileEventProcessingTransactionService.ConversionCommand.class)
+                .isAnnotationPresent(Transactional.class));
+
+        String lock = String.join("\n", MobileEventDao.class
+                .getMethod("selectByEventIdForUpdate", String.class, String.class)
+                .getAnnotation(Select.class).value());
+        assertTrue(lock.contains("FOR UPDATE"));
     }
 }

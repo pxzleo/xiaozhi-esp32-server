@@ -13,7 +13,6 @@ import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -23,7 +22,6 @@ import xiaozhi.common.exception.RenException;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Priority;
 import xiaozhi.modules.device.proactive.ProactiveMonitorService;
 import xiaozhi.modules.device.proactive.ProactiveMonitorService.MobileAlertClassification;
-import xiaozhi.modules.device.proactive.ProactiveService;
 
 @Service
 public class MobileEventProcessingService {
@@ -42,22 +40,19 @@ public class MobileEventProcessingService {
     private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() {};
 
     private final MobileEventDao eventDao;
-    private final MobileInstanceDao instanceDao;
     private final ProactiveMonitorService classifier;
-    private final ProactiveService proactiveService;
+    private final MobileEventProcessingTransactionService transactions;
     private final ObjectMapper objectMapper;
 
-    public MobileEventProcessingService(MobileEventDao eventDao, MobileInstanceDao instanceDao,
-            ProactiveMonitorService classifier, ProactiveService proactiveService,
+    public MobileEventProcessingService(MobileEventDao eventDao,
+            ProactiveMonitorService classifier, MobileEventProcessingTransactionService transactions,
             ObjectMapper objectMapper) {
         this.eventDao = eventDao;
-        this.instanceDao = instanceDao;
         this.classifier = classifier;
-        this.proactiveService = proactiveService;
+        this.transactions = transactions;
         this.objectMapper = objectMapper;
     }
 
-    @Transactional(rollbackFor = Exception.class)
     public int processBatch(String owner, int limit) {
         if (StringUtils.isBlank(owner) || owner.length() > 64 || limit < 1 || limit > 100) {
             throw new IllegalArgumentException("手机事件处理批次参数无效");
@@ -66,10 +61,8 @@ public class MobileEventProcessingService {
         int processed = 0;
         for (MobileEventEntity event : eventDao.selectProcessingCandidates(limit)) {
             String token = UUID.randomUUID().toString();
-            if (eventDao.claimProcessing(event.getMobileInstanceId(), event.getEventId(), owner, token) == 1) {
-                MobileEventEntity authoritative = eventDao.selectByEventId(
-                        event.getMobileInstanceId(), event.getEventId());
-                if (authoritative == null) throw new RenException("已领取的手机事件不存在");
+            MobileEventEntity authoritative = transactions.claimAndRead(event, owner, token);
+            if (authoritative != null) {
                 processClaimed(authoritative, owner, token);
                 processed++;
             }
@@ -152,11 +145,6 @@ public class MobileEventProcessingService {
             finishIgnored(event, token, "stored_event_shape_invalid");
             return IGNORED;
         }
-        MobileInstanceEntity instance = instanceDao.selectById(event.getMobileInstanceId());
-        if (instance == null || instance.getRevokedAt() != null) {
-            finishIgnored(event, token, "mobile_instance_unavailable");
-            return IGNORED;
-        }
         String summary = prefix + placeName;
         String dedupeKey = "sha256:" + sha256(placeId + ":" + transition);
         return convert(event, token, "location", "medium", 1.0, summary,
@@ -166,22 +154,10 @@ public class MobileEventProcessingService {
     private String convert(MobileEventEntity event, String token, String category,
             String severity, double confidence, String spokenSummary, String title,
             String dedupeKey, String source, Priority priority) {
-        MobileInstanceEntity instance = instanceDao.selectById(event.getMobileInstanceId());
-        if (instance == null || instance.getRevokedAt() != null) {
-            finishIgnored(event, token, "mobile_instance_unavailable");
-            return IGNORED;
-        }
         try {
-            var created = proactiveService.createMobileAlert(event.getMobileInstanceId(),
-                    instance.getUserId(), instance.getAgentId(), event.getEventId(),
-                    dedupeKey, title, spokenSummary, source, category,
-                    priority, event.getOccurredAt(), event.getExpiresAt());
-            if (eventDao.finishConverted(event.getMobileInstanceId(), event.getEventId(), token,
-                    category, severity, confidence, spokenSummary,
-                    created.authoritativeEventId()) != 1) {
-                throw new RenException("手机事件转换终态写入失败");
-            }
-            return CONVERTED;
+            return transactions.convert(new MobileEventProcessingTransactionService.ConversionCommand(
+                    event, token, category, severity, confidence, spokenSummary, title,
+                    dedupeKey, source, priority)).status();
         } catch (RenException error) {
             finishError(event, token, "proactive_event_unavailable");
             return ERROR;

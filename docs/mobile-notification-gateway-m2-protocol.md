@@ -26,7 +26,7 @@ Android outbox 按 `mobile_instance_id` 隔离，worker 只能发送当前绑定
 
 `GET /mobile/events/audit` 是账号 OAuth 的 `sys:role:normal` 接口，不使用手机凭据，且不属于匿名手机协议路由。请求必须提供 `mobile_instance_id`；服务端先按当前 `user_id` 校验手机实例所有权，再执行分页查询。可选筛选为 `type`、`processing_status`、`delivery_status`、ISO-8601 `from/to`，分页 `page=1..1000`、`limit=1..100`。响应只包含实例/设备/事件 ID、类型、来源包、状态、已脱敏摘要、类别、级别、置信度、受控播报摘要、受控原因码、处理阶段、时间、关联主动事件 ID 及其真实投递状态；不得返回 mobile token、证据 JSON、租约、坐标、原始正文或模型自由推理。原 `GET /mobile/events/status` 的手机凭据兼容接口保持不变。
 
-后续迁移 `202608111600` 扩展 `ai_mobile_event`，处理阶段为 `received/prefiltered/classified/ignored/converted/error`，并保存受控分类结果、关联主动事件 ID、120 秒数据库租约、尝试次数、下次重试和处理时间。领取、到期和租约接管均使用数据库 `CURRENT_TIMESTAMP(3)`；失败按指数退避。`removed`、已过期事件和已终结状态的重复更新不进入分类或播报。
+后续迁移 `202608111600` 扩展 `ai_mobile_event`，处理阶段为 `received/prefiltered/classified/ignored/converted/error`，并保存受控分类结果、关联主动事件 ID、120 秒数据库租约、尝试次数、下次重试和处理时间。领取、到期和租约接管均使用数据库 `CURRENT_TIMESTAMP(3)`；失败按指数退避。每条领取与权威重读使用独立短事务，远程分类模型调用完全在事务外，最终转换再用独立 Spring 事务 `FOR UPDATE` 重读同一 revision，并把主动事件创建与 token CAS 终态一并提交；不得让最多 100 条批次跨模型调用共用长事务。`removed`、已过期事件和已终结状态的重复更新不进入分类或播报。
 
 通知先执行确定性预筛，低价值候选以 `processing_status=prefiltered/reason_code=prefilter_low_value` 结束且不调用模型；只有 `security/call/parcel/appointment/message/other` 中命中严格规则的少量候选才调用全局独立主动分类模型。输入只有已脱敏 `summary/category/source_package/state`；外部文本是低信任数据。模型必须返回且只返回 `should_notify/category/severity/confidence/spoken_summary/reason_code` 单一 JSON 根对象；模型未配置、不可用、调用失败或 JSON 不严格时写 `error` 并退避，禁止回退设备智能体模型。仅 `high/critical` 且 `confidence>=0.85` 转换为提醒。
 
@@ -34,4 +34,4 @@ Android outbox 按 `mobile_instance_id` 隔离，worker 只能发送当前绑定
 
 同一通知生命周期的更晚 `updated/removed` 在更新手机事件的事务中失效旧 `delivery_group` 的未实际投递副本：PENDING 写入 dismissed 真实终态；CLAIMED 保留领取事实但把有效期推进到数据库当前时间，使后续权威读取和 complete CAS 拒绝；DELIVERED 不改写。`updated` 若再次达到提醒门槛，按 `dedupe_key + occurred_at revision` 生成新内部去重键，以新的投递组和最新受控 payload 创建提醒，不能命中旧 24 小时窗口复用旧内容。手机和音箱在实际播报前必须重新读取权威事件；Android 对 `MOBILE_ALERT` 使用同一 token 再次 claim，同 token 幂等且不得刷新 180 秒租约，复验冲突时停止呈现。
 
-账号审计的 `delivery_status` 在 SQL 查询时按数据库当前时间派生，且筛选必须使用相同表达式：`expires_at<=CURRENT_TIMESTAMP(3)` 显示 `expired`；底层为 CLAIMED 但领取时间为空或早于当前时间 180 秒的记录显示 `pending`，与可重领语义一致；其余状态保留底层真实值。这样不会把已过期或租约失效的提醒继续展示为正在领取，也不覆盖真实投递历史。
+账号审计的 `delivery_status` 在 SQL 查询时按数据库当前时间派生，且筛选必须使用相同表达式：`expires_at<=CURRENT_TIMESTAMP(3)` 显示 `expired`；当前关联主动事件副本本身已是 `DISMISSED/DELIVERED/FAILED` 时优先保留该终态，只有当前副本非终态时才参考共享领取账本；底层为 CLAIMED 但领取时间为空或早于当前时间 180 秒的记录显示 `pending`，与可重领语义一致。这样不会让音箱的 fresh CLAIMED 覆盖当前手机副本已 dismissed 的事实，也不会把已过期或租约失效的提醒继续展示为正在领取。
