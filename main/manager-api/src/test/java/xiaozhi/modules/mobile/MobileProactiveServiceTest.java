@@ -11,6 +11,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
+import java.time.LocalTime;
 import java.util.Date;
 import java.util.Map;
 
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 
 import xiaozhi.modules.device.proactive.ProactiveDTOs.EventView;
+import xiaozhi.modules.device.proactive.ProactivePreferenceConflictException;
 import xiaozhi.modules.device.proactive.ProactiveDTOs.PendingEnvelope;
 import xiaozhi.modules.device.proactive.ProactiveEnums.DeliveryStatus;
 import xiaozhi.modules.device.proactive.ProactiveEnums.EventType;
@@ -51,6 +53,47 @@ class MobileProactiveServiceTest {
                 "00000000-0000-0000-0000-000000000001", 1, 1, "token");
         when(mobileAuth.authenticate(auth, "voice_session")).thenReturn(instance);
         when(auditDao.recordTerminal(any(), any(), any(), any(), any(), any())).thenReturn(1);
+    }
+
+    @Test
+    void quietHoursUseTheSameServerPreferenceAsSpeakerAndWeb() {
+        var preference = new xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceView(
+                "dev-mobile", instance.getMobileInstanceId(),
+                xiaozhi.modules.device.proactive.ProactiveEnums.Mode.AGGRESSIVE, 0,
+                LocalTime.of(22, 30), LocalTime.of(7, 15), java.util.Set.of(), java.util.Set.of(),
+                null, null, null, 3, new Date());
+        when(proactive.getPreference(7L, "dev-mobile")).thenReturn(preference);
+        instance.setUserId(7L);
+
+        var read = service.quietHours(auth);
+        assertEquals("22:30", read.quietStart());
+        assertEquals("07:15", read.quietEnd());
+
+        var request = new MobileProactiveDTOs.QuietHoursRequest();
+        request.version = 1;
+        request.quietStart = "23:00";
+        request.quietEnd = "06:30";
+        when(proactive.updateQuietHours(7L, "dev-mobile", LocalTime.of(23, 0), LocalTime.of(6, 30)))
+                .thenReturn(preference);
+        service.updateQuietHours(auth, request);
+        verify(proactive).updateQuietHours(7L, "dev-mobile", LocalTime.of(23, 0), LocalTime.of(6, 30));
+    }
+
+    @Test
+    void quietHoursConcurrentWebSaveReturnsControlledConflict() {
+        instance.setUserId(7L);
+        var request = new MobileProactiveDTOs.QuietHoursRequest();
+        request.version = 1;
+        request.setQuietStart("23:00");
+        request.setQuietEnd("06:30");
+        when(proactive.updateQuietHours(7L, "dev-mobile", LocalTime.of(23, 0), LocalTime.of(6, 30)))
+                .thenThrow(new ProactivePreferenceConflictException());
+
+        var error = assertThrows(MobileApiException.class,
+                () -> service.updateQuietHours(auth, request));
+
+        assertEquals(HttpStatus.CONFLICT, error.getStatus());
+        assertEquals("PROACTIVE_PREFERENCE_CONFLICT", error.getErrorCode());
     }
 
     @Test

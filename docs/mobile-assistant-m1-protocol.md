@@ -46,6 +46,10 @@
 
 `DELETE /mobile/devices/{mobile_instance_id}?credential_version={绑定响应中的版本}` 同样使用账号 Bearer token。只能撤销当前账号的实例，并通过版本 CAS 防止旧撤销请求误删已经轮换的新凭据；版本过期返回 HTTP 409。撤销后旧凭据的下一次鉴权失败，已建立连接也会在后续控制帧或最多 5 秒一轮的持续音频输入上复验失败并关闭。清除应用数据后客户端应生成新的 `installation_id`。
 
+### 2.1 主动助理安静时段
+
+绑定后的 Android 可使用与手机凭据相同的鉴权头调用 `GET /mobile/proactive/quiet-hours`，读取服务端主动助理偏好中的 `quiet_start/quiet_end`；使用 `PUT /mobile/proactive/quiet-hours` 同步修改。PUT 请求严格为 `version=1`，起止时间必须同时为 `HH:mm` 且不能相同；同时传 `null` 表示清除。该接口更新的就是 Web 主动助理页面使用的设备偏好记录，不另建手机端策略。
+
 ## 3. WebSocket 握手
 
 连接绑定响应中的 `websocket_url`，必须发送：

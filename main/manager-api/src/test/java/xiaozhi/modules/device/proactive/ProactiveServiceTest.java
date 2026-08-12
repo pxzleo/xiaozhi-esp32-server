@@ -18,6 +18,7 @@ import static org.mockito.Mockito.when;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.time.LocalTime;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
@@ -179,6 +180,38 @@ class ProactiveServiceTest {
 
         assertEquals(Mode.ACTIVE, view.mode());
         assertEquals(5, view.dailyLimit());
+    }
+
+    @Test
+    void quietHoursUseNarrowVersionCasAndPreserveOtherPreferenceFields() {
+        ProactivePreferenceEntity before = preference(Mode.ACTIVE, 2);
+        before.setVersion(4);
+        ProactivePreferenceEntity after = preference(Mode.ACTIVE, 2);
+        after.setVersion(5);
+        after.setQuietStart(LocalTime.of(23, 0));
+        after.setQuietEnd(LocalTime.of(6, 30));
+        when(preferenceDao.selectById("device-1")).thenReturn(before, after);
+        when(preferenceDao.updateQuietHoursCas(eq("device-1"), eq(4),
+                eq(LocalTime.of(23, 0)), eq(LocalTime.of(6, 30)), any())).thenReturn(1);
+
+        var view = service.updateQuietHours(7L, "device-1", LocalTime.of(23, 0), LocalTime.of(6, 30));
+
+        assertEquals(Mode.ACTIVE, view.mode());
+        assertEquals(2, view.dailyLimit());
+        assertEquals(LocalTime.of(23, 0), view.quietStart());
+        verify(preferenceDao, never()).updateById(before);
+    }
+
+    @Test
+    void quietHoursRejectConcurrentWebUpdateInsteadOfOverwritingIt() {
+        ProactivePreferenceEntity before = preference(Mode.ACTIVE, 2);
+        before.setVersion(4);
+        when(preferenceDao.selectById("device-1")).thenReturn(before);
+        when(preferenceDao.updateQuietHoursCas(eq("device-1"), eq(4), any(), any(), any()))
+                .thenReturn(0);
+
+        assertThrows(RenException.class, () -> service.updateQuietHours(
+                7L, "device-1", LocalTime.of(23, 0), LocalTime.of(6, 30)));
     }
 
     @Test

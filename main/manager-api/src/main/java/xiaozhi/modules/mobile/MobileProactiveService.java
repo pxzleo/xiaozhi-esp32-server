@@ -1,5 +1,7 @@
 package xiaozhi.modules.mobile;
 
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
@@ -15,6 +17,7 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.DeliveryStatus;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Outcome;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 import xiaozhi.modules.device.proactive.ProactiveMonitorService;
+import xiaozhi.modules.device.proactive.ProactivePreferenceConflictException;
 import xiaozhi.modules.device.proactive.ProactiveService;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.ClaimRequest;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.ClaimResponse;
@@ -23,6 +26,8 @@ import xiaozhi.modules.mobile.MobileProactiveDTOs.CompleteResponse;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.Followup;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.ExternalContext;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.PendingResponse;
+import xiaozhi.modules.mobile.MobileProactiveDTOs.QuietHoursRequest;
+import xiaozhi.modules.mobile.MobileProactiveDTOs.QuietHoursResponse;
 
 @Service
 public class MobileProactiveService {
@@ -48,6 +53,43 @@ public class MobileProactiveService {
             throw new MobileApiException(HttpStatus.SERVICE_UNAVAILABLE,
                     "PROACTIVE_PENDING_UNAVAILABLE", "主动提醒探测暂时不可用");
         }
+    }
+
+    public QuietHoursResponse quietHours(MobileEventService.MobileAuth auth) {
+        MobileInstanceEntity instance = authenticate(auth);
+        return quietHoursResponse(proactiveService.getPreference(
+                instance.getUserId(), instance.getDeviceId()));
+    }
+
+    public QuietHoursResponse updateQuietHours(MobileEventService.MobileAuth auth,
+            QuietHoursRequest request) {
+        requireVersion(request.version);
+        MobileInstanceEntity instance = authenticate(auth);
+        try {
+            return quietHoursResponse(proactiveService.updateQuietHours(instance.getUserId(),
+                    instance.getDeviceId(), parseTime(request.quietStart), parseTime(request.quietEnd)));
+        } catch (ProactivePreferenceConflictException error) {
+            throw new MobileApiException(HttpStatus.CONFLICT, "PROACTIVE_PREFERENCE_CONFLICT",
+                    "主动助理配置已变化，请重新读取后再保存");
+        } catch (RenException error) {
+            throw new MobileApiException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "PROACTIVE_PREFERENCE_UNAVAILABLE", "主动助理安静时段暂时无法保存");
+        }
+    }
+
+    private QuietHoursResponse quietHoursResponse(
+            xiaozhi.modules.device.proactive.ProactiveDTOs.PreferenceView preference) {
+        return new QuietHoursResponse(1, formatTime(preference.quietStart()),
+                formatTime(preference.quietEnd()),
+                preference.updatedAt().getTime());
+    }
+
+    private LocalTime parseTime(String value) {
+        return value == null ? null : LocalTime.parse(value, DateTimeFormatter.ofPattern("HH:mm"));
+    }
+
+    private String formatTime(LocalTime value) {
+        return value == null ? null : value.format(DateTimeFormatter.ofPattern("HH:mm"));
     }
 
     @Transactional

@@ -2,6 +2,7 @@ package xiaozhi.modules.mobile;
 
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonSetter;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
@@ -31,6 +32,32 @@ public final class MobileProactiveDTOs {
                     envelope.retryAfterSeconds());
         }
     }
+
+    public static final class QuietHoursRequest extends StrictRequest {
+        public int version;
+        private boolean quietStartPresent;
+        private boolean quietEndPresent;
+        @Pattern(regexp = "^([01][0-9]|2[0-3]):[0-5][0-9]$")
+        public String quietStart;
+        @Pattern(regexp = "^([01][0-9]|2[0-3]):[0-5][0-9]$")
+        public String quietEnd;
+
+        @JsonSetter("quiet_start")
+        public void setQuietStart(String value) { quietStartPresent = true; quietStart = value; }
+        @JsonSetter("quiet_end")
+        public void setQuietEnd(String value) { quietEndPresent = true; quietEnd = value; }
+
+        @AssertTrue(message = "安静时段必须同时提供起止时间且不能相同")
+        public boolean isQuietWindowValid() {
+            return quietStartPresent && quietEndPresent && (quietStart == null && quietEnd == null
+                    || quietStart != null && quietEnd != null && !quietStart.equals(quietEnd));
+        }
+    }
+
+    public record QuietHoursResponse(int version,
+            @JsonProperty("quiet_start") String quietStart,
+            @JsonProperty("quiet_end") String quietEnd,
+            @JsonProperty("updated_at") long updatedAt) {}
 
     public static final class ClaimRequest extends StrictRequest {
         public int version;

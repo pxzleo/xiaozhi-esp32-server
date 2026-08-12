@@ -1,6 +1,7 @@
 package xiaozhi.modules.mobile;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Method;
@@ -11,6 +12,7 @@ import java.util.Arrays;
 import org.apache.ibatis.annotations.Update;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 
 import jakarta.validation.Validation;
@@ -34,6 +36,14 @@ class MobileProactiveContractTest {
                 .contains("/mobile/proactive/{eventId}:claim"));
         assertTrue(Arrays.asList(complete.getAnnotation(PostMapping.class).value())
                 .contains("/mobile/proactive/{eventId}:complete"));
+        Method quietGet = Arrays.stream(MobileProactiveController.class.getMethods())
+                .filter(method -> method.getName().equals("quietHours")).findFirst().orElseThrow();
+        Method quietPut = Arrays.stream(MobileProactiveController.class.getMethods())
+                .filter(method -> method.getName().equals("updateQuietHours")).findFirst().orElseThrow();
+        assertTrue(Arrays.asList(quietGet.getAnnotation(GetMapping.class).value())
+                .contains("/mobile/proactive/quiet-hours"));
+        assertTrue(Arrays.asList(quietPut.getAnnotation(PutMapping.class).value())
+                .contains("/mobile/proactive/quiet-hours"));
         var fields = Arrays.stream(MobileProactiveDTOs.PendingResponse.class.getRecordComponents())
                 .map(java.lang.reflect.RecordComponent::getName).toList();
         assertFalse(fields.contains("title"));
@@ -77,6 +87,31 @@ class MobileProactiveContractTest {
             assertFalse(factory.getValidator().validate(request).isEmpty());
             request.claimToken = "123e4567-e89b-42d3-a456-426614174000";
             assertTrue(factory.getValidator().validate(request).isEmpty());
+        }
+    }
+
+    @Test
+    void quietHoursRequireBothValidDifferentValues() throws Exception {
+        try (var factory = Validation.buildDefaultValidatorFactory()) {
+            var mapper = new ObjectMapper();
+            var missing = mapper.readValue("{\"version\":1}", MobileProactiveDTOs.QuietHoursRequest.class);
+            assertFalse(factory.getValidator().validate(missing).isEmpty());
+            var request = new MobileProactiveDTOs.QuietHoursRequest();
+            request.version = 1;
+            request.setQuietStart("22:00");
+            assertFalse(factory.getValidator().validate(request).isEmpty());
+            request.setQuietEnd("07:00");
+            assertTrue(factory.getValidator().validate(request).isEmpty());
+            request.setQuietEnd("22:00");
+            assertFalse(factory.getValidator().validate(request).isEmpty());
+            var clear = mapper.readValue(
+                    "{\"version\":1,\"quiet_start\":null,\"quiet_end\":null}",
+                    MobileProactiveDTOs.QuietHoursRequest.class);
+            assertTrue(factory.getValidator().validate(clear).isEmpty());
+            assertThrows(com.fasterxml.jackson.databind.JsonMappingException.class,
+                    () -> mapper.readValue(
+                            "{\"version\":1,\"quiet_start\":null,\"quiet_end\":null,\"extra\":1}",
+                            MobileProactiveDTOs.QuietHoursRequest.class));
         }
     }
 

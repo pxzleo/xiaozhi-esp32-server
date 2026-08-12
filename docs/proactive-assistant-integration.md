@@ -85,6 +85,7 @@ Python 严格要求 params 恰好包含 `version/event_id/speak`，任何设备�
 manager-web 在设备管理列表的单台设备操作区提供“主动助理”入口，使用同一弹窗分为设置、外界监测、事件审计和习惯四个区域：
 
 - 设置区可修改主动程度、每日上限、安静时段及主题 allow/block，并可启用“今日静默”。表单必须执行与 manager-api 相同的模式额度、安静时段成对及主题互斥校验。
+- Android 不再维护独立的固定安静时段，也不在本地再次按时间过滤事件。手机设置页通过 `GET/PUT /mobile/proactive/quiet-hours` 读写设备绑定智能体对应的同一条主动助理偏好；Web 与 App 因而共享 `quiet_start/quiet_end`。两端都清除时表示不设安静时段。手机仍保留静音模式、锁屏敏感内容和音频焦点等本地播放安全检查。
 - 事件区支持按主题、事件类型和投递状态筛选及分页，只展示结构化的 `reason`、`delivery_status`、`outcome` 和时间，不展示 payload 或自由推理内容。
 - 习惯区展示受控习惯类型、证据次数、状态和最近观察时间，并允许删除本人设备的记录。
 - 外界监测区严格使用 `GET|PUT /device/proactive/monitors/{deviceId}`。常用区提供天气/新闻开关、均衡（30/10 分钟）/及时（10/5 分钟）/省资源（60/30 分钟）档位，以及继承地点、运行状态、上次成功、下次执行、最近错误和设备最近探测时间。继承地点只读取响应顶层权威 `weather_location`；该值由 manager-api 直接解析设备绑定智能体的 `get_weather.param_info.default_location`，不依赖首次监测基线。`weather_location_error` 使用受控错误码区分未绑定智能体、插件缺失/重复、配置无效和默认城市缺失/无效；Web 显示明确配置错误且不猜测城市。worker 后续的城市解析或天气 API 权限错误继续显示在 `weather.last_error_code`，与静态配置错误分离。

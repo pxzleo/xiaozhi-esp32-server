@@ -6,6 +6,7 @@ import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
@@ -18,6 +19,8 @@ import xiaozhi.modules.mobile.MobileProactiveDTOs.ClaimResponse;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.CompleteRequest;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.CompleteResponse;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.PendingResponse;
+import xiaozhi.modules.mobile.MobileProactiveDTOs.QuietHoursRequest;
+import xiaozhi.modules.mobile.MobileProactiveDTOs.QuietHoursResponse;
 
 @RestController
 @Validated
@@ -32,6 +35,28 @@ public class MobileProactiveController {
             @RequestHeader("Mobile-Credential-Version") int credentialVersion,
             @RequestHeader("Mobile-Protocol-Version") int protocolVersion) {
         return service.pending(auth(authorization, instanceId, installationId, credentialVersion, protocolVersion));
+    }
+
+    @GetMapping("/mobile/proactive/quiet-hours")
+    public QuietHoursResponse quietHours(@RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,
+            @RequestHeader("Mobile-Instance-Id") String instanceId,
+            @RequestHeader("Client-Id") String installationId,
+            @RequestHeader("Mobile-Credential-Version") int credentialVersion,
+            @RequestHeader("Mobile-Protocol-Version") int protocolVersion) {
+        return service.quietHours(auth(authorization, instanceId, installationId,
+                credentialVersion, protocolVersion));
+    }
+
+    @PutMapping("/mobile/proactive/quiet-hours")
+    public QuietHoursResponse updateQuietHours(
+            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,
+            @RequestHeader("Mobile-Instance-Id") String instanceId,
+            @RequestHeader("Client-Id") String installationId,
+            @RequestHeader("Mobile-Credential-Version") int credentialVersion,
+            @RequestHeader("Mobile-Protocol-Version") int protocolVersion,
+            @Valid @RequestBody QuietHoursRequest request) {
+        return service.updateQuietHours(auth(authorization, instanceId, installationId,
+                credentialVersion, protocolVersion), request);
     }
 
     @PostMapping("/mobile/proactive/{eventId}:claim")

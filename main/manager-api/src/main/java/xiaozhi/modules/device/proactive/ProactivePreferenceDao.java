@@ -1,5 +1,6 @@
 package xiaozhi.modules.device.proactive;
 
+import java.time.LocalTime;
 import java.util.Date;
 
 import org.apache.ibatis.annotations.Insert;
@@ -63,6 +64,17 @@ public interface ProactivePreferenceDao extends BaseMapper<ProactivePreferenceEn
     int normalizeLegacyPreviousAggressiveLimit(@Param("deviceId") String deviceId,
             @Param("expectedDailyLimit") Integer expectedDailyLimit,
             @Param("expectedVersion") Integer expectedVersion, @Param("now") Date now);
+
+    @Update("""
+            UPDATE ai_device_proactive_preference
+            SET quiet_start = #{quietStart}, quiet_end = #{quietEnd},
+                version = version + 1, updated_at = #{now}
+            WHERE device_id = #{deviceId} AND version = #{expectedVersion}
+            """)
+    int updateQuietHoursCas(@Param("deviceId") String deviceId,
+            @Param("expectedVersion") Integer expectedVersion,
+            @Param("quietStart") LocalTime quietStart, @Param("quietEnd") LocalTime quietEnd,
+            @Param("now") Date now);
 
     @Select("""
             SELECT * FROM ai_device_proactive_preference

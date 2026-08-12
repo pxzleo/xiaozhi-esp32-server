@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -112,6 +113,24 @@ public class ProactiveService {
     @Transactional
     public PreferenceView updatePreference(Long userId, String deviceId, PreferenceUpdate request) {
         return updatePreference(requireOwned(userId, deviceId), request);
+    }
+
+    @Transactional
+    public PreferenceView updateQuietHours(Long userId, String deviceId,
+            LocalTime quietStart, LocalTime quietEnd) {
+        if ((quietStart == null) != (quietEnd == null)
+                || quietStart != null && quietStart.equals(quietEnd)) {
+            throw new RenException("安静时段必须同时提供起止时间且不能相同");
+        }
+        DeviceEntity device = requireOwned(userId, deviceId);
+        ProactivePreferenceEntity entity = preferenceEntity(device);
+        if (preferenceDao.updateQuietHoursCas(device.getId(), entity.getVersion(), quietStart, quietEnd,
+                new Date()) != 1) {
+            throw new ProactivePreferenceConflictException();
+        }
+        ProactivePreferenceEntity updated = preferenceDao.selectById(device.getId());
+        if (updated == null) throw new RenException("主动助理安静时段更新后读取失败");
+        return toPreference(updated);
     }
 
     @Transactional
