@@ -209,6 +209,8 @@ class MobileMigrationTest {
                 .getMethod("supersedeUndeliveredMobileAlerts", String.class, String.class)
                 .getAnnotation(Update.class).value());
         assertTrue(dismiss.contains("source.delivery_group_key=copies.delivery_group_key"));
+        assertTrue(dismiss.contains("canonical.device_id=source.device_id"));
+        assertTrue(dismiss.contains("copies_device.user_id=source_device.user_id"));
         assertTrue(dismiss.contains("copies.delivery_status IN ('PENDING','CLAIMED')"));
         assertTrue(dismiss.contains("WHEN copies.delivery_status='PENDING' THEN 'DISMISSED'"));
         assertTrue(dismiss.contains("WHEN copies.delivery_status='CLAIMED' THEN CURRENT_TIMESTAMP(3)"));
@@ -225,6 +227,7 @@ class MobileMigrationTest {
                 Long.class, Long.class)
                 .getAnnotation(Select.class).value());
         for (String sql : java.util.List.of(page, count)) {
+            assertTrue(sql.contains("p.device_id=canonical.device_id"));
             assertTrue(sql.contains("p.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'"));
             assertTrue(sql.contains("p.delivery_status = 'DELIVERED' THEN 'DELIVERED'"));
             assertTrue(sql.contains("p.delivery_status IN ('FAILED','DISMISSED')"));
@@ -250,7 +253,7 @@ class MobileMigrationTest {
             int sharedClaim = sql.indexOf("COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'");
             assertTrue(linkedTerminal >= 0 && sharedClaim > linkedTerminal,
                     "当前关联副本终态必须先于共享领取账本派生");
-            assertTrue(sql.indexOf("dc.delivery_status = 'DELIVERED' THEN 'DELIVERED'")
+            assertTrue(sql.indexOf("dc.delivery_status = 'DELIVERED'")
                     < linkedTerminal, "同用户真实投递账本必须优先于迁移后的 DISMISSED 来源副本");
         }
     }
@@ -282,5 +285,27 @@ class MobileMigrationTest {
         assertTrue(latest.contains("processing_status IN ('received','error')"));
         assertTrue(latest.contains("THEN event_state"));
         assertTrue(latest.contains("THEN processing_status"));
+    }
+
+    @Test
+    void deliveredGroupMigrationDismissesResidualCopiesWithinSameUser() throws Exception {
+        try (var stream = getClass().getResourceAsStream("/db/changelog/202608121800.sql")) {
+            assertTrue(stream != null);
+            String sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            assertTrue(sql.contains("INSERT INTO ai_proactive_delivery_claim"));
+            assertTrue(sql.contains("GROUP BY d2.user_id, e2.delivery_group_key"));
+            assertTrue(sql.contains("e2.delivery_status='DELIVERED'"));
+            assertTrue(sql.contains("ON DUPLICATE KEY UPDATE"));
+            assertTrue(sql.contains("ON DUPLICATE KEY UPDATE user_id=user_id"));
+            assertFalse(sql.contains("ON DUPLICATE KEY UPDATE\n  delivery_status='DELIVERED'"));
+            assertTrue(sql.contains("dc.delivery_status='DELIVERED'"));
+            assertTrue(sql.contains("dc.user_id=d.user_id"));
+            assertTrue(sql.contains("dc.delivery_group_key=e.delivery_group_key"));
+            assertTrue(sql.contains("e.delivery_status IN ('PENDING','CLAIMED')"));
+            assertTrue(sql.contains("e.delivery_status='DISMISSED'"));
+            assertTrue(sql.contains("e.claim_token=NULL"));
+            assertTrue(sql.contains("e.delivery_group_window_hours=0"));
+            assertTrue(sql.contains("e.created_at < DATE_ADD(dc.event_created_at"));
+        }
     }
 }

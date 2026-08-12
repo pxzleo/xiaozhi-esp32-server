@@ -873,3 +873,11 @@ databaseChangeLog:
             path: classpath:db/changelog/202608121700.sql
             encoding: UTF-8
             splitStatements: true
+  - changeSet:
+      id: 202608121800
+      author: xu
+      changes:
+        - sqlFile:
+            path: classpath:db/changelog/202608121800.sql
+            encoding: UTF-8
+            splitStatements: true

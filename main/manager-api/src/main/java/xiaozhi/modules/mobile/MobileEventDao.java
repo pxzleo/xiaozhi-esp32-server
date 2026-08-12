@@ -40,9 +40,18 @@ public interface MobileEventDao {
 
     @Update("""
             UPDATE ai_device_proactive_event copies
+            INNER JOIN ai_device copies_device ON copies_device.id=copies.device_id
             INNER JOIN ai_device_proactive_event source
                 ON source.delivery_group_key=copies.delivery_group_key
-            INNER JOIN ai_mobile_instance mi ON mi.device_id=source.device_id
+            INNER JOIN ai_mobile_instance mi
+                ON mi.mobile_instance_id=#{instanceId}
+            INNER JOIN ai_mobile_instance canonical
+                ON canonical.mobile_instance_id=mi.canonical_instance_id
+               AND canonical.device_id=source.device_id
+            INNER JOIN ai_device source_device
+                ON source_device.id=source.device_id
+               AND source_device.user_id=mi.user_id
+               AND copies_device.user_id=source_device.user_id
             INNER JOIN ai_mobile_event me
                 ON me.mobile_instance_id=mi.mobile_instance_id
                AND me.proactive_event_id=source.event_id
@@ -189,22 +198,27 @@ public interface MobileEventDao {
                        AS processed_at_epoch_millis,
                    e.proactive_event_id,
                    LOWER(CASE
-                     WHEN dc.delivery_status = 'DELIVERED' THEN 'DELIVERED'
                      WHEN p.delivery_status = 'DELIVERED' THEN 'DELIVERED'
+                     WHEN dc.delivery_status = 'DELIVERED'
+                       AND (p.delivery_group_window_hours=0
+                         OR (dc.event_created_at IS NOT NULL AND p.created_at &lt; DATE_ADD(
+                           dc.event_created_at, INTERVAL p.delivery_group_window_hours HOUR)))
+                       THEN 'DELIVERED'
                      WHEN p.expires_at IS NOT NULL AND p.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
                      WHEN p.delivery_status IN ('FAILED','DISMISSED') THEN p.delivery_status
                      WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
                        AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL
                          OR COALESCE(dc.claimed_at,p.claimed_at) &lt; DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
                        THEN 'PENDING'
-                     ELSE COALESCE(dc.delivery_status,p.delivery_status)
+                     ELSE CASE WHEN dc.delivery_status='DELIVERED'
+                               THEN p.delivery_status ELSE COALESCE(dc.delivery_status,p.delivery_status) END
                    END) AS delivery_status
             FROM ai_mobile_event e
             INNER JOIN ai_mobile_instance mi ON mi.mobile_instance_id=e.mobile_instance_id
                 AND mi.user_id=#{userId}
             INNER JOIN ai_mobile_instance canonical
                 ON canonical.mobile_instance_id=mi.canonical_instance_id
-            LEFT JOIN ai_device_proactive_event p ON p.device_id=mi.device_id
+            LEFT JOIN ai_device_proactive_event p ON p.device_id=canonical.device_id
                 AND p.event_id=e.proactive_event_id
             LEFT JOIN ai_proactive_delivery_claim dc ON dc.user_id=mi.user_id
                 AND dc.delivery_group_key=p.delivery_group_key
@@ -212,15 +226,20 @@ public interface MobileEventDao {
               <if test="type != null">AND e.event_type=#{type}</if>
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
               <if test="deliveryStatus != null">AND (CASE
-                WHEN dc.delivery_status = 'DELIVERED' THEN 'DELIVERED'
                 WHEN p.delivery_status = 'DELIVERED' THEN 'DELIVERED'
+                WHEN dc.delivery_status = 'DELIVERED'
+                  AND (p.delivery_group_window_hours=0
+                    OR (dc.event_created_at IS NOT NULL AND p.created_at &lt; DATE_ADD(
+                      dc.event_created_at, INTERVAL p.delivery_group_window_hours HOUR)))
+                  THEN 'DELIVERED'
                 WHEN p.expires_at IS NOT NULL AND p.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
                 WHEN p.delivery_status IN ('FAILED','DISMISSED') THEN p.delivery_status
                 WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
                   AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL
                     OR COALESCE(dc.claimed_at,p.claimed_at) &lt; DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
                   THEN 'PENDING'
-                ELSE COALESCE(dc.delivery_status,p.delivery_status)
+                ELSE CASE WHEN dc.delivery_status='DELIVERED'
+                          THEN p.delivery_status ELSE COALESCE(dc.delivery_status,p.delivery_status) END
               END)=#{deliveryStatus}</if>
               <if test="fromEpochMillis != null">AND e.occurred_at &gt;=
                 TIMESTAMPADD(MICROSECOND, #{fromEpochMillis} * 1000, '1970-01-01 08:00:00')</if>
@@ -241,7 +260,9 @@ public interface MobileEventDao {
             SELECT COUNT(*) FROM ai_mobile_event e
             INNER JOIN ai_mobile_instance mi ON mi.mobile_instance_id=e.mobile_instance_id
                 AND mi.user_id=#{userId}
-            LEFT JOIN ai_device_proactive_event p ON p.device_id=mi.device_id
+            INNER JOIN ai_mobile_instance canonical
+                ON canonical.mobile_instance_id=mi.canonical_instance_id
+            LEFT JOIN ai_device_proactive_event p ON p.device_id=canonical.device_id
                 AND p.event_id=e.proactive_event_id
             LEFT JOIN ai_proactive_delivery_claim dc ON dc.user_id=mi.user_id
                 AND dc.delivery_group_key=p.delivery_group_key
@@ -249,15 +270,20 @@ public interface MobileEventDao {
               <if test="type != null">AND e.event_type=#{type}</if>
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
               <if test="deliveryStatus != null">AND (CASE
-                WHEN dc.delivery_status = 'DELIVERED' THEN 'DELIVERED'
                 WHEN p.delivery_status = 'DELIVERED' THEN 'DELIVERED'
+                WHEN dc.delivery_status = 'DELIVERED'
+                  AND (p.delivery_group_window_hours=0
+                    OR (dc.event_created_at IS NOT NULL AND p.created_at &lt; DATE_ADD(
+                      dc.event_created_at, INTERVAL p.delivery_group_window_hours HOUR)))
+                  THEN 'DELIVERED'
                 WHEN p.expires_at IS NOT NULL AND p.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
                 WHEN p.delivery_status IN ('FAILED','DISMISSED') THEN p.delivery_status
                 WHEN COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'
                   AND (COALESCE(dc.claimed_at,p.claimed_at) IS NULL
                     OR COALESCE(dc.claimed_at,p.claimed_at) &lt; DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
                   THEN 'PENDING'
-                ELSE COALESCE(dc.delivery_status,p.delivery_status)
+                ELSE CASE WHEN dc.delivery_status='DELIVERED'
+                          THEN p.delivery_status ELSE COALESCE(dc.delivery_status,p.delivery_status) END
               END)=#{deliveryStatus}</if>
               <if test="fromEpochMillis != null">AND e.occurred_at &gt;=
                 TIMESTAMPADD(MICROSECOND, #{fromEpochMillis} * 1000, '1970-01-01 08:00:00')</if>

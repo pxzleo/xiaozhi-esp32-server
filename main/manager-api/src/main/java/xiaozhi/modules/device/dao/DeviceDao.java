@@ -26,6 +26,19 @@ public interface DeviceDao extends BaseMapper<DeviceEntity> {
     List<DeviceEntity> selectByAgentIdForUpdate(@Param("agentId") String agentId);
 
     @Select("""
+            SELECT d.* FROM ai_device d
+            INNER JOIN ai_mobile_instance source
+              ON source.mobile_instance_id=#{mobileInstanceId} AND source.user_id=#{userId}
+            LEFT JOIN ai_mobile_instance target_mobile ON target_mobile.device_id=d.id
+            WHERE d.user_id=#{userId} AND d.agent_id=#{agentId}
+              AND (target_mobile.mobile_instance_id IS NULL
+                   OR target_mobile.mobile_instance_id=source.canonical_instance_id)
+            FOR UPDATE
+            """)
+    List<DeviceEntity> selectMobileAlertTargetsForUpdate(@Param("userId") Long userId,
+            @Param("agentId") String agentId, @Param("mobileInstanceId") String mobileInstanceId);
+
+    @Select("""
             SELECT d.id, d.user_id, d.mac_address,
                    CASE WHEN mi.mobile_instance_id IS NULL THEN d.last_connected_at ELSE COALESCE((
                      SELECT MAX(COALESCE(member.last_connected_at, member_device.last_connected_at))

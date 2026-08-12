@@ -82,6 +82,7 @@ class ProactiveServiceTest {
         when(deliveryClaimDao.insertIfAbsent(any(), any())).thenReturn(1);
         when(deliveryClaimDao.claim(any(), any(), any(), any(), any(), any(), anyInt())).thenReturn(1);
         when(deliveryClaimDao.complete(any(), any(), any(), any(), any())).thenReturn(1);
+        when(deliveryClaimDao.completeUnclaimed(any(), any(), any(), any(), any(), anyInt())).thenReturn(1);
     }
 
     @Test
@@ -433,14 +434,16 @@ class ProactiveServiceTest {
     @Test
     void controlledMobileAlertUsesRolling24HourLedgerAndPublicEntryRejectsIt() {
         String mobileId = "mob_0123456789abcdef0123456789abcdef";
+        String canonicalMobileId = "mob_fedcba9876543210fedcba9876543210";
         String dedupeKey = "sha256:" + "a".repeat(64);
-        device.setMacAddress(mobileId);
+        device.setMacAddress(canonicalMobileId);
         DeviceEntity speaker = new DeviceEntity();
         speaker.setId("device-2");
         speaker.setMacAddress("11:22:33:44:55:77");
         speaker.setUserId(7L);
         speaker.setAgentId("agent-1");
-        when(deviceDao.selectByAgentIdForUpdate("agent-1")).thenReturn(List.of(device, speaker));
+        when(deviceDao.selectMobileAlertTargetsForUpdate(7L, "agent-1", mobileId))
+                .thenReturn(List.of(device, speaker));
         Map<String, String> recentEventIds = new ConcurrentHashMap<>();
         Map<String, ProactiveEventEntity> stored = new ConcurrentHashMap<>();
         when(eventDedupeDao.selectForUpdate(any(), eq("MOBILE_ALERT"), any()))
@@ -482,10 +485,78 @@ class ProactiveServiceTest {
                         && !event.getPayload().contains("token")));
         assertEquals(1, stored.values().stream().map(ProactiveEventEntity::getDeliveryGroupKey)
                 .distinct().count());
+        verify(deviceDao, times(2)).selectMobileAlertTargetsForUpdate(7L, "agent-1", mobileId);
+        verify(deviceDao, never()).selectByAgentIdForUpdate("agent-1");
 
         EventUpsert publicRequest = eventRequest();
         publicRequest.setEventType(EventType.MOBILE_ALERT);
         assertThrows(RenException.class, () -> service.upsertEvent(publicRequest));
+    }
+
+    @Test
+    void mobileAlertRejectsMultipleCanonicalMobileTargets() {
+        String sourceId = "mob_0123456789abcdef0123456789abcdef";
+        DeviceEntity secondMobile = new DeviceEntity();
+        secondMobile.setId("device-mobile-2");
+        secondMobile.setMacAddress("mob_11111111111111111111111111111111");
+        secondMobile.setUserId(7L);
+        secondMobile.setAgentId("agent-1");
+        device.setMacAddress("mob_22222222222222222222222222222222");
+        when(deviceDao.selectMobileAlertTargetsForUpdate(7L, "agent-1", sourceId))
+                .thenReturn(List.of(device, secondMobile));
+        when(eventDedupeDao.selectForUpdate(any(), eq("MOBILE_ALERT"), any()))
+                .thenReturn(new ProactiveEventDedupeEntity());
+        when(eventDao.insertIfAbsent(any())).thenReturn(1);
+        when(eventDao.selectByDeviceAndEventIdForUpdate(any(), any())).thenAnswer(call -> {
+            ProactiveEventEntity event = new ProactiveEventEntity();
+            event.setDeviceId(call.getArgument(0));
+            event.setEventId(call.getArgument(1));
+            event.setEventType("MOBILE_ALERT");
+            event.setTopic("SYSTEM");
+            event.setPriority("HIGH");
+            event.setReason("mobile_event_classified");
+            event.setPayload("{\"title\":\"提醒\",\"summary\":\"摘要\",\"source\":\"app\",\"category\":\"security\"}");
+            event.setCreatedAt(new Date(1_000));
+            event.setExpiresAt(new Date(2_000));
+            event.setDedupeKey("sha256:" + "b".repeat(64));
+            event.setRequiresResponse(false);
+            event.setDeliveryStatus("PENDING");
+            event.setOutcome("NONE");
+            return event;
+        });
+        when(eventDedupeDao.markCreated(any(), any(), any(), any())).thenReturn(1);
+
+        assertThrows(RenException.class, () -> service.createMobileAlert(sourceId, 7L, "agent-1",
+                "evt-1", "sha256:" + "b".repeat(64), "提醒", "摘要", "app", "security",
+                Priority.HIGH, new Date(1_000), new Date(2_000)));
+    }
+
+    @Test
+    void deliveredClaimDismissesPendingAndClaimedSiblingCopies() {
+        EventStatusUpdate update = new EventStatusUpdate();
+        update.setMacAddress(device.getMacAddress());
+        update.setDeliveryStatus(DeliveryStatus.DELIVERED);
+        update.setOutcome(Outcome.ACKNOWLEDGED);
+        update.setClaimToken("claim-token");
+        ProactiveEventEntity claimed = eventEntity(eventRequest());
+        claimed.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
+        claimed.setClaimToken("claim-token");
+        claimed.setDeliveryGroupKey("group-key");
+        ProactiveEventEntity delivered = eventEntity(eventRequest());
+        delivered.setDeliveryStatus(DeliveryStatus.DELIVERED.name());
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(claimed);
+        when(eventDao.updateStatusCas(eq("device-1"), eq("event-1"), eq("CLAIMED"),
+                eq("claim-token"), eq("DELIVERED"), eq("ACKNOWLEDGED"), any())).thenReturn(1);
+        when(eventDao.dismissSiblingCopiesAfterDelivery(7L, "group-key", claimed.getCreatedAt(), 24))
+                .thenReturn(3);
+        when(eventDao.selectByDeviceAndEventId("device-1", "event-1")).thenReturn(delivered);
+
+        service.updateEventStatus("event-1", update);
+
+        verify(deliveryClaimDao).complete(eq(7L), eq("group-key"), eq("claim-token"),
+                eq("DELIVERED"), any());
+        verify(eventDao).dismissSiblingCopiesAfterDelivery(7L, "group-key", claimed.getCreatedAt(), 24);
     }
 
     @Test
@@ -657,6 +728,7 @@ class ProactiveServiceTest {
         update.setDeliveryStatus(DeliveryStatus.DELIVERED);
         update.setOutcome(Outcome.ACKNOWLEDGED);
         ProactiveEventEntity pending = eventEntity(eventRequest());
+        pending.setDeliveryGroupKey("group-key");
         ProactiveEventEntity delivered = eventEntity(eventRequest());
         delivered.setDeliveryStatus(DeliveryStatus.DELIVERED.name());
         when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
@@ -669,6 +741,9 @@ class ProactiveServiceTest {
 
         verify(eventDao).updateStatusCas(eq("device-1"), eq("event-1"), eq("PENDING"),
                 eq(null), eq("DELIVERED"), eq("ACKNOWLEDGED"), any());
+        verify(deliveryClaimDao).completeUnclaimed(7L, "group-key", "device-1", "event-1",
+                pending.getCreatedAt(), 24);
+        verify(eventDao).dismissSiblingCopiesAfterDelivery(7L, "group-key", pending.getCreatedAt(), 24);
     }
 
     @Test
@@ -1068,6 +1143,34 @@ class ProactiveServiceTest {
         assertEquals("device-1", page.getList().get(0).deviceId());
         assertEquals(device.getMacAddress(), page.getList().get(0).macAddress());
         assertEquals("alias-event", page.getList().get(0).eventId());
+    }
+
+    @Test
+    void proactiveAuditUsesSharedDeliveredStatusForResidualCopy() {
+        ProactiveEventEntity residual = eventEntity(eventRequest());
+        residual.setDeliveryStatus(DeliveryStatus.PENDING.name());
+        residual.setEffectiveDeliveryStatus(DeliveryStatus.DELIVERED.name());
+        when(eventDao.pageForUser(7L, "device-1", null, null, null, 20, 0))
+                .thenReturn(List.of(residual));
+        when(eventDao.countForUser(7L, "device-1", null, null, null)).thenReturn(1L);
+
+        var page = service.events(7L, "device-1", null, null, null, 1, 20);
+
+        assertEquals(DeliveryStatus.DELIVERED, page.getList().get(0).deliveryStatus());
+    }
+
+    @Test
+    void rollingWindowAuditKeepsNewerPendingGenerationPending() {
+        ProactiveEventEntity newer = eventEntity(eventRequest());
+        newer.setDeliveryStatus(DeliveryStatus.PENDING.name());
+        newer.setEffectiveDeliveryStatus(DeliveryStatus.PENDING.name());
+        when(eventDao.pageForUser(7L, "device-1", null, null, null, 20, 0))
+                .thenReturn(List.of(newer));
+        when(eventDao.countForUser(7L, "device-1", null, null, null)).thenReturn(1L);
+
+        var page = service.events(7L, "device-1", null, null, null, 1, 20);
+
+        assertEquals(DeliveryStatus.PENDING, page.getList().get(0).deliveryStatus());
     }
 
     private ProactivePreferenceEntity preference(Mode mode, int limit) {

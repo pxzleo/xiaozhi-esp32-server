@@ -52,4 +52,20 @@ public interface ProactiveDeliveryClaimDao {
     int complete(@Param("userId") Long userId, @Param("groupKey") String groupKey,
             @Param("claimToken") String claimToken, @Param("status") String status,
             @Param("now") Date now);
+
+    @Update("""
+            UPDATE ai_proactive_delivery_claim
+            SET delivery_status='DELIVERED', claim_token=NULL, claimed_at=NULL,
+                device_id=#{deviceId}, event_id=#{eventId}, event_created_at=#{eventCreatedAt},
+                updated_at=CURRENT_TIMESTAMP(3)
+            WHERE user_id=#{userId} AND delivery_group_key=#{groupKey}
+              AND (delivery_status IN ('PENDING','FAILED')
+                   OR (delivery_status='DELIVERED' AND #{windowHours} > 0
+                       AND event_created_at IS NOT NULL
+                       AND #{eventCreatedAt} >= DATE_ADD(event_created_at,
+                           INTERVAL #{windowHours} HOUR)))
+            """)
+    int completeUnclaimed(@Param("userId") Long userId, @Param("groupKey") String groupKey,
+            @Param("deviceId") String deviceId, @Param("eventId") String eventId,
+            @Param("eventCreatedAt") Date eventCreatedAt, @Param("windowHours") int windowHours);
 }

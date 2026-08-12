@@ -107,10 +107,41 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
     int releaseClaim(@Param("deviceId") String deviceId, @Param("eventId") String eventId,
             @Param("claimToken") String claimToken);
 
+    @Update("""
+            UPDATE ai_device_proactive_event e
+            INNER JOIN ai_device d ON d.id=e.device_id AND d.user_id=#{userId}
+            SET e.delivery_status='DISMISSED', e.outcome='DISMISSED',
+                e.claim_token=NULL, e.claimed_at=NULL, e.updated_at=CURRENT_TIMESTAMP(3)
+            WHERE e.delivery_group_key=#{groupKey}
+              AND e.delivery_status IN ('PENDING','CLAIMED')
+              AND (#{windowHours}=0 OR e.created_at &lt; DATE_ADD(#{eventCreatedAt},
+                    INTERVAL #{windowHours} HOUR))
+            """)
+    int dismissSiblingCopiesAfterDelivery(@Param("userId") Long userId,
+            @Param("groupKey") String groupKey,
+            @Param("eventCreatedAt") Date eventCreatedAt,
+            @Param("windowHours") int windowHours);
+
     @Select("""
             <script>
-            SELECT e.* FROM ai_device_proactive_event e
+            SELECT e.*, CASE
+                     WHEN e.delivery_status='DELIVERED' THEN 'DELIVERED'
+                     WHEN dc.delivery_status='DELIVERED'
+                       AND (e.delivery_group_window_hours=0
+                         OR (dc.event_created_at IS NOT NULL AND e.created_at &lt; DATE_ADD(
+                           dc.event_created_at, INTERVAL e.delivery_group_window_hours HOUR)))
+                       THEN 'DELIVERED'
+                     WHEN e.expires_at IS NOT NULL AND e.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                     WHEN dc.delivery_status='CLAIMED'
+                       AND (dc.claimed_at IS NULL OR dc.claimed_at &lt; DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
+                       THEN 'PENDING'
+                     ELSE CASE WHEN dc.delivery_status='DELIVERED'
+                               THEN e.delivery_status ELSE COALESCE(dc.delivery_status,e.delivery_status) END
+                   END AS effective_delivery_status
+            FROM ai_device_proactive_event e
             INNER JOIN ai_device d ON d.id = e.device_id AND d.user_id = #{userId}
+            LEFT JOIN ai_proactive_delivery_claim dc
+              ON dc.user_id=d.user_id AND dc.delivery_group_key=e.delivery_group_key
             <where>
               <if test="deviceId != null">AND (e.device_id = #{deviceId} OR e.device_id IN (
                 SELECT alias.device_id FROM ai_mobile_instance alias
@@ -119,7 +150,20 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
                 WHERE canonical.device_id=#{deviceId}
               ))</if>
               <if test="topic != null">AND e.topic = #{topic}</if>
-              <if test="status != null">AND e.delivery_status = #{status}</if>
+              <if test="status != null">AND (CASE
+                WHEN e.delivery_status='DELIVERED' THEN 'DELIVERED'
+                WHEN dc.delivery_status='DELIVERED'
+                  AND (e.delivery_group_window_hours=0
+                    OR (dc.event_created_at IS NOT NULL AND e.created_at &lt; DATE_ADD(
+                      dc.event_created_at, INTERVAL e.delivery_group_window_hours HOUR)))
+                  THEN 'DELIVERED'
+                WHEN e.expires_at IS NOT NULL AND e.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                WHEN dc.delivery_status='CLAIMED'
+                  AND (dc.claimed_at IS NULL OR dc.claimed_at &lt; DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
+                  THEN 'PENDING'
+                ELSE CASE WHEN dc.delivery_status='DELIVERED'
+                          THEN e.delivery_status ELSE COALESCE(dc.delivery_status,e.delivery_status) END
+              END)=#{status}</if>
               <if test="eventType != null">AND e.event_type = #{eventType}</if>
             </where>
             ORDER BY e.created_at DESC, e.id DESC LIMIT #{limit} OFFSET #{offset}
@@ -134,6 +178,8 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             <script>
             SELECT COUNT(*) FROM ai_device_proactive_event e
             INNER JOIN ai_device d ON d.id = e.device_id AND d.user_id = #{userId}
+            LEFT JOIN ai_proactive_delivery_claim dc
+              ON dc.user_id=d.user_id AND dc.delivery_group_key=e.delivery_group_key
             <where>
               <if test="deviceId != null">AND (e.device_id = #{deviceId} OR e.device_id IN (
                 SELECT alias.device_id FROM ai_mobile_instance alias
@@ -142,7 +188,20 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
                 WHERE canonical.device_id=#{deviceId}
               ))</if>
               <if test="topic != null">AND e.topic = #{topic}</if>
-              <if test="status != null">AND e.delivery_status = #{status}</if>
+              <if test="status != null">AND (CASE
+                WHEN e.delivery_status='DELIVERED' THEN 'DELIVERED'
+                WHEN dc.delivery_status='DELIVERED'
+                  AND (e.delivery_group_window_hours=0
+                    OR (dc.event_created_at IS NOT NULL AND e.created_at &lt; DATE_ADD(
+                      dc.event_created_at, INTERVAL e.delivery_group_window_hours HOUR)))
+                  THEN 'DELIVERED'
+                WHEN e.expires_at IS NOT NULL AND e.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'
+                WHEN dc.delivery_status='CLAIMED'
+                  AND (dc.claimed_at IS NULL OR dc.claimed_at &lt; DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
+                  THEN 'PENDING'
+                ELSE CASE WHEN dc.delivery_status='DELIVERED'
+                          THEN e.delivery_status ELSE COALESCE(dc.delivery_status,e.delivery_status) END
+              END)=#{status}</if>
               <if test="eventType != null">AND e.event_type = #{eventType}</if>
             </where>
             </script>

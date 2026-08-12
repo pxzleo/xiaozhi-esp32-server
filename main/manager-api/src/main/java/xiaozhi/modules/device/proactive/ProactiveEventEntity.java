@@ -5,6 +5,7 @@ import java.util.Date;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.TableField;
 
 import lombok.Data;
 
@@ -33,4 +34,6 @@ public class ProactiveEventEntity {
     private String claimToken;
     private Date claimedAt;
     private Date updatedAt;
+    @TableField(exist = false)
+    private String effectiveDeliveryStatus;
 }

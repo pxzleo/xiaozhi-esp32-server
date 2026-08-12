@@ -204,18 +204,22 @@ public class ProactiveService {
             throw new RenException("手机主动事件内部契约无效");
         }
         validateEventPayload(request.getPayload());
-        List<DeviceEntity> targets = deviceDao.selectByAgentIdForUpdate(agentId).stream()
-                .filter(device -> userId.equals(device.getUserId()))
-                .toList();
+        List<DeviceEntity> targets = deviceDao.selectMobileAlertTargetsForUpdate(
+                userId, agentId, mobileInstanceId);
         if (targets.isEmpty() || targets.stream()
-                .noneMatch(device -> mobileInstanceId.equals(device.getMacAddress()))) {
+                .noneMatch(device -> device.getMacAddress() != null
+                        && device.getMacAddress().matches("^mob_[0-9a-f]{32}$"))) {
             throw new RenException("手机主动事件目标设备不存在");
         }
         EventCreateResult mobileResult = null;
         for (DeviceEntity target : targets) {
             request.setMacAddress(target.getMacAddress());
             EventCreateResult result = createRollingWindowEvent(target, request);
-            if (mobileInstanceId.equals(target.getMacAddress())) mobileResult = result;
+            if (target.getMacAddress() != null
+                    && target.getMacAddress().matches("^mob_[0-9a-f]{32}$")) {
+                if (mobileResult != null) throw new RenException("手机主动事件目标包含多个主手机");
+                mobileResult = result;
+            }
         }
         if (mobileResult == null) throw new RenException("手机主动事件目标设备不存在");
         return mobileResult;
@@ -372,10 +376,28 @@ public class ProactiveService {
                 target.name(), request.getOutcome().name(), new Date()) != 1) {
             throw new RenException("主动事件状态已变化");
         }
-        if (source == DeliveryStatus.CLAIMED && StringUtils.isNotBlank(current.getDeliveryGroupKey())) {
-            String groupStatus = target == DeliveryStatus.DELIVERED ? "DELIVERED" : "FAILED";
+        if (StringUtils.isNotBlank(current.getDeliveryGroupKey()) && target == DeliveryStatus.DELIVERED) {
+            if (source == DeliveryStatus.CLAIMED) {
+                if (deliveryClaimDao.complete(device.getUserId(), current.getDeliveryGroupKey(),
+                        claimToken, "DELIVERED", new Date()) != 1) {
+                    throw new RenException("主动事件跨前端终态更新失败");
+                }
+            } else if (source == DeliveryStatus.PENDING) {
+                deliveryClaimDao.insertIfAbsent(device.getUserId(), current.getDeliveryGroupKey());
+                if (deliveryClaimDao.completeUnclaimed(device.getUserId(), current.getDeliveryGroupKey(),
+                        device.getId(), eventId, current.getCreatedAt(),
+                        current.getDeliveryGroupWindowHours() == null
+                                ? 0 : current.getDeliveryGroupWindowHours()) != 1) {
+                    throw new RenException("主动事件跨前端直接投递冲突");
+                }
+            }
+            eventDao.dismissSiblingCopiesAfterDelivery(device.getUserId(),
+                    current.getDeliveryGroupKey(), current.getCreatedAt(),
+                    current.getDeliveryGroupWindowHours() == null
+                            ? 0 : current.getDeliveryGroupWindowHours());
+        } else if (source == DeliveryStatus.CLAIMED && StringUtils.isNotBlank(current.getDeliveryGroupKey())) {
             if (deliveryClaimDao.complete(device.getUserId(), current.getDeliveryGroupKey(),
-                    claimToken, groupStatus, new Date()) != 1) {
+                    claimToken, "FAILED", new Date()) != 1) {
                 throw new RenException("主动事件跨前端终态更新失败");
             }
         }
@@ -764,7 +786,8 @@ public class ProactiveService {
                 Topic.valueOf(entity.getTopic()), Priority.valueOf(entity.getPriority()), entity.getReason(),
                 EventType.valueOf(entity.getEventType()), readMap(entity.getPayload()), entity.getCreatedAt(),
                 entity.getExpiresAt(), entity.getDedupeKey(), Boolean.TRUE.equals(entity.getRequiresResponse()),
-                DeliveryStatus.valueOf(entity.getDeliveryStatus()), Outcome.valueOf(entity.getOutcome()),
+                DeliveryStatus.valueOf(StringUtils.defaultIfBlank(entity.getEffectiveDeliveryStatus(),
+                        entity.getDeliveryStatus())), Outcome.valueOf(entity.getOutcome()),
                 entity.getDeliveredAt());
     }
 

@@ -14,6 +14,8 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 import org.junit.jupiter.api.Test;
 
+import xiaozhi.modules.device.dao.DeviceDao;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 
@@ -142,6 +144,44 @@ class ProactiveContractTest {
                 String.class, String.class, String.class, String.class, int.class, long.class);
         String pageSql = page.getAnnotation(Select.class).value()[0];
         assertEquals(1, pageSql.split("INNER JOIN ai_device d", -1).length - 1);
+        assertTrue(pageSql.contains("ai_proactive_delivery_claim dc"));
+        assertTrue(pageSql.contains("WHEN dc.delivery_status='DELIVERED'"));
+        assertTrue(pageSql.contains("e.created_at &lt; DATE_ADD("));
+        assertTrue(pageSql.contains("AS effective_delivery_status"));
+
+        Method count = ProactiveEventDao.class.getMethod("countForUser", Long.class,
+                String.class, String.class, String.class, String.class);
+        String countSql = count.getAnnotation(Select.class).value()[0];
+        assertTrue(countSql.contains("ai_proactive_delivery_claim dc"));
+        assertTrue(countSql.contains("WHEN dc.delivery_status='DELIVERED'"));
+        assertTrue(countSql.contains("e.created_at &lt; DATE_ADD("));
+        assertTrue(countSql.contains("END)=#{status}"));
+
+        Method dismiss = ProactiveEventDao.class.getMethod("dismissSiblingCopiesAfterDelivery",
+                Long.class, String.class, java.util.Date.class, int.class);
+        String dismissSql = dismiss.getAnnotation(Update.class).value()[0];
+        assertTrue(dismissSql.contains("d.user_id=#{userId}"));
+        assertTrue(dismissSql.contains("e.delivery_group_key=#{groupKey}"));
+        assertTrue(dismissSql.contains("e.delivery_status IN ('PENDING','CLAIMED')"));
+        assertTrue(dismissSql.contains("e.claim_token=NULL"));
+        assertTrue(dismissSql.contains("#{windowHours}=0"));
+        assertTrue(dismissSql.contains("e.created_at &lt; DATE_ADD(#{eventCreatedAt}"));
+
+        Method mobileTargets = DeviceDao.class.getMethod("selectMobileAlertTargetsForUpdate",
+                Long.class, String.class, String.class);
+        String targetSql = mobileTargets.getAnnotation(Select.class).value()[0];
+        assertTrue(targetSql.contains("source.mobile_instance_id=#{mobileInstanceId}"));
+        assertTrue(targetSql.contains("target_mobile.mobile_instance_id=source.canonical_instance_id"));
+        assertTrue(targetSql.contains("target_mobile.mobile_instance_id IS NULL"));
+
+        Method directComplete = ProactiveDeliveryClaimDao.class.getMethod("completeUnclaimed",
+                Long.class, String.class, String.class, String.class, java.util.Date.class, int.class);
+        String directCompleteSql = directComplete.getAnnotation(Update.class).value()[0];
+        assertTrue(directCompleteSql.contains("delivery_status IN ('PENDING','FAILED')"));
+        assertTrue(directCompleteSql.contains("delivery_status='DELIVERED' AND #{windowHours} > 0"));
+        assertFalse(directCompleteSql.contains("delivery_status='CLAIMED'"));
+        assertTrue(directCompleteSql.contains("user_id=#{userId}"));
+        assertTrue(directCompleteSql.contains("delivery_group_key=#{groupKey}"));
     }
 
     @Test
