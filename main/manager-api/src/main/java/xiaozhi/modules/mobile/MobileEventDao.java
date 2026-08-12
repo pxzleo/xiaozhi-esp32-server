@@ -181,7 +181,13 @@ public interface MobileEventDao {
             SELECT canonical.mobile_instance_id, canonical.device_id, e.event_id, e.event_type,
                    e.source_package, e.event_state, e.summary, e.category, e.severity,
                    e.confidence, e.spoken_summary, e.reason_code, e.processing_status,
-                   e.occurred_at, e.created_at, e.processed_at, e.proactive_event_id,
+                   TIMESTAMPDIFF(MICROSECOND, '1970-01-01 08:00:00', e.occurred_at) DIV 1000
+                       AS occurred_at_epoch_millis,
+                   TIMESTAMPDIFF(MICROSECOND, '1970-01-01 08:00:00', e.created_at) DIV 1000
+                       AS created_at_epoch_millis,
+                   TIMESTAMPDIFF(MICROSECOND, '1970-01-01 08:00:00', e.processed_at) DIV 1000
+                       AS processed_at_epoch_millis,
+                   e.proactive_event_id,
                    LOWER(CASE
                      WHEN dc.delivery_status = 'DELIVERED' THEN 'DELIVERED'
                      WHEN p.delivery_status = 'DELIVERED' THEN 'DELIVERED'
@@ -216,8 +222,10 @@ public interface MobileEventDao {
                   THEN 'PENDING'
                 ELSE COALESCE(dc.delivery_status,p.delivery_status)
               END)=#{deliveryStatus}</if>
-              <if test="fromTime != null">AND e.occurred_at &gt;= #{fromTime}</if>
-              <if test="toTime != null">AND e.occurred_at &lt;= #{toTime}</if>
+              <if test="fromEpochMillis != null">AND e.occurred_at &gt;=
+                TIMESTAMPADD(MICROSECOND, #{fromEpochMillis} * 1000, '1970-01-01 08:00:00')</if>
+              <if test="toEpochMillis != null">AND e.occurred_at &lt;=
+                TIMESTAMPADD(MICROSECOND, #{toEpochMillis} * 1000, '1970-01-01 08:00:00')</if>
             ORDER BY e.occurred_at DESC, e.event_id DESC LIMIT #{limit} OFFSET #{offset}
             </script>
             """)
@@ -225,7 +233,7 @@ public interface MobileEventDao {
             @Param("instanceId") String instanceId, @Param("type") String type,
             @Param("processingStatus") String processingStatus,
             @Param("deliveryStatus") String deliveryStatus,
-            @Param("fromTime") java.util.Date fromTime, @Param("toTime") java.util.Date toTime,
+            @Param("fromEpochMillis") Long fromEpochMillis, @Param("toEpochMillis") Long toEpochMillis,
             @Param("limit") int limit, @Param("offset") long offset);
 
     @Select("""
@@ -251,12 +259,14 @@ public interface MobileEventDao {
                   THEN 'PENDING'
                 ELSE COALESCE(dc.delivery_status,p.delivery_status)
               END)=#{deliveryStatus}</if>
-              <if test="fromTime != null">AND e.occurred_at &gt;= #{fromTime}</if>
-              <if test="toTime != null">AND e.occurred_at &lt;= #{toTime}</if>
+              <if test="fromEpochMillis != null">AND e.occurred_at &gt;=
+                TIMESTAMPADD(MICROSECOND, #{fromEpochMillis} * 1000, '1970-01-01 08:00:00')</if>
+              <if test="toEpochMillis != null">AND e.occurred_at &lt;=
+                TIMESTAMPADD(MICROSECOND, #{toEpochMillis} * 1000, '1970-01-01 08:00:00')</if>
             </script>
             """)
     long countAuditForUser(@Param("userId") Long userId, @Param("instanceId") String instanceId,
             @Param("type") String type, @Param("processingStatus") String processingStatus,
             @Param("deliveryStatus") String deliveryStatus,
-            @Param("fromTime") java.util.Date fromTime, @Param("toTime") java.util.Date toTime);
+            @Param("fromEpochMillis") Long fromEpochMillis, @Param("toEpochMillis") Long toEpochMillis);
 }

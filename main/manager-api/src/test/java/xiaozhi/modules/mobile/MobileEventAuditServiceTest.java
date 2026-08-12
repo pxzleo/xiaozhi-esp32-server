@@ -12,6 +12,30 @@ import org.junit.jupiter.api.Test;
 
 class MobileEventAuditServiceTest {
     @Test
+    void auditReturnsDatabaseEpochMillisWithoutASecondTimezoneConversion() {
+        MobileInstanceDao instanceDao = mock(MobileInstanceDao.class);
+        MobileEventDao eventDao = mock(MobileEventDao.class);
+        MobileEventAuditService service = new MobileEventAuditService(instanceDao, eventDao);
+        MobileInstanceEntity instance = new MobileInstanceEntity();
+        instance.setMobileInstanceId("mob_0123456789abcdef0123456789abcdef");
+        instance.setUserId(7L);
+        MobileEventAuditRow row = new MobileEventAuditRow();
+        row.setOccurredAtEpochMillis(1_786_508_318_639L);
+        row.setCreatedAtEpochMillis(1_786_508_319_000L);
+        row.setProcessedAtEpochMillis(1_786_508_340_000L);
+        when(instanceDao.selectCanonicalByInstance(instance.getMobileInstanceId())).thenReturn(instance);
+        when(eventDao.pageAuditForUser(7L, instance.getMobileInstanceId(), null, null, null,
+                null, null, 20, 0)).thenReturn(List.of(row));
+
+        var view = service.audit(7L, instance.getMobileInstanceId(), null, null,
+                null, null, null, 1, 20).getList().get(0);
+
+        assertEquals(1_786_508_318_639L, view.occurredAt());
+        assertEquals(1_786_508_319_000L, view.receivedAt());
+        assertEquals(1_786_508_340_000L, view.processedAt());
+    }
+
+    @Test
     void verifiesInstanceOwnershipBeforeRunningPagedAuditQuery() {
         MobileInstanceDao instanceDao = mock(MobileInstanceDao.class);
         MobileEventDao eventDao = mock(MobileEventDao.class);

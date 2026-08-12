@@ -1,7 +1,6 @@
 package xiaozhi.modules.mobile;
 
 import java.time.Instant;
-import java.util.Date;
 
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
@@ -34,14 +33,14 @@ public class MobileEventAuditService {
         if (from != null && to != null && from.isAfter(to)) throw new RenException("事件时间范围无效");
         int safePage = range(page, 1, 1_000, "page");
         int safeLimit = range(limit, 1, 100, "limit");
-        Date fromDate = from == null ? null : Date.from(from);
-        Date toDate = to == null ? null : Date.from(to);
+        Long fromEpochMillis = from == null ? null : from.toEpochMilli();
+        Long toEpochMillis = to == null ? null : to.toEpochMilli();
         String databaseDelivery = StringUtils.isBlank(deliveryStatus) ? null : deliveryStatus.toUpperCase();
         String canonicalInstanceId = instance.getMobileInstanceId();
         var rows = eventDao.pageAuditForUser(userId, canonicalInstanceId, type, processingStatus,
-                databaseDelivery, fromDate, toDate, safeLimit, ((long) safePage - 1L) * safeLimit);
+                databaseDelivery, fromEpochMillis, toEpochMillis, safeLimit, ((long) safePage - 1L) * safeLimit);
         long total = eventDao.countAuditForUser(userId, canonicalInstanceId, type, processingStatus,
-                databaseDelivery, fromDate, toDate);
+                databaseDelivery, fromEpochMillis, toEpochMillis);
         return new PageData<>(rows.stream().map(this::view).toList(), total);
     }
 
@@ -86,8 +85,9 @@ public class MobileEventAuditService {
         return new AuditView(row.getMobileInstanceId(), row.getDeviceId(), row.getEventId(),
                 row.getEventType(), row.getSourcePackage(), row.getEventState(), row.getSummary(),
                 row.getCategory(), row.getSeverity(), row.getConfidence(), row.getSpokenSummary(),
-                row.getReasonCode(), row.getProcessingStatus(), row.getOccurredAt(), row.getCreatedAt(),
-                row.getProcessedAt(), row.getProactiveEventId(), row.getDeliveryStatus());
+                row.getReasonCode(), row.getProcessingStatus(), row.getOccurredAtEpochMillis(),
+                row.getCreatedAtEpochMillis(), row.getProcessedAtEpochMillis(),
+                row.getProactiveEventId(), row.getDeliveryStatus());
     }
 
     private int range(int value, int minimum, int maximum, String name) {

@@ -1,8 +1,12 @@
 package xiaozhi.modules.mobile;
 
-import java.util.Date;
+import java.io.IOException;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.databind.SerializerProvider;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.StdScalarSerializer;
 
 public final class MobileEventAuditDTOs {
     private MobileEventAuditDTOs() {}
@@ -21,9 +25,20 @@ public final class MobileEventAuditDTOs {
             @JsonProperty("spoken_summary") String spokenSummary,
             @JsonProperty("reason_code") String reasonCode,
             @JsonProperty("processing_status") String processingStatus,
-            @JsonProperty("occurred_at") Date occurredAt,
-            @JsonProperty("received_at") Date receivedAt,
-            @JsonProperty("processed_at") Date processedAt,
+            @JsonProperty("occurred_at") @JsonSerialize(using = UnixMillisSerializer.class) Long occurredAt,
+            @JsonProperty("received_at") @JsonSerialize(using = UnixMillisSerializer.class) Long receivedAt,
+            @JsonProperty("processed_at") @JsonSerialize(using = UnixMillisSerializer.class) Long processedAt,
             @JsonProperty("proactive_event_id") String proactiveEventId,
             @JsonProperty("delivery_status") String deliveryStatus) {}
+
+    public static final class UnixMillisSerializer extends StdScalarSerializer<Long> {
+        public UnixMillisSerializer() {
+            super(Long.class);
+        }
+
+        @Override
+        public void serialize(Long value, JsonGenerator generator, SerializerProvider provider) throws IOException {
+            generator.writeNumber(value);
+        }
+    }
 }

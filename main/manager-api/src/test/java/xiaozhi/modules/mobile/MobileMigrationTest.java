@@ -99,6 +99,20 @@ class MobileMigrationTest {
     }
 
     @Test
+    void auditTimeMigrationAddsDefaultInstanceTimeIndexAfterExistingMobileMigrations() throws Exception {
+        String yaml;
+        try (var stream = getClass().getResourceAsStream("/db/changelog/db.changelog-master.yaml")) {
+            yaml = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertTrue(yaml.indexOf("id: 202608121700") > yaml.indexOf("id: 202608121500"));
+        try (var stream = getClass().getResourceAsStream("/db/changelog/202608121700.sql")) {
+            String sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            assertTrue(sql.contains("idx_mobile_event_audit_time"));
+            assertTrue(sql.contains("(`mobile_instance_id`, `occurred_at`, `event_id`)"));
+        }
+    }
+
+    @Test
     void stableIdentityMigrationKeepsAliasesAndCanonicalHistory() throws Exception {
         try (var stream = getClass().getResourceAsStream("/db/changelog/202608121300.sql")) {
             String sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
@@ -149,7 +163,7 @@ class MobileMigrationTest {
                 .getAnnotation(org.apache.ibatis.annotations.Select.class).value());
         String eventSql = String.join("\n", MobileEventDao.class
                 .getDeclaredMethod("pageAuditForUser", Long.class, String.class, String.class,
-                        String.class, String.class, java.util.Date.class, java.util.Date.class,
+                        String.class, String.class, Long.class, Long.class,
                         int.class, long.class)
                 .getAnnotation(org.apache.ibatis.annotations.Select.class).value());
         assertTrue(deviceSql.contains("mi.canonical_instance_id=mi.mobile_instance_id"));
@@ -204,11 +218,11 @@ class MobileMigrationTest {
     void auditDeliveryStatusUsesDatabaseTimeDerivedExpressionForSelectAndFilter() throws Exception {
         String page = String.join("\n", MobileEventDao.class.getMethod("pageAuditForUser",
                 Long.class, String.class, String.class, String.class, String.class,
-                java.util.Date.class, java.util.Date.class, int.class, long.class)
+                Long.class, Long.class, int.class, long.class)
                 .getAnnotation(Select.class).value());
         String count = String.join("\n", MobileEventDao.class.getMethod("countAuditForUser",
                 Long.class, String.class, String.class, String.class, String.class,
-                java.util.Date.class, java.util.Date.class)
+                Long.class, Long.class)
                 .getAnnotation(Select.class).value());
         for (String sql : java.util.List.of(page, count)) {
             assertTrue(sql.contains("p.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'"));
@@ -224,11 +238,11 @@ class MobileMigrationTest {
     void linkedDismissedCopyWinsOverAnotherDeviceFreshClaimInAuditAndFilter() throws Exception {
         String page = String.join("\n", MobileEventDao.class.getMethod("pageAuditForUser",
                 Long.class, String.class, String.class, String.class, String.class,
-                java.util.Date.class, java.util.Date.class, int.class, long.class)
+                Long.class, Long.class, int.class, long.class)
                 .getAnnotation(Select.class).value());
         String count = String.join("\n", MobileEventDao.class.getMethod("countAuditForUser",
                 Long.class, String.class, String.class, String.class, String.class,
-                java.util.Date.class, java.util.Date.class)
+                Long.class, Long.class)
                 .getAnnotation(Select.class).value());
         for (String sql : java.util.List.of(page, count)) {
             int linkedTerminal = sql.indexOf(

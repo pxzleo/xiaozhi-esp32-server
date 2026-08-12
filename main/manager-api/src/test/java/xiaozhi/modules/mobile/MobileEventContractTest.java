@@ -18,6 +18,7 @@ import org.apache.ibatis.session.Configuration;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import xiaozhi.modules.security.config.WebMvcConfig;
 
 class MobileEventContractTest {
     private final ObjectMapper mapper = new MobileJsonHttpMessageConverter().getObjectMapper();
@@ -77,18 +78,32 @@ class MobileEventContractTest {
                 "mob_0123456789abcdef0123456789abcdef", "device-1", "evt-1",
                 "notification.state_changed", "com.example.app", "posted", "脱敏摘要",
                 "security", "high", 0.91, "安全提醒", "security_risk", "converted",
-                new java.util.Date(), new java.util.Date(), new java.util.Date(),
+                1_786_508_318_639L, 1_786_508_319_000L, 1_786_508_340_000L,
                 "ext-1", "delivered");
 
-        String json = mapper.writeValueAsString(view);
+        String json = new WebMvcConfig().jackson2HttpMessageConverter()
+                .getObjectMapper().writeValueAsString(view);
 
         assertTrue(json.contains("\"summary\":\"脱敏摘要\""));
         assertTrue(json.contains("\"delivery_status\":\"delivered\""));
+        assertTrue(json.contains("\"occurred_at\":1786508318639"), json);
         assertFalse(json.contains("credential"));
         assertFalse(json.contains("lease"));
         assertFalse(json.contains("evidence"));
         assertFalse(json.contains("latitude"));
         assertFalse(json.contains("reasoning"));
+    }
+
+    @Test
+    void mobileAuditSqlConvertsDatabaseLocalDatetimeToEpochAtTheDatabaseBoundary() throws Exception {
+        var page = MobileEventDao.class.getMethod("pageAuditForUser", Long.class, String.class,
+                String.class, String.class, String.class, Long.class, Long.class, int.class, long.class);
+        String sql = String.join(" ", page.getAnnotation(Select.class).value()).replaceAll("\\s+", " ");
+        assertTrue(sql.contains("TIMESTAMPDIFF(MICROSECOND, '1970-01-01 08:00:00', e.occurred_at) DIV 1000 AS occurred_at_epoch_millis"));
+        assertTrue(sql.contains("TIMESTAMPDIFF(MICROSECOND, '1970-01-01 08:00:00', e.created_at) DIV 1000 AS created_at_epoch_millis"));
+        assertTrue(sql.contains("TIMESTAMPDIFF(MICROSECOND, '1970-01-01 08:00:00', e.processed_at) DIV 1000 AS processed_at_epoch_millis"));
+        assertTrue(sql.contains("e.occurred_at &gt;= TIMESTAMPADD(MICROSECOND, #{fromEpochMillis} * 1000, '1970-01-01 08:00:00')"), sql);
+        assertTrue(sql.contains("e.occurred_at &lt;= TIMESTAMPADD(MICROSECOND, #{toEpochMillis} * 1000, '1970-01-01 08:00:00')"), sql);
     }
 
     @Test
