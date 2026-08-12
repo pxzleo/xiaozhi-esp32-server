@@ -51,8 +51,8 @@ class MobileEventProcessingServiceTest {
         when(eventDao.finishConverted(any(), any(), any(), any(), any(),
                 org.mockito.ArgumentMatchers.anyDouble(), any(), any())).thenReturn(1);
         when(eventDao.finishError(any(), any(), any(), any(), anyLong())).thenReturn(1);
-        when(instanceDao.selectById(any())).thenReturn(instance());
-        when(instanceDao.selectByIdForUpdate(any())).thenReturn(instance());
+        when(instanceDao.selectCanonicalByInstance(any())).thenReturn(instance());
+        when(instanceDao.selectCanonicalByInstanceForUpdate(any())).thenReturn(instance());
     }
 
     @Test
@@ -77,7 +77,7 @@ class MobileEventProcessingServiceTest {
         MobileEventEntity location = event("location.transition", "entered", null, "客户端文本");
         location.setEntitiesJson("{\"place_id\":\"place_12345678\",\"place_name\":\"公司\",\"transition\":\"enter\"}");
         location.setProcessingLeaseToken("token");
-        when(instanceDao.selectById(location.getMobileInstanceId())).thenReturn(instance());
+        when(instanceDao.selectCanonicalByInstance(location.getMobileInstanceId())).thenReturn(instance());
         when(eventDao.selectByEventIdForUpdate(location.getMobileInstanceId(), location.getEventId()))
                 .thenReturn(location);
         when(proactive.createMobileAlert(eq(location.getMobileInstanceId()), eq(7L), eq("agent-1"),
@@ -97,7 +97,7 @@ class MobileEventProcessingServiceTest {
     void updatedNotificationUsesRevisionDedupeAndLatestControlledPayload() {
         MobileEventEntity event = event("notification.state_changed", "updated", "security", "账户风险状态已更新");
         event.setProcessingLeaseToken("token");
-        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(instance());
+        when(instanceDao.selectCanonicalByInstance(event.getMobileInstanceId())).thenReturn(instance());
         when(eventDao.selectByEventIdForUpdate(event.getMobileInstanceId(), event.getEventId()))
                 .thenReturn(event);
         when(classifier.classifyMobileEvent(event.getSummary(), "security",
@@ -148,7 +148,7 @@ class MobileEventProcessingServiceTest {
                 "包裹即将送达，请保持电话畅通");
         MobileInstanceEntity instance = instance();
         instance.setAlertCategories("security,call");
-        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(instance);
+        when(instanceDao.selectCanonicalByInstance(event.getMobileInstanceId())).thenReturn(instance);
 
         assertEquals(MobileEventProcessingService.IGNORED,
                 service.processClaimed(event, "worker", "token"));
@@ -163,7 +163,7 @@ class MobileEventProcessingServiceTest {
         MobileEventEntity event = event("notification.state_changed", "posted", "message", "请尽快查看这条通知");
         MobileInstanceEntity instance = instance();
         instance.setAlertCategories("message");
-        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(instance);
+        when(instanceDao.selectCanonicalByInstance(event.getMobileInstanceId())).thenReturn(instance);
         when(classifier.classifyMobileEvent(any(), any(), any(), any()))
                 .thenReturn(new ProactiveMonitorService.MobileAlertClassification(
                         true, "security", "critical", 0.99, "账户存在风险", "security_risk"));
@@ -183,8 +183,8 @@ class MobileEventProcessingServiceTest {
         event.setProcessingLeaseToken("token");
         MobileInstanceEntity configured = instance();
         configured.setAlertCategories("security");
-        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(configured);
-        when(instanceDao.selectByIdForUpdate(event.getMobileInstanceId())).thenReturn(configured);
+        when(instanceDao.selectCanonicalByInstance(event.getMobileInstanceId())).thenReturn(configured);
+        when(instanceDao.selectCanonicalByInstanceForUpdate(event.getMobileInstanceId())).thenReturn(configured);
         when(eventDao.selectByEventIdForUpdate(event.getMobileInstanceId(), event.getEventId()))
                 .thenReturn(event);
         when(classifier.classifyMobileEvent(any(), any(), any(), any()))
@@ -206,7 +206,7 @@ class MobileEventProcessingServiceTest {
                 "重要消息，请尽快查看");
         MobileInstanceEntity revoked = instance();
         revoked.setRevokedAt(new Date());
-        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(revoked);
+        when(instanceDao.selectCanonicalByInstance(event.getMobileInstanceId())).thenReturn(revoked);
 
         assertEquals(MobileEventProcessingService.IGNORED,
                 service.processClaimed(event, "worker", "token"));
@@ -224,8 +224,8 @@ class MobileEventProcessingServiceTest {
         before.setAlertCategories("message");
         MobileInstanceEntity latest = instance();
         latest.setAlertCategories("security");
-        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(before);
-        when(instanceDao.selectByIdForUpdate(event.getMobileInstanceId())).thenReturn(latest);
+        when(instanceDao.selectCanonicalByInstance(event.getMobileInstanceId())).thenReturn(before);
+        when(instanceDao.selectCanonicalByInstanceForUpdate(event.getMobileInstanceId())).thenReturn(latest);
         when(eventDao.selectByEventIdForUpdate(event.getMobileInstanceId(), event.getEventId()))
                 .thenReturn(event);
         when(classifier.classifyMobileEvent(any(), any(), any(), any()))
@@ -249,8 +249,8 @@ class MobileEventProcessingServiceTest {
         before.setAlertSensitivity("balanced");
         MobileInstanceEntity latest = instance();
         latest.setAlertSensitivity("conservative");
-        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(before);
-        when(instanceDao.selectByIdForUpdate(event.getMobileInstanceId())).thenReturn(latest);
+        when(instanceDao.selectCanonicalByInstance(event.getMobileInstanceId())).thenReturn(before);
+        when(instanceDao.selectCanonicalByInstanceForUpdate(event.getMobileInstanceId())).thenReturn(latest);
         when(eventDao.selectByEventIdForUpdate(event.getMobileInstanceId(), event.getEventId()))
                 .thenReturn(event);
         when(classifier.classifyMobileEvent(any(), any(), any(), any()))
@@ -274,8 +274,8 @@ class MobileEventProcessingServiceTest {
         before.setAlertCategories("parcel");
         MobileInstanceEntity latest = instance();
         latest.setAlertCategories("security");
-        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(before);
-        when(instanceDao.selectByIdForUpdate(event.getMobileInstanceId())).thenReturn(latest);
+        when(instanceDao.selectCanonicalByInstance(event.getMobileInstanceId())).thenReturn(before);
+        when(instanceDao.selectCanonicalByInstanceForUpdate(event.getMobileInstanceId())).thenReturn(latest);
         when(eventDao.selectByEventIdForUpdate(event.getMobileInstanceId(), event.getEventId()))
                 .thenReturn(event);
 

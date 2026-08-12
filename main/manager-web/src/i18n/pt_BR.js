@@ -1,4 +1,9 @@
 export default {
+  'device.mergeMobile': 'Mesclar o mesmo celular',
+  'device.mergeMobileSelect': 'Selecione pelo menos dois registros Android Xiaozhi do mesmo celular',
+  'device.mergeMobileConfirm': 'Mesclar os {count} registros selecionados como um celular? Histórico e configurações serão exibidos juntos.',
+  'device.mergeMobileSuccess': 'Registros do celular mesclados',
+  'device.mergeMobileFailed': 'Falha ao mesclar registros do celular',
   // Texto da página de login
   'login.requiredUsername': 'O nome de usuário não pode estar vazio',
   'login.requiredPassword': 'A senha não pode estar vazia',

@@ -112,7 +112,12 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             SELECT e.* FROM ai_device_proactive_event e
             INNER JOIN ai_device d ON d.id = e.device_id AND d.user_id = #{userId}
             <where>
-              <if test="deviceId != null">AND e.device_id = #{deviceId}</if>
+              <if test="deviceId != null">AND (e.device_id = #{deviceId} OR e.device_id IN (
+                SELECT alias.device_id FROM ai_mobile_instance alias
+                INNER JOIN ai_mobile_instance canonical
+                  ON canonical.mobile_instance_id=alias.canonical_instance_id
+                WHERE canonical.device_id=#{deviceId}
+              ))</if>
               <if test="topic != null">AND e.topic = #{topic}</if>
               <if test="status != null">AND e.delivery_status = #{status}</if>
               <if test="eventType != null">AND e.event_type = #{eventType}</if>
@@ -130,7 +135,12 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             SELECT COUNT(*) FROM ai_device_proactive_event e
             INNER JOIN ai_device d ON d.id = e.device_id AND d.user_id = #{userId}
             <where>
-              <if test="deviceId != null">AND e.device_id = #{deviceId}</if>
+              <if test="deviceId != null">AND (e.device_id = #{deviceId} OR e.device_id IN (
+                SELECT alias.device_id FROM ai_mobile_instance alias
+                INNER JOIN ai_mobile_instance canonical
+                  ON canonical.mobile_instance_id=alias.canonical_instance_id
+                WHERE canonical.device_id=#{deviceId}
+              ))</if>
               <if test="topic != null">AND e.topic = #{topic}</if>
               <if test="status != null">AND e.delivery_status = #{status}</if>
               <if test="eventType != null">AND e.event_type = #{eventType}</if>

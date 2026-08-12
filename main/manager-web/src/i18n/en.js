@@ -1,4 +1,9 @@
 export default {
+  'device.mergeMobile': 'Merge same phone',
+  'device.mergeMobileSelect': 'Select at least two Android Xiaozhi records from the same phone',
+  'device.mergeMobileConfirm': 'Merge the selected {count} records as one phone? Their history and settings will be shown together.',
+  'device.mergeMobileSuccess': 'Phone records merged',
+  'device.mergeMobileFailed': 'Failed to merge phone records',
   // Login page related prompt text
   'login.requiredUsername': 'Username cannot be empty',
   'login.requiredPassword': 'Password cannot be empty',

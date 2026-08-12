@@ -14,6 +14,7 @@ class MobileAssistantContractTest {
     @Test
     void bindDtoRejectsUnknownFieldsAndTrailingJson() {
         String valid = "{\"version\":1,\"installation_id\":\"123e4567-e89b-12d3-a456-426614174000\","
+                + "\"stable_device_key\":\"" + "a".repeat(64) + "\","
                 + "\"platform\":\"android\",\"app_version\":\"0.1.0\",\"agent_id\":\"agent-1\","
                 + "\"capabilities\":[\"text_chat\"]}";
         assertThrows(Exception.class, () -> mapper.readValue(valid.replace("}", ",\"imei\":\"forbidden\"}"),

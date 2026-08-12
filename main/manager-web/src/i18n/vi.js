@@ -1,4 +1,9 @@
 export default {
+  'device.mergeMobile': 'Gộp cùng một điện thoại',
+  'device.mergeMobileSelect': 'Chọn ít nhất hai bản ghi Android Xiaozhi thuộc cùng một điện thoại',
+  'device.mergeMobileConfirm': 'Gộp {count} bản ghi đã chọn thành một điện thoại? Lịch sử và cài đặt sẽ hiển thị chung.',
+  'device.mergeMobileSuccess': 'Đã gộp bản ghi điện thoại',
+  'device.mergeMobileFailed': 'Không thể gộp bản ghi điện thoại',
   // Login page related prompt text
   'login.requiredUsername': 'Tên đăng nhập không được để trống',
   'login.requiredPassword': 'Mật khẩu không được để trống',

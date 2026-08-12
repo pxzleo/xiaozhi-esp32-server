@@ -25,6 +25,30 @@ public interface DeviceDao extends BaseMapper<DeviceEntity> {
     @Select("SELECT * FROM ai_device WHERE agent_id = #{agentId} FOR UPDATE")
     List<DeviceEntity> selectByAgentIdForUpdate(@Param("agentId") String agentId);
 
+    @Select("""
+            SELECT d.id, d.user_id, d.mac_address,
+                   CASE WHEN mi.mobile_instance_id IS NULL THEN d.last_connected_at ELSE COALESCE((
+                     SELECT MAX(COALESCE(member.last_connected_at, member_device.last_connected_at))
+                     FROM ai_mobile_instance member
+                     INNER JOIN ai_device member_device ON member_device.id=member.device_id
+                     WHERE member.canonical_instance_id=mi.mobile_instance_id
+                   ),d.last_connected_at) END AS last_connected_at,
+                   d.auto_update, d.board, d.alias, d.agent_id,
+                   CASE WHEN mi.mobile_instance_id IS NULL THEN d.app_version ELSE COALESCE((
+                     SELECT member.app_version FROM ai_mobile_instance member
+                     WHERE member.canonical_instance_id=mi.mobile_instance_id
+                     ORDER BY COALESCE(member.last_connected_at,member.updated_at) DESC LIMIT 1
+                   ),d.app_version) END AS app_version,
+                   d.sort, d.updater, d.update_date, d.creator, d.create_date
+            FROM ai_device d
+            LEFT JOIN ai_mobile_instance mi ON mi.device_id=d.id
+            WHERE d.user_id=#{userId} AND d.agent_id=#{agentId}
+              AND (mi.mobile_instance_id IS NULL
+                   OR mi.canonical_instance_id=mi.mobile_instance_id)
+            """)
+    List<DeviceEntity> selectVisibleByUserAndAgent(@Param("userId") Long userId,
+            @Param("agentId") String agentId);
+
     /**
      * 获取此智能体全部设备的最后连接时间
      * 

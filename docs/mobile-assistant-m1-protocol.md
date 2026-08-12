@@ -19,6 +19,7 @@
 {
   "version": 1,
   "installation_id": "123e4567-e89b-12d3-a456-426614174000",
+  "stable_device_key": "本机应用隔离标识的64位小写SHA-256",
   "platform": "android",
   "app_version": "0.1.0",
   "agent_id": "已归当前账号所有的智能体ID",
@@ -26,7 +27,7 @@
 }
 ```
 
-`installation_id` 必须是客户端随机、可重置的 UUID。不得使用或上传 IMEI、Android ID、序列号、MAC 等硬件稳定标识。允许能力只有 `text_chat`、`voice_session`、`notification_gateway`、`location_gateway`。
+`installation_id` 必须是客户端随机、可重置的 UUID。Android 端另在本机将应用包名与应用隔离的 `ANDROID_ID` 做 SHA-256，只上传不可逆的 `stable_device_key`；服务端不接收原始 Android ID、IMEI、序列号或 MAC。允许能力只有 `text_chat`、`voice_session`、`notification_gateway`、`location_gateway`。旧客户端可不传 `stable_device_key`，继续按安装 UUID 兼容绑定。
 
 成功响应的 `data`：
 
@@ -41,7 +42,7 @@
 }
 ```
 
-同一账号和 `installation_id` 再次绑定会校验新的 `agent_id` 所有权、复用手机实例并轮换凭据。数据库只保存凭据的 SHA-256，不保存明文。
+同一账号和 `stable_device_key` 再次绑定会优先复用原手机实例，并更新当前 `installation_id`、智能体、版本和能力后轮换凭据；没有稳定键的旧客户端仍按 `installation_id` 复用。数据库只保存稳定键和凭据的 SHA-256，不保存其原始输入或明文凭据。设备管理可由用户显式选择同一智能体下的历史重复 Android 记录并调用 `POST /mobile/devices/merge`；服务端保留别名记录和历史事件，以权威实例统一返回事件审计、手机提醒设置及主动事件审计，设备列表只显示权威记录。若所选记录已经带有多个不同稳定键，则明确拒绝，避免把两台真实手机误合并。
 
 `DELETE /mobile/devices/{mobile_instance_id}?credential_version={绑定响应中的版本}` 同样使用账号 Bearer token。只能撤销当前账号的实例，并通过版本 CAS 防止旧撤销请求误删已经轮换的新凭据；版本过期返回 HTTP 409。撤销后旧凭据的下一次鉴权失败，已建立连接也会在后续控制帧或最多 5 秒一轮的持续音频输入上复验失败并关闭。清除应用数据后客户端应生成新的 `installation_id`。
 

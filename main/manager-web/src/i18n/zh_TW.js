@@ -1,4 +1,9 @@
 export default {
+  'device.mergeMobile': '合併同一手機',
+  'device.mergeMobileSelect': '請至少選擇兩個屬於同一手機的 Android 小智裝置',
+  'device.mergeMobileConfirm': '確認將選取的 {count} 筆記錄合併為同一手機嗎？歷史事件與設定會統一顯示。',
+  'device.mergeMobileSuccess': '手機裝置已合併',
+  'device.mergeMobileFailed': '手機裝置合併失敗',
   // 登錄頁面相關提示文本
   'login.requiredUsername': '用戶名不能為空',
   'login.requiredPassword': '密碼不能為空',

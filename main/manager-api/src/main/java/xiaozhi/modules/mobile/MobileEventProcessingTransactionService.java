@@ -28,7 +28,7 @@ public class MobileEventProcessingTransactionService {
     }
 
     public MobileInstanceEntity instance(String instanceId) {
-        return instanceDao.selectById(instanceId);
+        return instanceDao.selectCanonicalByInstance(instanceId);
     }
 
     public record ConversionCommand(MobileEventEntity event, String token, String category,
@@ -58,7 +58,8 @@ public class MobileEventProcessingTransactionService {
         if (!sameRevision(authoritative, event, command.token())) {
             return new ConversionResult(SUPERSEDED, null);
         }
-        MobileInstanceEntity instance = instanceDao.selectByIdForUpdate(event.getMobileInstanceId());
+        MobileInstanceEntity instance = instanceDao.selectCanonicalByInstanceForUpdate(
+                event.getMobileInstanceId());
         if (instance == null || instance.getRevokedAt() != null) {
             if (eventDao.finishIgnored(event.getMobileInstanceId(), event.getEventId(),
                     command.token(), "mobile_instance_unavailable") != 1) {

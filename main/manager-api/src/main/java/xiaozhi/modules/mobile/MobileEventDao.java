@@ -178,7 +178,7 @@ public interface MobileEventDao {
 
     @Select("""
             <script>
-            SELECT e.mobile_instance_id, mi.device_id, e.event_id, e.event_type,
+            SELECT canonical.mobile_instance_id, canonical.device_id, e.event_id, e.event_type,
                    e.source_package, e.event_state, e.summary, e.category, e.severity,
                    e.confidence, e.spoken_summary, e.reason_code, e.processing_status,
                    e.occurred_at, e.created_at, e.processed_at, e.proactive_event_id,
@@ -194,11 +194,13 @@ public interface MobileEventDao {
             FROM ai_mobile_event e
             INNER JOIN ai_mobile_instance mi ON mi.mobile_instance_id=e.mobile_instance_id
                 AND mi.user_id=#{userId}
+            INNER JOIN ai_mobile_instance canonical
+                ON canonical.mobile_instance_id=mi.canonical_instance_id
             LEFT JOIN ai_device_proactive_event p ON p.device_id=mi.device_id
                 AND p.event_id=e.proactive_event_id
             LEFT JOIN ai_proactive_delivery_claim dc ON dc.user_id=mi.user_id
                 AND dc.delivery_group_key=p.delivery_group_key
-            WHERE e.mobile_instance_id=#{instanceId}
+            WHERE mi.canonical_instance_id=#{instanceId}
               <if test="type != null">AND e.event_type=#{type}</if>
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
               <if test="deliveryStatus != null">AND (CASE
@@ -231,7 +233,7 @@ public interface MobileEventDao {
                 AND p.event_id=e.proactive_event_id
             LEFT JOIN ai_proactive_delivery_claim dc ON dc.user_id=mi.user_id
                 AND dc.delivery_group_key=p.delivery_group_key
-            WHERE e.mobile_instance_id=#{instanceId}
+            WHERE mi.canonical_instance_id=#{instanceId}
               <if test="type != null">AND e.event_type=#{type}</if>
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
               <if test="deliveryStatus != null">AND (CASE

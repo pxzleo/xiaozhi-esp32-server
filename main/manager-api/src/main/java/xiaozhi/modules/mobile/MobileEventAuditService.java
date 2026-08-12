@@ -27,7 +27,7 @@ public class MobileEventAuditService {
     public PageData<AuditView> audit(Long userId, String instanceId, String type,
             String processingStatus, String deliveryStatus, Instant from, Instant to,
             int page, int limit) {
-        MobileInstanceEntity instance = instanceDao.selectById(instanceId);
+        MobileInstanceEntity instance = instanceDao.selectCanonicalByInstance(instanceId);
         if (instance == null || userId == null || !userId.equals(instance.getUserId())) {
             throw new RenException("手机实例不存在");
         }
@@ -37,9 +37,10 @@ public class MobileEventAuditService {
         Date fromDate = from == null ? null : Date.from(from);
         Date toDate = to == null ? null : Date.from(to);
         String databaseDelivery = StringUtils.isBlank(deliveryStatus) ? null : deliveryStatus.toUpperCase();
-        var rows = eventDao.pageAuditForUser(userId, instanceId, type, processingStatus,
+        String canonicalInstanceId = instance.getMobileInstanceId();
+        var rows = eventDao.pageAuditForUser(userId, canonicalInstanceId, type, processingStatus,
                 databaseDelivery, fromDate, toDate, safeLimit, ((long) safePage - 1L) * safeLimit);
-        long total = eventDao.countAuditForUser(userId, instanceId, type, processingStatus,
+        long total = eventDao.countAuditForUser(userId, canonicalInstanceId, type, processingStatus,
                 databaseDelivery, fromDate, toDate);
         return new PageData<>(rows.stream().map(this::view).toList(), total);
     }
@@ -56,7 +57,8 @@ public class MobileEventAuditService {
             throw new RenException("手机提醒类别无效");
         }
         String joined = String.join(",", categories);
-        if (instanceDao.updateAlertSettings(userId, instanceId, request.sensitivity(), joined) != 1) {
+        if (instanceDao.updateAlertSettings(userId, instance.getMobileInstanceId(),
+                request.sensitivity(), joined) != 1) {
             throw new RenException("手机提醒设置保存失败");
         }
         instance.setAlertSensitivity(request.sensitivity());
@@ -65,7 +67,7 @@ public class MobileEventAuditService {
     }
 
     private MobileInstanceEntity owned(Long userId, String instanceId) {
-        MobileInstanceEntity instance = instanceDao.selectById(instanceId);
+        MobileInstanceEntity instance = instanceDao.selectCanonicalByInstance(instanceId);
         if (instance == null || userId == null || !userId.equals(instance.getUserId())) {
             throw new RenException("手机实例不存在");
         }

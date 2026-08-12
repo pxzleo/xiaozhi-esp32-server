@@ -76,6 +76,9 @@
                   <CustomButton icon="el-icon-plus" type="add" size="small" @click="handleManualAddDevice">
                     {{ $t('device.manualAdd') }}
                   </CustomButton>
+                  <CustomButton icon="el-icon-connection" size="small" @click="mergeSelectedMobileDevices">
+                    {{ $t('device.mergeMobile') }}
+                  </CustomButton>
                   <CustomButton size="small" type="delete" icon="el-icon-delete" @click="deleteSelected">
                     {{ $t('device.unbind') }}
                   </CustomButton>
@@ -99,6 +102,7 @@
 </template>
 
 <script>
+import { buildMobileMergeSelection } from '@/utils/mobileDeviceMerge.mjs';
 import Api from '@/apis/api';
 import AddDeviceDialog from "@/components/AddDeviceDialog.vue";
 import HeaderBar from "@/components/HeaderBar.vue";
@@ -237,6 +241,27 @@ export default {
         this.batchUnbindDevices(deviceIds);
       });
     },
+    mergeSelectedMobileDevices() {
+      const selection = buildMobileMergeSelection(this.deviceList);
+      if (!selection) {
+        this.$message.warning(this.$t('device.mergeMobileSelect'));
+        return;
+      }
+      this.$confirm(this.$t('device.mergeMobileConfirm').replace('{count}', selection.count),
+        this.$t('message.warning'), {
+          confirmButtonText: this.$t('button.ok'),
+          cancelButtonText: this.$t('button.cancel'),
+          type: 'warning'
+        }).then(() => {
+          Api.device.mergeMobileDevices(selection.canonicalDeviceId,
+            selection.duplicateDeviceIds, ({ data }) => {
+              if (data.code === 0) {
+                this.$message.success(this.$t('device.mergeMobileSuccess'));
+                this.fetchBindDevices(this.currentAgentId);
+              } else this.$message.error(data.msg || this.$t('device.mergeMobileFailed'));
+            });
+        });
+    },
     batchUnbindDevices(deviceIds) {
       const promises = deviceIds.map(id => {
         return new Promise((resolve, reject) => {
@@ -364,6 +389,7 @@ export default {
               _submitting: false,
               otaSwitch: device.autoUpdate === 1,
               rawBindTime,
+              lastConnectedAtTimestamp: parseTimestamp(device.lastConnectedAtTimestamp),
               selected: false,
               deviceStatus: 'offline'
             };

@@ -1,4 +1,9 @@
 export default {
+  'device.mergeMobile': '合并同一手机',
+  'device.mergeMobileSelect': '请至少选择两个属于同一手机的 Android 小智设备',
+  'device.mergeMobileConfirm': '确认将选中的 {count} 条记录合并为同一手机吗？历史事件和设置会统一显示。',
+  'device.mergeMobileSuccess': '手机设备已合并',
+  'device.mergeMobileFailed': '手机设备合并失败',
   // 登录页面相关提示文本
   'login.requiredUsername': '用户名不能为空',
   'login.requiredPassword': '密码不能为空',

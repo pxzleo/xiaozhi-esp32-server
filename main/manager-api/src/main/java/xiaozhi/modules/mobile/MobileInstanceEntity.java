@@ -15,6 +15,8 @@ public class MobileInstanceEntity {
     private String deviceId;
     private Long userId;
     private String installationId;
+    private String stableDeviceKey;
+    private String canonicalInstanceId;
     private String agentId;
     private String platform;
     private String appVersion;

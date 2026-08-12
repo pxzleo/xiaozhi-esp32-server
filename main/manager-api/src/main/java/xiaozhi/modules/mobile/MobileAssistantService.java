@@ -61,7 +61,21 @@ public class MobileAssistantService {
 
         String token = newCredential();
         Date now = new Date();
-        MobileInstanceEntity entity = mobileDao.selectActiveForUpdate(userId, request.installationId());
+        MobileInstanceEntity entity = StringUtils.isBlank(request.stableDeviceKey()) ? null
+                : mobileDao.selectByStableKeyForUpdate(userId, request.stableDeviceKey());
+        if (entity == null) {
+            entity = mobileDao.selectActiveForUpdate(userId, request.installationId());
+        }
+        if (entity != null && entity.getCanonicalInstanceId() != null
+                && !entity.getCanonicalInstanceId().equals(entity.getMobileInstanceId())) {
+            MobileInstanceEntity canonical = mobileDao.selectCanonicalByInstanceForUpdate(
+                    entity.getMobileInstanceId());
+            if (canonical == null) {
+                throw new MobileApiException(HttpStatus.CONFLICT,
+                        "MOBILE_CANONICAL_INVALID", "手机合并关系无效");
+            }
+            entity = canonical;
+        }
         if (entity == null) {
             entity = new MobileInstanceEntity();
             String stableBindingHash = hashCredential(userId + "|" + request.installationId());
@@ -69,6 +83,8 @@ public class MobileAssistantService {
             entity.setDeviceId(stableBindingHash.substring(32));
             entity.setUserId(userId);
             entity.setInstallationId(request.installationId());
+            entity.setStableDeviceKey(request.stableDeviceKey());
+            entity.setCanonicalInstanceId(entity.getMobileInstanceId());
             entity.setCreatedAt(now);
             populateMutable(entity, request, token, now);
             mobileDao.insertDeviceIgnore(entity);
@@ -76,6 +92,11 @@ public class MobileAssistantService {
                 throw new MobileApiException(HttpStatus.CONFLICT, "BIND_CONFLICT_RETRY", "并发绑定冲突，请重试");
             }
         } else {
+            mobileDao.retireMergedAliases(userId, entity.getMobileInstanceId());
+            entity.setInstallationId(request.installationId());
+            if (StringUtils.isNotBlank(request.stableDeviceKey())) {
+                entity.setStableDeviceKey(request.stableDeviceKey());
+            }
             populateMutable(entity, request, token, now);
             mobileDao.updateById(entity);
             DeviceEntity device = new DeviceEntity();

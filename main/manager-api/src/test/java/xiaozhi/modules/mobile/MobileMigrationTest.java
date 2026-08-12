@@ -99,6 +99,33 @@ class MobileMigrationTest {
     }
 
     @Test
+    void stableIdentityMigrationKeepsAliasesAndCanonicalHistory() throws Exception {
+        try (var stream = getClass().getResourceAsStream("/db/changelog/202608121300.sql")) {
+            String sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            assertTrue(sql.contains("`stable_device_key` char(64)"));
+            assertTrue(sql.contains("`canonical_instance_id` varchar(36)"));
+            assertTrue(sql.contains("uk_mobile_instance_owner_stable_device"));
+            assertTrue(sql.contains("idx_mobile_instance_canonical"));
+            assertFalse(sql.contains("DELETE FROM"));
+        }
+    }
+
+    @Test
+    void visibleDeviceAndAuditQueriesUseCanonicalMobileGroup() throws Exception {
+        String deviceSql = String.join("\n", xiaozhi.modules.device.dao.DeviceDao.class
+                .getDeclaredMethod("selectVisibleByUserAndAgent", Long.class, String.class)
+                .getAnnotation(org.apache.ibatis.annotations.Select.class).value());
+        String eventSql = String.join("\n", MobileEventDao.class
+                .getDeclaredMethod("pageAuditForUser", Long.class, String.class, String.class,
+                        String.class, String.class, java.util.Date.class, java.util.Date.class,
+                        int.class, long.class)
+                .getAnnotation(org.apache.ibatis.annotations.Select.class).value());
+        assertTrue(deviceSql.contains("mi.canonical_instance_id=mi.mobile_instance_id"));
+        assertTrue(deviceSql.contains("member.canonical_instance_id=mi.mobile_instance_id"));
+        assertTrue(eventSql.contains("mi.canonical_instance_id=#{instanceId}"));
+    }
+
+    @Test
     void processingClaimUsesDatabaseTimeCasAndAllowsExpiredLeaseTakeover() throws Exception {
         String candidates = String.join("\n", MobileEventDao.class
                 .getMethod("selectProcessingCandidates", int.class)

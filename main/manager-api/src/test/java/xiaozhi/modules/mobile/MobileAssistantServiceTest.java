@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
 
 import java.util.List;
 
@@ -55,10 +56,10 @@ class MobileAssistantServiceTest {
     @Test
     void rejectsUnknownVersionCapabilityAndForeignAgent() {
         assertThrows(MobileApiException.class, () -> service.bind(7L,
-                new BindRequest(2, request().installationId(), "android", "0.1.0", "agent-1",
+                new BindRequest(2, request().installationId(), request().stableDeviceKey(), "android", "0.1.0", "agent-1",
                         List.of("text_chat"))));
         assertThrows(MobileApiException.class, () -> service.bind(7L,
-                new BindRequest(1, request().installationId(), "android", "0.1.0", "agent-1",
+                new BindRequest(1, request().installationId(), request().stableDeviceKey(), "android", "0.1.0", "agent-1",
                         List.of("client_tts_text"))));
         assertThrows(MobileApiException.class, () -> service.bind(8L, request()));
     }
@@ -72,6 +73,28 @@ class MobileAssistantServiceTest {
 
         assertEquals("BIND_CONFLICT_RETRY", exception.getErrorCode());
         assertEquals(409, exception.getStatus().value());
+    }
+
+    @Test
+    void stableDeviceKeyReusesExistingInstanceAfterInstallationIdChanges() {
+        MobileInstanceEntity existing = new MobileInstanceEntity();
+        existing.setMobileInstanceId("mob_0123456789abcdef0123456789abcdef");
+        existing.setDeviceId("a".repeat(32));
+        existing.setUserId(7L);
+        existing.setCredentialVersion(4);
+        existing.setCanonicalInstanceId(existing.getMobileInstanceId());
+        when(mobileDao.selectByStableKeyForUpdate(7L, request().stableDeviceKey()))
+                .thenReturn(existing);
+
+        var result = service.bind(7L, request());
+
+        assertEquals(existing.getMobileInstanceId(), result.mobileInstanceId());
+        assertEquals(5, result.credentialVersion());
+        assertEquals(request().installationId(), existing.getInstallationId());
+        org.mockito.Mockito.verify(mobileDao, org.mockito.Mockito.never())
+                .insertDeviceIgnore(any());
+        org.mockito.Mockito.verify(mobileDao).updateById(existing);
+        verify(mobileDao).retireMergedAliases(7L, existing.getMobileInstanceId());
     }
 
     @Test
@@ -144,7 +167,8 @@ class MobileAssistantServiceTest {
     }
 
     private BindRequest request() {
-        return new BindRequest(1, "123e4567-e89b-12d3-a456-426614174000", "android", "0.1.0", "agent-1",
+        return new BindRequest(1, "123e4567-e89b-12d3-a456-426614174000", "a".repeat(64),
+                "android", "0.1.0", "agent-1",
                 List.of("text_chat", "voice_session"));
     }
 }

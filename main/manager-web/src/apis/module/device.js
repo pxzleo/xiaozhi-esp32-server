@@ -35,6 +35,21 @@ export default {
                 });
             }).send();
     },
+    mergeMobileDevices(canonicalDeviceId, duplicateDeviceIds, callback) {
+        RequestService.sendRequest()
+            .url(`${getServiceUrl()}/mobile/devices/merge`)
+            .method('POST')
+            .data({
+                canonical_device_id: canonicalDeviceId,
+                duplicate_device_ids: duplicateDeviceIds,
+            })
+            .success((res) => {
+                RequestService.clearRequestTime();
+                callback(res);
+            })
+            .networkFail((err) => callback({ data: err }))
+            .send();
+    },
     // 绑定设备
     bindDevice(agentId, deviceCode, callback) {
         RequestService.sendRequest()

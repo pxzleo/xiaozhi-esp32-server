@@ -19,7 +19,7 @@ class MobileEventAuditServiceTest {
         MobileInstanceEntity instance = new MobileInstanceEntity();
         instance.setMobileInstanceId("mob_0123456789abcdef0123456789abcdef");
         instance.setUserId(7L);
-        when(instanceDao.selectById(instance.getMobileInstanceId())).thenReturn(instance);
+        when(instanceDao.selectCanonicalByInstance(instance.getMobileInstanceId())).thenReturn(instance);
         when(eventDao.pageAuditForUser(7L, instance.getMobileInstanceId(), null, null, null,
                 null, null, 20, 0)).thenReturn(List.of());
 
@@ -49,7 +49,7 @@ class MobileEventAuditServiceTest {
         MobileInstanceEntity instance = new MobileInstanceEntity();
         instance.setMobileInstanceId("mob_0123456789abcdef0123456789abcdef");
         instance.setUserId(7L);
-        when(instanceDao.selectById(instance.getMobileInstanceId())).thenReturn(instance);
+        when(instanceDao.selectCanonicalByInstance(instance.getMobileInstanceId())).thenReturn(instance);
         when(instanceDao.updateAlertSettings(7L, instance.getMobileInstanceId(), "timely",
                 "parcel,security")).thenReturn(1);
 
@@ -63,5 +63,30 @@ class MobileEventAuditServiceTest {
         assertEquals(List.of("parcel", "security"), updated.categories());
         assertThrows(xiaozhi.common.exception.RenException.class,
                 () -> service.settings(8L, instance.getMobileInstanceId()));
+    }
+
+    @Test
+    void aliasRequestReadsCanonicalHistoryAndUpdatesCanonicalSettings() {
+        MobileInstanceDao instanceDao = mock(MobileInstanceDao.class);
+        MobileEventDao eventDao = mock(MobileEventDao.class);
+        MobileEventAuditService service = new MobileEventAuditService(instanceDao, eventDao);
+        String aliasId = "mob_" + "a".repeat(32);
+        MobileInstanceEntity canonical = new MobileInstanceEntity();
+        canonical.setMobileInstanceId("mob_" + "b".repeat(32));
+        canonical.setUserId(7L);
+        when(instanceDao.selectCanonicalByInstance(aliasId)).thenReturn(canonical);
+        when(eventDao.pageAuditForUser(7L, canonical.getMobileInstanceId(), null, null, null,
+                null, null, 20, 0)).thenReturn(List.of());
+        when(instanceDao.updateAlertSettings(7L, canonical.getMobileInstanceId(), "balanced",
+                "parcel")).thenReturn(1);
+
+        service.audit(7L, aliasId, null, null, null, null, null, 1, 20);
+        service.updateSettings(7L, aliasId,
+                new MobileAlertSettingsDTOs.SettingsUpdate("balanced", List.of("parcel")));
+
+        verify(eventDao).countAuditForUser(7L, canonical.getMobileInstanceId(), null, null,
+                null, null, null);
+        verify(instanceDao).updateAlertSettings(7L, canonical.getMobileInstanceId(), "balanced",
+                "parcel");
     }
 }

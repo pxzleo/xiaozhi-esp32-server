@@ -20,15 +20,26 @@ import xiaozhi.modules.mobile.MobileAssistantDTOs.BindResponse;
 import xiaozhi.modules.mobile.MobileAssistantDTOs.MessageClaimResponse;
 import xiaozhi.modules.mobile.MobileAssistantDTOs.MessageActionRequest;
 import xiaozhi.modules.mobile.MobileAssistantDTOs.MessageActionResponse;
+import xiaozhi.modules.mobile.MobileAssistantDTOs.MergeRequest;
 import xiaozhi.modules.security.user.SecurityUser;
 
 @RestController
 @Validated
 public class MobileAssistantController {
     private final MobileAssistantService service;
+    private final MobileInstanceMergeService mergeService;
 
-    public MobileAssistantController(MobileAssistantService service) {
+    public MobileAssistantController(MobileAssistantService service,
+            MobileInstanceMergeService mergeService) {
         this.service = service;
+        this.mergeService = mergeService;
+    }
+
+    @PostMapping("/mobile/devices/merge")
+    @RequiresPermissions("sys:role:normal")
+    public Result<Void> merge(@Valid @RequestBody MergeRequest request) {
+        mergeService.merge(SecurityUser.getUserId(), request);
+        return new Result<>();
     }
 
     @PostMapping("/mobile/devices/bind")

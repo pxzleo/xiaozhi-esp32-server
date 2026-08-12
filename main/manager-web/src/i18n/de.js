@@ -1,4 +1,9 @@
 export default {
+  'device.mergeMobile': 'Gleiches Telefon zusammenführen',
+  'device.mergeMobileSelect': 'Wählen Sie mindestens zwei Android-Xiaozhi-Einträge desselben Telefons aus',
+  'device.mergeMobileConfirm': 'Die ausgewählten {count} Einträge als ein Telefon zusammenführen? Verlauf und Einstellungen werden gemeinsam angezeigt.',
+  'device.mergeMobileSuccess': 'Telefoneinträge zusammengeführt',
+  'device.mergeMobileFailed': 'Telefoneinträge konnten nicht zusammengeführt werden',
   // Login page related prompt text
   'login.requiredUsername': 'Benutzername darf nicht leer sein',
   'login.requiredPassword': 'Passwort darf nicht leer sein',
