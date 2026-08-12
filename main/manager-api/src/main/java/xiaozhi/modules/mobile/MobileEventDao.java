@@ -14,9 +14,22 @@ public interface MobileEventDao {
     int insertIgnore(MobileEventEntity entity);
 
     @org.apache.ibatis.annotations.Update("""
-            UPDATE ai_mobile_event SET event_state=#{eventState},summary=#{summary},
-                entities_json=#{entitiesJson},evidence_json=#{evidenceJson},privacy_level=#{privacyLevel},
-                occurred_at=#{occurredAt},expires_at=#{expiresAt},processing_status='received',
+            UPDATE ai_mobile_event SET
+                event_state=CASE WHEN #{eventState}='removed'
+                    AND processing_status IN ('received','error') THEN event_state ELSE #{eventState} END,
+                summary=CASE WHEN #{eventState}='removed'
+                    AND processing_status IN ('received','error') THEN summary ELSE #{summary} END,
+                entities_json=CASE WHEN #{eventState}='removed'
+                    AND processing_status IN ('received','error') THEN entities_json ELSE #{entitiesJson} END,
+                evidence_json=CASE WHEN #{eventState}='removed'
+                    AND processing_status IN ('received','error') THEN evidence_json ELSE #{evidenceJson} END,
+                privacy_level=CASE WHEN #{eventState}='removed'
+                    AND processing_status IN ('received','error') THEN privacy_level ELSE #{privacyLevel} END,
+                occurred_at=#{occurredAt},
+                expires_at=CASE WHEN #{eventState}='removed'
+                    AND processing_status IN ('received','error') THEN expires_at ELSE #{expiresAt} END,
+                processing_status=CASE WHEN #{eventState}='removed'
+                    AND processing_status IN ('received','error') THEN processing_status ELSE 'received' END,
                 reason_code=NULL,category=NULL,severity=NULL,confidence=NULL,spoken_summary=NULL,
                 processing_lease_owner=NULL,processing_lease_token=NULL,
                 processing_lease_until=NULL,next_attempt_at=NULL,processed_at=NULL,updated_at=#{updatedAt}

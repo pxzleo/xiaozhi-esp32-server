@@ -28,9 +28,17 @@ import {
   validateMonitors,
   validatePreference,
   validClassifierModelId,
+  validMobileAlertSettings,
   externalMonitoringSetting,
   externalMonitoringEditable,
 } from '../src/utils/proactiveAssistant.mjs';
+
+test('strictly validates mobile alert sensitivity and scope', () => {
+  assert.equal(validMobileAlertSettings({ sensitivity: 'balanced', categories: ['parcel', 'security'] }), true);
+  assert.equal(validMobileAlertSettings({ sensitivity: 'unknown', categories: ['parcel'] }), false);
+  assert.equal(validMobileAlertSettings({ sensitivity: 'timely', categories: [] }), false);
+  assert.equal(validMobileAlertSettings({ sensitivity: 'timely', categories: ['parcel', 'parcel'] }), false);
+});
 
 test('exposes claimed events in the delivery status filter', () => {
   assert.equal(PROACTIVE_DELIVERY_STATUSES.includes('claimed'), true);

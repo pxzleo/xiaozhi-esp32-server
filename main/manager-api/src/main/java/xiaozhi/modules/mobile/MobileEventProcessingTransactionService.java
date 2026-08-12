@@ -16,17 +16,25 @@ public class MobileEventProcessingTransactionService {
     private final MobileEventDao eventDao;
     private final MobileInstanceDao instanceDao;
     private final ProactiveService proactiveService;
+    private final MobileAlertDecisionPolicy decisionPolicy;
 
     public MobileEventProcessingTransactionService(MobileEventDao eventDao,
-            MobileInstanceDao instanceDao, ProactiveService proactiveService) {
+            MobileInstanceDao instanceDao, ProactiveService proactiveService,
+            MobileAlertDecisionPolicy decisionPolicy) {
         this.eventDao = eventDao;
         this.instanceDao = instanceDao;
         this.proactiveService = proactiveService;
+        this.decisionPolicy = decisionPolicy;
+    }
+
+    public MobileInstanceEntity instance(String instanceId) {
+        return instanceDao.selectById(instanceId);
     }
 
     public record ConversionCommand(MobileEventEntity event, String token, String category,
             String severity, double confidence, String spokenSummary, String title,
-            String dedupeKey, String source, Priority priority) {}
+            String dedupeKey, String source, Priority priority, boolean notification,
+            boolean modelClassified) {}
 
     public record ConversionResult(String status, String proactiveEventId) {}
 
@@ -50,13 +58,24 @@ public class MobileEventProcessingTransactionService {
         if (!sameRevision(authoritative, event, command.token())) {
             return new ConversionResult(SUPERSEDED, null);
         }
-        MobileInstanceEntity instance = instanceDao.selectById(event.getMobileInstanceId());
+        MobileInstanceEntity instance = instanceDao.selectByIdForUpdate(event.getMobileInstanceId());
         if (instance == null || instance.getRevokedAt() != null) {
             if (eventDao.finishIgnored(event.getMobileInstanceId(), event.getEventId(),
                     command.token(), "mobile_instance_unavailable") != 1) {
                 throw new RenException("手机事件忽略终态写入失败");
             }
             return new ConversionResult(MobileEventProcessingService.IGNORED, null);
+        }
+        if (command.notification()
+                && !decisionPolicy.enabledCategory(instance.getAlertCategories(), command.category())) {
+            finishClassified(command, "category_disabled");
+            return new ConversionResult(MobileEventProcessingService.CLASSIFIED, null);
+        }
+        if (command.modelClassified()
+                && !decisionPolicy.acceptModel(instance.getAlertSensitivity(),
+                        command.severity(), command.confidence())) {
+            finishClassified(command, "classification_below_threshold");
+            return new ConversionResult(MobileEventProcessingService.CLASSIFIED, null);
         }
         var created = proactiveService.createMobileAlert(event.getMobileInstanceId(),
                 instance.getUserId(), instance.getAgentId(), event.getEventId(),
@@ -69,6 +88,15 @@ public class MobileEventProcessingTransactionService {
         }
         return new ConversionResult(MobileEventProcessingService.CONVERTED,
                 created.authoritativeEventId());
+    }
+
+    private void finishClassified(ConversionCommand command, String reason) {
+        MobileEventEntity event = command.event();
+        if (eventDao.finishClassified(event.getMobileInstanceId(), event.getEventId(),
+                command.token(), command.category(), command.severity(), command.confidence(),
+                command.spokenSummary(), reason) != 1) {
+            throw new RenException("手机事件分类终态写入失败");
+        }
     }
 
     private boolean sameRevision(MobileEventEntity authoritative, MobileEventEntity candidate,

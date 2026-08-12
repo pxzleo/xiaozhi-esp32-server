@@ -88,6 +88,14 @@ class MobileMigrationTest {
             yaml = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
         }
         assertTrue(yaml.indexOf("id: 202608111600") > yaml.indexOf("id: 202608111400"));
+        assertTrue(yaml.indexOf("id: 202608121200") > yaml.indexOf("id: 202608111600"));
+
+        try (var stream = getClass().getResourceAsStream("/db/changelog/202608121200.sql")) {
+            String settings = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            assertTrue(settings.contains("`alert_sensitivity` varchar(16) NOT NULL DEFAULT 'balanced'"));
+            assertTrue(settings.contains("`alert_categories` varchar(160) NOT NULL"));
+            assertTrue(settings.contains("security,call,parcel,appointment,message,other"));
+        }
     }
 
     @Test
@@ -116,7 +124,7 @@ class MobileMigrationTest {
                 .getAnnotation(Update.class).value());
         assertTrue(latest.contains("mobile_instance_id=#{mobileInstanceId} AND dedupe_key=#{dedupeKey}"));
         assertTrue(latest.contains("occurred_at<#{occurredAt}"));
-        assertTrue(latest.contains("processing_status='received'"));
+        assertTrue(latest.contains("ELSE 'received' END"));
         assertTrue(latest.contains("processing_lease_token=NULL"));
         String dismiss = String.join("\n", MobileEventDao.class
                 .getMethod("supersedeUndeliveredMobileAlerts", String.class, String.class)
@@ -181,5 +189,16 @@ class MobileMigrationTest {
                 .getMethod("selectByEventIdForUpdate", String.class, String.class)
                 .getAnnotation(Select.class).value());
         assertTrue(lock.contains("FOR UPDATE"));
+    }
+
+    @Test
+    void removedNotificationPreservesAnUnprocessedAuthoritativeSnapshot() throws Exception {
+        String latest = String.join("\n", MobileEventDao.class
+                .getMethod("updateLatestState", MobileEventEntity.class)
+                .getAnnotation(Update.class).value());
+        assertTrue(latest.contains("#{eventState}='removed'"));
+        assertTrue(latest.contains("processing_status IN ('received','error')"));
+        assertTrue(latest.contains("THEN event_state"));
+        assertTrue(latest.contains("THEN processing_status"));
     }
 }

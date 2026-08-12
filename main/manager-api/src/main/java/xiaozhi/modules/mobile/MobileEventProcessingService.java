@@ -14,6 +14,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -44,15 +45,24 @@ public class MobileEventProcessingService {
     private final MobileEventDao eventDao;
     private final ProactiveMonitorService classifier;
     private final MobileEventProcessingTransactionService transactions;
+    private final MobileAlertDecisionPolicy decisionPolicy;
     private final ObjectMapper objectMapper;
 
+    @Autowired
     public MobileEventProcessingService(MobileEventDao eventDao,
             ProactiveMonitorService classifier, MobileEventProcessingTransactionService transactions,
             ObjectMapper objectMapper) {
+        this(eventDao, classifier, transactions, objectMapper, new MobileAlertDecisionPolicy());
+    }
+
+    public MobileEventProcessingService(MobileEventDao eventDao,
+            ProactiveMonitorService classifier, MobileEventProcessingTransactionService transactions,
+            ObjectMapper objectMapper, MobileAlertDecisionPolicy decisionPolicy) {
         this.eventDao = eventDao;
         this.classifier = classifier;
         this.transactions = transactions;
         this.objectMapper = objectMapper;
+        this.decisionPolicy = decisionPolicy;
     }
 
     public int processBatch(String owner, int limit) {
@@ -99,7 +109,25 @@ public class MobileEventProcessingService {
             finishIgnored(event, token, "stored_event_shape_invalid");
             return IGNORED;
         }
-        String category = entities.get("category");
+        MobileInstanceEntity instance = transactions.instance(event.getMobileInstanceId());
+        if (instance == null || instance.getRevokedAt() != null) {
+            finishIgnored(event, token, "mobile_instance_unavailable");
+            return IGNORED;
+        }
+        MobileAlertDecisionPolicy.DeterministicDecision deterministic =
+                decisionPolicy.deterministic(entities.get("category"), event.getSummary());
+        if (deterministic != null) {
+            if (!decisionPolicy.enabledCategory(instance.getAlertCategories(), deterministic.category())) {
+                finishIgnored(event, token, "category_disabled");
+                return IGNORED;
+            }
+            String severity = deterministic.priority() == Priority.CRITICAL ? "critical" : "high";
+            return convert(event, token, deterministic.category(), severity, 1.0,
+                    deterministic.spokenSummary(), deterministic.title(),
+                    notificationRevisionDedupe(event), event.getSourcePackage(), deterministic.priority(),
+                    true, false);
+        }
+        String category = decisionPolicy.category(entities.get("category"), event.getSummary());
         if (!CATEGORIES.contains(category) || !prefilter(category, event.getSummary())) {
             if (eventDao.finishPrefiltered(event.getMobileInstanceId(), event.getEventId(), token,
                     "prefilter_low_value") != 1) {
@@ -115,19 +143,27 @@ public class MobileEventProcessingService {
             finishError(event, token, "classifier_unavailable");
             return ERROR;
         }
-        boolean notify = result.shouldNotify()
-                && Set.of("high", "critical").contains(result.severity())
-                && result.confidence() >= 0.85;
-        if (!notify) {
-            String reason = result.shouldNotify() ? "classification_below_threshold"
-                    : result.reasonCode();
+        if (!result.shouldNotify()) {
+            String reason = result.reasonCode();
             finishClassified(event, token, result, reason);
+            return CLASSIFIED;
+        }
+        if (!decisionPolicy.enabledCategory(instance.getAlertCategories(), result.category())) {
+            finishClassified(event, token, result, "category_disabled");
+            return CLASSIFIED;
+        }
+        if (!decisionPolicy.acceptModel(instance.getAlertSensitivity(),
+                result.severity(), result.confidence())) {
+            finishClassified(event, token, result, "classification_below_threshold");
             return CLASSIFIED;
         }
         return convert(event, token, result.category(), result.severity(), result.confidence(),
                 result.spokenSummary(), title(result.category()), notificationRevisionDedupe(event),
-                event.getSourcePackage(), "critical".equals(result.severity())
-                        ? Priority.CRITICAL : Priority.HIGH);
+                event.getSourcePackage(), switch (result.severity()) {
+                    case "critical" -> Priority.CRITICAL;
+                    case "medium" -> Priority.NORMAL;
+                    default -> Priority.HIGH;
+                }, true, true);
     }
 
     private String processLocation(MobileEventEntity event, String token) {
@@ -150,16 +186,17 @@ public class MobileEventProcessingService {
         String summary = prefix + placeName;
         String dedupeKey = "sha256:" + sha256(placeId + ":" + transition);
         return convert(event, token, "location", "medium", 1.0, summary,
-                "地点提醒", dedupeKey, "android.geofence", Priority.NORMAL);
+                "地点提醒", dedupeKey, "android.geofence", Priority.NORMAL, false, false);
     }
 
     private String convert(MobileEventEntity event, String token, String category,
             String severity, double confidence, String spokenSummary, String title,
-            String dedupeKey, String source, Priority priority) {
+            String dedupeKey, String source, Priority priority, boolean notification,
+            boolean modelClassified) {
         try {
             return transactions.convert(new MobileEventProcessingTransactionService.ConversionCommand(
                     event, token, category, severity, confidence, spokenSummary, title,
-                    dedupeKey, source, priority)).status();
+                    dedupeKey, source, priority, notification, modelClassified)).status();
         } catch (RenException error) {
             LOGGER.warn("手机主动事件转换失败: instance={}, event={}, reason={}",
                     event.getMobileInstanceId(), event.getEventId(), error.getMsg());

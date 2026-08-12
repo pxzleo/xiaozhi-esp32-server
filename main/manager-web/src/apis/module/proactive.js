@@ -58,6 +58,12 @@ export default {
   getMobileEvents(filters, callback, failCallback) {
     return send(`/mobile/events/audit?${buildMobileEventQuery(filters)}`, 'GET', undefined, callback, failCallback);
   },
+  getMobileAlertSettings(instanceId, callback, failCallback) {
+    return send(`/mobile/events/audit/settings?mobile_instance_id=${encodeURIComponent(instanceId)}`, 'GET', undefined, callback, failCallback);
+  },
+  updateMobileAlertSettings(instanceId, data, callback, failCallback) {
+    return send(`/mobile/events/audit/settings?mobile_instance_id=${encodeURIComponent(instanceId)}`, 'PUT', data, callback, failCallback);
+  },
   getHabits(deviceId, callback, failCallback) {
     const query = new URLSearchParams({ device_id: deviceId }).toString();
     return send(`/device/proactive/habits?${query}`, 'GET', undefined, callback, failCallback);

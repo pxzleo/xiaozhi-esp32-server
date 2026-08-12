@@ -259,6 +259,28 @@
       <el-tab-pane :label="$t('proactive.mobileEvents')" name="mobileEvents">
         <div class="section-body">
           <el-alert v-if="mobileEventsError" :title="mobileEventsError" type="error" :closable="false" show-icon />
+          <el-form v-if="mobileAlertSettings" :model="mobileAlertSettings" label-width="140px" size="small" class="mobile-alert-settings">
+            <el-form-item :label="$t('proactive.mobile.sensitivity')">
+              <el-radio-group v-model="mobileAlertSettings.sensitivity">
+                <el-radio-button label="conservative">{{ $t('proactive.mobile.sensitivity.conservative') }}</el-radio-button>
+                <el-radio-button label="balanced">{{ $t('proactive.mobile.sensitivity.balanced') }}</el-radio-button>
+                <el-radio-button label="timely">{{ $t('proactive.mobile.sensitivity.timely') }}</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item :label="$t('proactive.mobile.categories')">
+              <el-checkbox-group v-model="mobileAlertSettings.categories">
+                <el-checkbox v-for="category in mobileAlertCategories" :key="category" :label="category">
+                  {{ $t(`proactive.mobile.category.${category}`) }}
+                </el-checkbox>
+              </el-checkbox-group>
+              <div class="field-help">{{ $t('proactive.mobile.categoriesHelp') }}</div>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="mobileAlertSettingsSaving" @click="saveMobileAlertSettings">
+                {{ $t('proactive.save') }}
+              </el-button>
+            </el-form-item>
+          </el-form>
           <div class="filter-row">
             <el-select v-model="mobileEventFilters.type" clearable size="small" :placeholder="$t('proactive.mobile.type')">
               <el-option v-for="type in mobileEventTypes" :key="type" :label="enumLabel('mobile.type', type)" :value="type" />
@@ -383,6 +405,7 @@ import {
   inheritedWeatherLocationError,
   validateMonitors,
   validatePreference,
+  validMobileAlertSettings,
 } from '@/utils/proactiveAssistant.mjs';
 
 export default {
@@ -427,6 +450,9 @@ export default {
       mobileEventTotal: 0,
       mobileEventsLoading: false,
       mobileEventsError: '',
+      mobileAlertSettings: null,
+      mobileAlertSettingsSaving: false,
+      mobileAlertCategories: ['security', 'call', 'parcel', 'appointment', 'message', 'other'],
       mobileEventFilters: {
         type: '', processing_status: '', delivery_status: '', from: '', to: '', page: 1, limit: 20,
       },
@@ -513,6 +539,8 @@ export default {
       this.mobileEventTotal = 0;
       this.mobileEventsLoading = false;
       this.mobileEventsError = '';
+      this.mobileAlertSettings = null;
+      this.mobileAlertSettingsSaving = false;
       this.habits = [];
       this.habitsLoading = false;
       this.habitsError = '';
@@ -540,7 +568,10 @@ export default {
         this.loadMonitors();
       }
       if (this.activeTab === 'events') this.loadEvents();
-      if (this.activeTab === 'mobileEvents') this.loadMobileEvents();
+      if (this.activeTab === 'mobileEvents') {
+        this.loadMobileAlertSettings();
+        this.loadMobileEvents();
+      }
       if (this.activeTab === 'habits') this.loadHabits();
     },
     responseData(response) {
@@ -824,6 +855,41 @@ export default {
         this.mobileEventTotal = 0;
         this.mobileEventsError = this.errorMessage(error, 'proactive.mobile.loadFailed');
         this.$message.error(this.mobileEventsError);
+      });
+    },
+    loadMobileAlertSettings() {
+      const request = this.requestGate.begin('mobileAlertSettings');
+      const instanceId = this.device.macAddress || '';
+      if (!request.deviceId || !/^mob_[0-9a-f]{32}$/.test(instanceId)) return;
+      Api.proactive.getMobileAlertSettings(instanceId, response => {
+        if (!this.requestGate.isCurrent(request) || instanceId !== (this.device.macAddress || '')) return;
+        const data = this.responseData(response);
+        if (!data || data.mobile_instance_id !== instanceId) return;
+        this.mobileAlertSettings = { sensitivity: data.sensitivity, categories: [...data.categories] };
+      }, error => {
+        if (!this.requestGate.isCurrent(request)) return;
+        this.mobileEventsError = this.errorMessage(error, 'proactive.mobile.settingsLoadFailed');
+      });
+    },
+    saveMobileAlertSettings() {
+      const instanceId = this.device.macAddress || '';
+      if (!validMobileAlertSettings(this.mobileAlertSettings) || this.mobileAlertSettingsSaving) {
+        this.$message.warning(this.$t('proactive.mobile.settingsInvalid'));
+        return;
+      }
+      const request = this.requestGate.begin('mobileAlertSettings');
+      this.mobileAlertSettingsSaving = true;
+      Api.proactive.updateMobileAlertSettings(instanceId, this.mobileAlertSettings, response => {
+        if (!this.requestGate.isCurrent(request)) return;
+        this.mobileAlertSettingsSaving = false;
+        const data = this.responseData(response);
+        if (!data || data.mobile_instance_id !== instanceId) return;
+        this.mobileAlertSettings = { sensitivity: data.sensitivity, categories: [...data.categories] };
+        this.$message.success(this.$t('proactive.mobile.settingsSaved'));
+      }, error => {
+        if (!this.requestGate.isCurrent(request)) return;
+        this.mobileAlertSettingsSaving = false;
+        this.$message.error(this.errorMessage(error, 'proactive.mobile.settingsSaveFailed'));
       });
     },
     handleMobileEventSizeChange(limit) {

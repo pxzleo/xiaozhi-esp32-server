@@ -31,6 +31,7 @@ class MobileEventProcessingServiceTest {
     private ProactiveService proactive;
     private MobileEventProcessingTransactionService transactions;
     private MobileEventProcessingService service;
+    private MobileAlertDecisionPolicy decisionPolicy;
 
     @BeforeEach
     void setUp() {
@@ -38,8 +39,11 @@ class MobileEventProcessingServiceTest {
         instanceDao = mock(MobileInstanceDao.class);
         classifier = mock(ProactiveMonitorService.class);
         proactive = mock(ProactiveService.class);
-        transactions = new MobileEventProcessingTransactionService(eventDao, instanceDao, proactive);
-        service = new MobileEventProcessingService(eventDao, classifier, transactions, new ObjectMapper());
+        decisionPolicy = new MobileAlertDecisionPolicy();
+        transactions = new MobileEventProcessingTransactionService(
+                eventDao, instanceDao, proactive, decisionPolicy);
+        service = new MobileEventProcessingService(
+                eventDao, classifier, transactions, new ObjectMapper(), decisionPolicy);
         when(eventDao.finishIgnored(any(), any(), any(), any())).thenReturn(1);
         when(eventDao.finishPrefiltered(any(), any(), any(), any())).thenReturn(1);
         when(eventDao.finishClassified(any(), any(), any(), any(), any(),
@@ -47,6 +51,8 @@ class MobileEventProcessingServiceTest {
         when(eventDao.finishConverted(any(), any(), any(), any(), any(),
                 org.mockito.ArgumentMatchers.anyDouble(), any(), any())).thenReturn(1);
         when(eventDao.finishError(any(), any(), any(), any(), anyLong())).thenReturn(1);
+        when(instanceDao.selectById(any())).thenReturn(instance());
+        when(instanceDao.selectByIdForUpdate(any())).thenReturn(instance());
     }
 
     @Test
@@ -118,8 +124,172 @@ class MobileEventProcessingServiceTest {
     }
 
     @Test
+    void deliveryProgressReclassifiesOtherAndCreatesAlertWithoutModel() {
+        MobileEventEntity event = event("notification.state_changed", "posted", "other",
+                "盒马订单开始配送通知：您的订单正在配送中");
+        event.setProcessingLeaseToken("token");
+        when(eventDao.selectByEventIdForUpdate(event.getMobileInstanceId(), event.getEventId()))
+                .thenReturn(event);
+        when(proactive.createMobileAlert(eq(event.getMobileInstanceId()), eq(7L), eq("agent-1"),
+                eq(event.getEventId()), any(), eq("包裹提醒"), eq("有包裹正在配送，请留意接收"),
+                eq(event.getSourcePackage()), eq("parcel"), eq(Priority.HIGH), any(), any()))
+                .thenReturn(new EventCreateResult(true, false, "mobile-parcel", null, new Date()));
+
+        assertEquals(MobileEventProcessingService.CONVERTED,
+                service.processClaimed(event, "worker", "token"));
+        verify(eventDao).finishConverted(event.getMobileInstanceId(), event.getEventId(), "token",
+                "parcel", "high", 1.0, "有包裹正在配送，请留意接收", "mobile-parcel");
+        verify(classifier, never()).classifyMobileEvent(any(), any(), any(), any());
+    }
+
+    @Test
+    void disabledCategoryNeverCreatesDeterministicAlert() {
+        MobileEventEntity event = event("notification.state_changed", "posted", "other",
+                "包裹即将送达，请保持电话畅通");
+        MobileInstanceEntity instance = instance();
+        instance.setAlertCategories("security,call");
+        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(instance);
+
+        assertEquals(MobileEventProcessingService.IGNORED,
+                service.processClaimed(event, "worker", "token"));
+        verify(eventDao).finishIgnored(event.getMobileInstanceId(), event.getEventId(),
+                "token", "category_disabled");
+        verify(proactive, never()).createMobileAlert(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void modelCannotChangeIntoADisabledCategory() {
+        MobileEventEntity event = event("notification.state_changed", "posted", "message", "请尽快查看这条通知");
+        MobileInstanceEntity instance = instance();
+        instance.setAlertCategories("message");
+        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(instance);
+        when(classifier.classifyMobileEvent(any(), any(), any(), any()))
+                .thenReturn(new ProactiveMonitorService.MobileAlertClassification(
+                        true, "security", "critical", 0.99, "账户存在风险", "security_risk"));
+
+        assertEquals(MobileEventProcessingService.CLASSIFIED,
+                service.processClaimed(event, "worker", "token"));
+        verify(eventDao).finishClassified(event.getMobileInstanceId(), event.getEventId(), "token",
+                "security", "critical", 0.99, "账户存在风险", "category_disabled");
+        verify(proactive, never()).createMobileAlert(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void enabledFinalCategoryAllowsModelToReclassifyDisabledSuppliedCategory() {
+        MobileEventEntity event = event("notification.state_changed", "posted", "other",
+                "重要：账户状态有变化，请尽快查看");
+        event.setProcessingLeaseToken("token");
+        MobileInstanceEntity configured = instance();
+        configured.setAlertCategories("security");
+        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(configured);
+        when(instanceDao.selectByIdForUpdate(event.getMobileInstanceId())).thenReturn(configured);
+        when(eventDao.selectByEventIdForUpdate(event.getMobileInstanceId(), event.getEventId()))
+                .thenReturn(event);
+        when(classifier.classifyMobileEvent(any(), any(), any(), any()))
+                .thenReturn(new ProactiveMonitorService.MobileAlertClassification(
+                        true, "security", "high", 0.9, "账户状态需要关注", "security_risk"));
+        when(proactive.createMobileAlert(any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any()))
+                .thenReturn(new EventCreateResult(true, false, "mobile-security", null, new Date()));
+
+        assertEquals(MobileEventProcessingService.CONVERTED,
+                service.processClaimed(event, "worker", "token"));
+        verify(proactive).createMobileAlert(any(), any(), any(), any(), any(), any(), any(), any(),
+                eq("security"), any(), any(), any());
+    }
+
+    @Test
+    void revokedInstanceIsIgnoredBeforeClassifier() {
+        MobileEventEntity event = event("notification.state_changed", "posted", "message",
+                "重要消息，请尽快查看");
+        MobileInstanceEntity revoked = instance();
+        revoked.setRevokedAt(new Date());
+        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(revoked);
+
+        assertEquals(MobileEventProcessingService.IGNORED,
+                service.processClaimed(event, "worker", "token"));
+        verify(eventDao).finishIgnored(event.getMobileInstanceId(), event.getEventId(), "token",
+                "mobile_instance_unavailable");
+        verify(classifier, never()).classifyMobileEvent(any(), any(), any(), any());
+    }
+
+    @Test
+    void latestSettingsAreRevalidatedInsideConversionTransaction() {
+        MobileEventEntity event = event("notification.state_changed", "posted", "message",
+                "重要消息，请尽快查看");
+        event.setProcessingLeaseToken("token");
+        MobileInstanceEntity before = instance();
+        before.setAlertCategories("message");
+        MobileInstanceEntity latest = instance();
+        latest.setAlertCategories("security");
+        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(before);
+        when(instanceDao.selectByIdForUpdate(event.getMobileInstanceId())).thenReturn(latest);
+        when(eventDao.selectByEventIdForUpdate(event.getMobileInstanceId(), event.getEventId()))
+                .thenReturn(event);
+        when(classifier.classifyMobileEvent(any(), any(), any(), any()))
+                .thenReturn(new ProactiveMonitorService.MobileAlertClassification(
+                        true, "message", "high", 0.9, "有重要消息", "important_message"));
+
+        assertEquals(MobileEventProcessingService.CLASSIFIED,
+                service.processClaimed(event, "worker", "token"));
+        verify(eventDao).finishClassified(event.getMobileInstanceId(), event.getEventId(), "token",
+                "message", "high", 0.9, "有重要消息", "category_disabled");
+        verify(proactive, never()).createMobileAlert(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void latestConservativeSensitivityRejectsPreviouslyAcceptedHighDecision() {
+        MobileEventEntity event = event("notification.state_changed", "posted", "message",
+                "重要消息，请尽快查看");
+        event.setProcessingLeaseToken("token");
+        MobileInstanceEntity before = instance();
+        before.setAlertSensitivity("balanced");
+        MobileInstanceEntity latest = instance();
+        latest.setAlertSensitivity("conservative");
+        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(before);
+        when(instanceDao.selectByIdForUpdate(event.getMobileInstanceId())).thenReturn(latest);
+        when(eventDao.selectByEventIdForUpdate(event.getMobileInstanceId(), event.getEventId()))
+                .thenReturn(event);
+        when(classifier.classifyMobileEvent(any(), any(), any(), any()))
+                .thenReturn(new ProactiveMonitorService.MobileAlertClassification(
+                        true, "message", "high", 0.95, "有重要消息", "important_message"));
+
+        assertEquals(MobileEventProcessingService.CLASSIFIED,
+                service.processClaimed(event, "worker", "token"));
+        verify(eventDao).finishClassified(event.getMobileInstanceId(), event.getEventId(), "token",
+                "message", "high", 0.95, "有重要消息", "classification_below_threshold");
+        verify(proactive, never()).createMobileAlert(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void deterministicCategoryClosedInsideFinalTransactionDoesNotCreateAlert() {
+        MobileEventEntity event = event("notification.state_changed", "posted", "other",
+                "包裹正在配送，请留意接收");
+        event.setProcessingLeaseToken("token");
+        MobileInstanceEntity before = instance();
+        before.setAlertCategories("parcel");
+        MobileInstanceEntity latest = instance();
+        latest.setAlertCategories("security");
+        when(instanceDao.selectById(event.getMobileInstanceId())).thenReturn(before);
+        when(instanceDao.selectByIdForUpdate(event.getMobileInstanceId())).thenReturn(latest);
+        when(eventDao.selectByEventIdForUpdate(event.getMobileInstanceId(), event.getEventId()))
+                .thenReturn(event);
+
+        assertEquals(MobileEventProcessingService.CLASSIFIED,
+                service.processClaimed(event, "worker", "token"));
+        verify(eventDao).finishClassified(event.getMobileInstanceId(), event.getEventId(), "token",
+                "parcel", "high", 1.0, "有包裹正在配送，请留意接收", "category_disabled");
+        verify(proactive, never()).createMobileAlert(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void lowConfidenceAndModelFailureNeverCreateSpeechEvent() {
-        MobileEventEntity event = event("notification.state_changed", "posted", "parcel", "包裹已到驿站");
+        MobileEventEntity event = event("notification.state_changed", "posted", "parcel", "包裹状态有变化");
         when(classifier.classifyMobileEvent(any(), any(), any(), any()))
                 .thenReturn(new ProactiveMonitorService.MobileAlertClassification(
                         true, "parcel", "high", 0.849, "包裹已到", "parcel_arrived"));
@@ -197,7 +367,8 @@ class MobileEventProcessingServiceTest {
 
         var command = new MobileEventProcessingTransactionService.ConversionCommand(
                 stale, "old-token", "security", "high", 0.9, "账户存在安全风险",
-                "安全提醒", "sha256:" + "b".repeat(64), stale.getSourcePackage(), Priority.HIGH);
+                "安全提醒", "sha256:" + "b".repeat(64), stale.getSourcePackage(), Priority.HIGH,
+                true, true);
 
         assertEquals(MobileEventProcessingTransactionService.SUPERSEDED,
                 transactions.convert(command).status());

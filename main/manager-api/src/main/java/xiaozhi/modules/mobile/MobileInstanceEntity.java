@@ -19,6 +19,8 @@ public class MobileInstanceEntity {
     private String platform;
     private String appVersion;
     private String capabilities;
+    private String alertSensitivity;
+    private String alertCategories;
     private String credentialHash;
     private Integer credentialVersion;
     private Date revokedAt;

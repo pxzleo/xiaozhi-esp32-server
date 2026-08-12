@@ -4,6 +4,7 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Insert;
+import org.apache.ibatis.annotations.Update;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 
@@ -21,4 +22,10 @@ public interface MobileInstanceDao extends BaseMapper<MobileInstanceEntity> {
 
     @Insert("INSERT IGNORE INTO ai_mobile_instance (mobile_instance_id, device_id, user_id, installation_id, agent_id, platform, app_version, capabilities, credential_hash, credential_version, created_at, updated_at) VALUES (#{mobileInstanceId}, #{deviceId}, #{userId}, #{installationId}, #{agentId}, #{platform}, #{appVersion}, #{capabilities}, #{credentialHash}, #{credentialVersion}, #{createdAt}, #{updatedAt})")
     int insertIgnore(MobileInstanceEntity entity);
+
+    @Update("UPDATE ai_mobile_instance SET alert_sensitivity=#{sensitivity}, "
+            + "alert_categories=#{categories}, updated_at=CURRENT_TIMESTAMP(3) "
+            + "WHERE mobile_instance_id=#{instanceId} AND user_id=#{userId} AND revoked_at IS NULL")
+    int updateAlertSettings(@Param("userId") Long userId, @Param("instanceId") String instanceId,
+            @Param("sensitivity") String sensitivity, @Param("categories") String categories);
 }

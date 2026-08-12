@@ -9,6 +9,8 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -16,6 +18,8 @@ import jakarta.validation.constraints.Pattern;
 import xiaozhi.common.page.PageData;
 import xiaozhi.common.utils.Result;
 import xiaozhi.modules.mobile.MobileEventAuditDTOs.AuditView;
+import xiaozhi.modules.mobile.MobileAlertSettingsDTOs.SettingsUpdate;
+import xiaozhi.modules.mobile.MobileAlertSettingsDTOs.SettingsView;
 import xiaozhi.modules.security.user.SecurityUser;
 
 @RestController
@@ -47,5 +51,19 @@ public class MobileEventAuditController {
             @RequestParam(defaultValue = "20") @Min(1) @Max(100) int limit) {
         return new Result<PageData<AuditView>>().ok(service.audit(SecurityUser.getUserId(), instanceId,
                 type, processingStatus, deliveryStatus, from, to, page, limit));
+    }
+
+    @GetMapping("/settings")
+    public Result<SettingsView> settings(@RequestParam("mobile_instance_id")
+            @Pattern(regexp = "^mob_[0-9a-f]{32}$") String instanceId) {
+        return new Result<SettingsView>().ok(service.settings(SecurityUser.getUserId(), instanceId));
+    }
+
+    @PutMapping("/settings")
+    public Result<SettingsView> updateSettings(@RequestParam("mobile_instance_id")
+            @Pattern(regexp = "^mob_[0-9a-f]{32}$") String instanceId,
+            @jakarta.validation.Valid @RequestBody SettingsUpdate request) {
+        return new Result<SettingsView>().ok(
+                service.updateSettings(SecurityUser.getUserId(), instanceId, request));
     }
 }

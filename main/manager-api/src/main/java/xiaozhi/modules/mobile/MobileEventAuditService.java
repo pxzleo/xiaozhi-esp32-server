@@ -9,9 +9,13 @@ import org.springframework.stereotype.Service;
 import xiaozhi.common.exception.RenException;
 import xiaozhi.common.page.PageData;
 import xiaozhi.modules.mobile.MobileEventAuditDTOs.AuditView;
+import xiaozhi.modules.mobile.MobileAlertSettingsDTOs.SettingsUpdate;
+import xiaozhi.modules.mobile.MobileAlertSettingsDTOs.SettingsView;
 
 @Service
 public class MobileEventAuditService {
+    private static final java.util.Set<String> ALERT_CATEGORIES = java.util.Set.of(
+            "security", "call", "parcel", "appointment", "message", "other");
     private final MobileInstanceDao instanceDao;
     private final MobileEventDao eventDao;
 
@@ -38,6 +42,42 @@ public class MobileEventAuditService {
         long total = eventDao.countAuditForUser(userId, instanceId, type, processingStatus,
                 databaseDelivery, fromDate, toDate);
         return new PageData<>(rows.stream().map(this::view).toList(), total);
+    }
+
+    public SettingsView settings(Long userId, String instanceId) {
+        MobileInstanceEntity instance = owned(userId, instanceId);
+        return settingsView(instance);
+    }
+
+    public SettingsView updateSettings(Long userId, String instanceId, SettingsUpdate request) {
+        MobileInstanceEntity instance = owned(userId, instanceId);
+        java.util.LinkedHashSet<String> categories = new java.util.LinkedHashSet<>(request.categories());
+        if (categories.size() != request.categories().size() || !ALERT_CATEGORIES.containsAll(categories)) {
+            throw new RenException("手机提醒类别无效");
+        }
+        String joined = String.join(",", categories);
+        if (instanceDao.updateAlertSettings(userId, instanceId, request.sensitivity(), joined) != 1) {
+            throw new RenException("手机提醒设置保存失败");
+        }
+        instance.setAlertSensitivity(request.sensitivity());
+        instance.setAlertCategories(joined);
+        return settingsView(instance);
+    }
+
+    private MobileInstanceEntity owned(Long userId, String instanceId) {
+        MobileInstanceEntity instance = instanceDao.selectById(instanceId);
+        if (instance == null || userId == null || !userId.equals(instance.getUserId())) {
+            throw new RenException("手机实例不存在");
+        }
+        return instance;
+    }
+
+    private SettingsView settingsView(MobileInstanceEntity instance) {
+        String sensitivity = StringUtils.defaultIfBlank(instance.getAlertSensitivity(), "balanced");
+        String raw = StringUtils.defaultIfBlank(instance.getAlertCategories(),
+                "security,call,parcel,appointment,message,other");
+        return new SettingsView(instance.getMobileInstanceId(), sensitivity,
+                java.util.Arrays.stream(raw.split(",")).filter(ALERT_CATEGORIES::contains).toList());
     }
 
     private AuditView view(MobileEventAuditRow row) {

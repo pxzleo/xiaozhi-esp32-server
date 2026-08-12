@@ -365,3 +365,14 @@ export function buildMobileEventQuery(filters) {
   });
   return params.toString();
 }
+
+const MOBILE_ALERT_CATEGORIES = ['security', 'call', 'parcel', 'appointment', 'message', 'other'];
+
+export function validMobileAlertSettings(settings) {
+  return !!settings
+    && ['conservative', 'balanced', 'timely'].includes(settings.sensitivity)
+    && Array.isArray(settings.categories)
+    && settings.categories.length > 0
+    && settings.categories.length === new Set(settings.categories).size
+    && settings.categories.every(category => MOBILE_ALERT_CATEGORIES.includes(category));
+}

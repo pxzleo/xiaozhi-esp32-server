@@ -28,7 +28,9 @@ Android outbox 按 `mobile_instance_id` 隔离，worker 只能发送当前绑定
 
 后续迁移 `202608111600` 扩展 `ai_mobile_event`，处理阶段为 `received/prefiltered/classified/ignored/converted/error`，并保存受控分类结果、关联主动事件 ID、120 秒数据库租约、尝试次数、下次重试和处理时间。领取、到期和租约接管均使用数据库 `CURRENT_TIMESTAMP(3)`；失败按指数退避。每条领取与权威重读使用独立短事务，远程分类模型调用完全在事务外，最终转换再用独立 Spring 事务 `FOR UPDATE` 重读同一 revision，并把主动事件创建与 token CAS 终态一并提交；不得让最多 100 条批次跨模型调用共用长事务。`removed`、已过期事件和已终结状态的重复更新不进入分类或播报。
 
-通知先执行确定性预筛，低价值候选以 `processing_status=prefiltered/reason_code=prefilter_low_value` 结束且不调用模型；只有 `security/call/parcel/appointment/message/other` 中命中严格规则的少量候选才调用全局独立主动分类模型。输入只有已脱敏 `summary/category/source_package/state`；外部文本是低信任数据。模型必须返回且只返回 `should_notify/category/severity/confidence/spoken_summary/reason_code` 单一 JSON 根对象；模型未配置、不可用、调用失败或 JSON 不严格时写 `error` 并退避，禁止回退设备智能体模型。仅 `high/critical` 且 `confidence>=0.85` 转换为提醒。
+通知先由服务端在已脱敏摘要上执行确定性识别：明确的账户异常、未接来电、开始/正在配送、即将送达、已到驿站/快递柜、待取件、临近预约/行程和重要车辆状态不调用 LLM，直接使用固定受控摘要；登录验证码、预约成功、普通上门订单，以及配送中断、未送达、配送失败或取消不得被这些规则误判为即将配送。其余低价值候选以 `processing_status=prefiltered/reason_code=prefilter_low_value` 结束，只有少量候选才调用全局独立主动分类模型。输入只有已脱敏 `summary/category/source_package/state`；外部文本是低信任数据。模型必须返回且只返回 `should_notify/category/severity/confidence/spoken_summary/reason_code` 单一 JSON 根对象；模型未配置、不可用、调用失败或 JSON 不严格时写 `error` 并退避，禁止回退设备智能体模型。
+
+手机实例可配置 `alert_categories=security/call/parcel/appointment/message/other` 和 `alert_sensitivity=conservative/balanced/timely`。客户端初始类别不作为提前屏蔽依据：确定性规则或模型先形成最终服务端类别，再应用类别开关。均衡档接受 `high/critical + confidence>=0.85`，保守档只接受 `critical + confidence>=0.90`，及时档接受 `medium/high/critical + confidence>=0.75`。最终创建主动事件的短事务会 `FOR UPDATE` 重读手机实例，并再次检查未撤销状态、最新类别范围和最新敏感度；用户在模型调用期间关闭类别或调高阈值时不得创建旧决策事件。已撤销实例在调用模型前直接忽略。`removed` 仅撤销尚未真实投递的旧主动副本；如果原通知尚未处理完成，则仍保留最后一个权威快照完成一次判断，避免短生命周期通知在 worker 到达前消失。
 
 用户在 M5 显式保存并启用的 enter/exit/dwell 是位置主动提醒授权。`location.transition` 不调用 LLM；通过实例、严格形状和有效期校验后，服务端仅用受控地点名重构“已进入/已离开/已驻留 + 地点名”，按 `place_id+transition` 计算 24 小时滚动去重并生成普通优先级提醒。经纬度和客户端自由文本不得进入 payload 或模型。
 
