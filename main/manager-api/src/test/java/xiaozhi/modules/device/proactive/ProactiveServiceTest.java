@@ -1051,6 +1051,25 @@ class ProactiveServiceTest {
         verify(eventDao).pageForUser(7L, null, null, null, null, 20, 20);
     }
 
+    @Test
+    void mergedMobileEventAuditUsesRequestedCanonicalDeviceContext() {
+        ProactiveEventEntity aliasEvent = eventEntity(eventRequest());
+        aliasEvent.setEventId("alias-event");
+        aliasEvent.setDeliveryStatus(DeliveryStatus.DELIVERED.name());
+        aliasEvent.setDeviceId("legacy-mobile-device");
+        aliasEvent.setMacAddress("mob_legacy");
+        when(eventDao.pageForUser(7L, "device-1", null, null, null, 20, 0))
+                .thenReturn(List.of(aliasEvent));
+        when(eventDao.countForUser(7L, "device-1", null, null, null)).thenReturn(1L);
+
+        var page = service.events(7L, "device-1", null, null, null, 1, 20);
+
+        assertEquals(1L, page.getTotal());
+        assertEquals("device-1", page.getList().get(0).deviceId());
+        assertEquals(device.getMacAddress(), page.getList().get(0).macAddress());
+        assertEquals("alias-event", page.getList().get(0).eventId());
+    }
+
     private ProactivePreferenceEntity preference(Mode mode, int limit) {
         ProactivePreferenceEntity value = new ProactivePreferenceEntity();
         value.setDeviceId(device.getId());

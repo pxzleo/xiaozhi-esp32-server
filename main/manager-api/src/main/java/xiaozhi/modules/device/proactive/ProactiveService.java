@@ -458,14 +458,15 @@ public class ProactiveService {
 
     public PageData<EventView> events(Long userId, String deviceId, Topic topic,
             DeliveryStatus status, EventType eventType, int page, int limit) {
-        if (deviceId != null) requireOwned(userId, deviceId);
+        DeviceEntity requestedDevice = deviceId == null ? null : requireOwned(userId, deviceId);
         int safePage = requireRange(page, 1, 1_000, "page");
         int safeLimit = requireRange(limit, 1, 100, "limit");
         String topicName = topic == null ? null : topic.name();
         String statusName = status == null ? null : status.name();
         String typeName = eventType == null ? null : eventType.name();
         List<EventView> list = eventDao.pageForUser(userId, deviceId, topicName, statusName, typeName,
-                safeLimit, ((long) safePage - 1L) * safeLimit).stream().map(this::toEvent).toList();
+                safeLimit, ((long) safePage - 1L) * safeLimit).stream()
+                .map(event -> toEvent(event, requestedDevice)).toList();
         long total = eventDao.countForUser(userId, deviceId, topicName, statusName, typeName);
         return new PageData<>(list, total);
     }
@@ -753,7 +754,13 @@ public class ProactiveService {
     }
 
     private EventView toEvent(ProactiveEventEntity entity) {
-        return new EventView(entity.getDeviceId(), entity.getMacAddress(), entity.getEventId(),
+        return toEvent(entity, null);
+    }
+
+    private EventView toEvent(ProactiveEventEntity entity, DeviceEntity requestedDevice) {
+        String deviceId = requestedDevice == null ? entity.getDeviceId() : requestedDevice.getId();
+        String macAddress = requestedDevice == null ? entity.getMacAddress() : requestedDevice.getMacAddress();
+        return new EventView(deviceId, macAddress, entity.getEventId(),
                 Topic.valueOf(entity.getTopic()), Priority.valueOf(entity.getPriority()), entity.getReason(),
                 EventType.valueOf(entity.getEventType()), readMap(entity.getPayload()), entity.getCreatedAt(),
                 entity.getExpiresAt(), entity.getDedupeKey(), Boolean.TRUE.equals(entity.getRequiresResponse()),
