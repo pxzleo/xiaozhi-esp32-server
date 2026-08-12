@@ -29,6 +29,195 @@ class _Dialogue:
 
 
 class ChatTurnIsolationTest(unittest.TestCase):
+    def _mobile_barge_in_conn(self, vad_results):
+        logger = Mock()
+        logger.bind.return_value = logger
+        return SimpleNamespace(
+            close_after_chat=False,
+            client_kind="mobile",
+            client_aec=True,
+            client_is_speaking=True,
+            client_listen_mode="realtime",
+            just_woken_up=False,
+            vad=Mock(is_vad=Mock(side_effect=vad_results)),
+            asr=SimpleNamespace(receive_audio=AsyncMock()),
+            logger=logger,
+            client_have_voice=True,
+            client_voice_stop=False,
+            asr_audio=[],
+            last_activity_time=0,
+        )
+
+    def test_mobile_speaker_echo_does_not_abort_before_confirmation_window(self):
+        conn = self._mobile_barge_in_conn([True])
+
+        with patch.object(
+            receiveAudioHandle, "handleAbortMessage", new=AsyncMock()
+        ) as abort:
+            asyncio.run(receiveAudioHandle.handleAudioMessage(conn, b"frame"))
+
+        abort.assert_not_awaited()
+        conn.asr.receive_audio.assert_not_awaited()
+
+    def test_mobile_confirmation_buffer_keeps_only_bounded_preroll(self):
+        conn = self._mobile_barge_in_conn([False] * 100 + [True] * 6)
+
+        with patch.object(
+            receiveAudioHandle, "handleAbortMessage", new=AsyncMock()
+        ) as abort:
+            for index in range(100):
+                asyncio.run(
+                    receiveAudioHandle.handleAudioMessage(
+                        conn, f"silence-{index}".encode()
+                    )
+                )
+            for index in range(6):
+                asyncio.run(
+                    receiveAudioHandle.handleAudioMessage(conn, f"voice-{index}".encode())
+                )
+
+        abort.assert_awaited_once_with(conn)
+        forwarded = [call.args[1] for call in conn.asr.receive_audio.await_args_list]
+        self.assertEqual(
+            [b"silence-98", b"silence-99"]
+            + [f"voice-{index}".encode() for index in range(6)],
+            forwarded,
+        )
+
+    def test_mobile_confirmation_requires_consecutive_voice_packets(self):
+        conn = self._mobile_barge_in_conn([True] * 3 + [False] + [True] * 3)
+
+        with patch.object(
+            receiveAudioHandle, "handleAbortMessage", new=AsyncMock()
+        ) as abort:
+            for _ in range(7):
+                asyncio.run(receiveAudioHandle.handleAudioMessage(conn, b"frame"))
+
+        abort.assert_not_awaited()
+        conn.asr.receive_audio.assert_not_awaited()
+        self.assertEqual(3, conn._mobile_barge_in_packets)
+        self.assertEqual(4, len(conn._mobile_barge_in_frames))
+
+    def test_tts_round_boundary_discards_unconfirmed_mobile_audio(self):
+        conn = ConnectionHandler.__new__(ConnectionHandler)
+        conn.logger = Mock()
+        conn.logger.bind.return_value = conn.logger
+        conn.client_is_speaking = True
+        conn._mobile_barge_in_packets = 3
+        conn._mobile_barge_in_active = True
+        conn._mobile_barge_in_confirmed = False
+        conn._mobile_barge_in_frames = [b"echo"]
+        conn.reset_audio_states = Mock()
+
+        conn.clearSpeakStatus()
+
+        conn.reset_audio_states.assert_called_once_with()
+        self.assertFalse(conn.client_is_speaking)
+        self.assertEqual(0, conn._mobile_barge_in_packets)
+        self.assertEqual([], conn._mobile_barge_in_frames)
+
+    def test_tts_round_boundary_discards_vad_tail_after_counter_reset(self):
+        conn = ConnectionHandler.__new__(ConnectionHandler)
+        conn.logger = Mock()
+        conn.logger.bind.return_value = conn.logger
+        conn.client_is_speaking = True
+        conn.client_have_voice = True
+        conn._mobile_barge_in_packets = 0
+        conn._mobile_barge_in_active = True
+        conn._mobile_barge_in_confirmed = False
+        conn._mobile_barge_in_frames = []
+        conn._mobile_barge_in_preroll = [b"silence"]
+        conn.reset_audio_states = Mock()
+
+        conn.clearSpeakStatus()
+
+        conn.reset_audio_states.assert_called_once_with()
+        self.assertFalse(conn.client_is_speaking)
+
+    def test_non_mobile_clients_do_not_reset_audio_at_tts_boundary(self):
+        for client_kind, client_aec, listen_mode in (
+            ("device", True, "realtime"),
+            ("mobile", False, "realtime"),
+            ("mobile", True, "manual"),
+        ):
+            with self.subTest(
+                client_kind=client_kind,
+                client_aec=client_aec,
+                listen_mode=listen_mode,
+            ):
+                conn = ConnectionHandler.__new__(ConnectionHandler)
+                conn.logger = Mock()
+                conn.logger.bind.return_value = conn.logger
+                conn.client_kind = client_kind
+                conn.client_aec = client_aec
+                conn.client_listen_mode = listen_mode
+                conn.client_is_speaking = True
+                conn.client_have_voice = True
+                conn.reset_audio_states = Mock()
+
+                conn.clearSpeakStatus()
+
+                conn.reset_audio_states.assert_not_called()
+
+    def test_mobile_confirmation_flushes_buffer_even_when_abort_clears_gate(self):
+        conn = self._mobile_barge_in_conn([True] * 6)
+
+        async def abort_and_clear(_conn):
+            receiveAudioHandle._clear_mobile_barge_in_gate(_conn)
+            _conn.client_is_speaking = False
+
+        with patch.object(
+            receiveAudioHandle, "handleAbortMessage", new=AsyncMock(side_effect=abort_and_clear)
+        ):
+            for index in range(6):
+                asyncio.run(
+                    receiveAudioHandle.handleAudioMessage(conn, f"voice-{index}".encode())
+                )
+
+        forwarded = [call.args[1] for call in conn.asr.receive_audio.await_args_list]
+        self.assertEqual([f"voice-{index}".encode() for index in range(6)], forwarded)
+
+    def test_mobile_continuous_speech_aborts_after_confirmation_window(self):
+        conn = self._mobile_barge_in_conn([True] * 7)
+
+        with patch.object(
+            receiveAudioHandle, "handleAbortMessage", new=AsyncMock()
+        ) as abort:
+            for _ in range(7):
+                asyncio.run(receiveAudioHandle.handleAudioMessage(conn, b"frame"))
+
+        abort.assert_awaited_once_with(conn)
+        self.assertEqual(conn.asr.receive_audio.await_count, 7)
+        self.assertTrue(all(call.args[-1] for call in conn.asr.receive_audio.await_args_list))
+
+    def test_short_mobile_speaker_echo_is_discarded_when_vad_stops(self):
+        conn = self._mobile_barge_in_conn([True, False])
+
+        with patch.object(
+            receiveAudioHandle, "handleAbortMessage", new=AsyncMock()
+        ) as abort:
+            asyncio.run(receiveAudioHandle.handleAudioMessage(conn, b"voice"))
+            conn.asr_audio.append(b"voice")
+            conn.client_voice_stop = True
+            asyncio.run(receiveAudioHandle.handleAudioMessage(conn, b"silence"))
+
+        abort.assert_not_awaited()
+        self.assertEqual([], conn.asr_audio)
+        self.assertFalse(conn.client_have_voice)
+        self.assertFalse(conn.client_voice_stop)
+
+    def test_device_aec_barge_in_keeps_immediate_abort(self):
+        conn = self._mobile_barge_in_conn([True])
+        conn.client_kind = "device"
+
+        with patch.object(
+            receiveAudioHandle, "handleAbortMessage", new=AsyncMock()
+        ) as abort:
+            asyncio.run(receiveAudioHandle.handleAudioMessage(conn, b"frame"))
+
+        abort.assert_awaited_once_with(conn)
+        conn.asr.receive_audio.assert_awaited_once_with(conn, b"frame", True)
+
     def test_closing_dialogue_ignores_late_asr_result(self):
         logger = Mock()
         logger.bind.return_value = logger

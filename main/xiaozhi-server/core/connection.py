@@ -2118,8 +2118,32 @@ class ConnectionHandler:
             self.report_queue.task_done()
 
     def clearSpeakStatus(self):
+        self.reset_mobile_barge_in_state(discard_unconfirmed=True)
         self.client_is_speaking = False
         self.logger.bind(tag=TAG).debug(f"清除服务端讲话状态")
+
+    def reset_mobile_barge_in_state(self, discard_unconfirmed=False):
+        """在 TTS 轮次边界清理手机外放抢话确认状态。"""
+        packets = getattr(self, "_mobile_barge_in_packets", 0)
+        confirmed = getattr(self, "_mobile_barge_in_confirmed", False)
+        has_unconfirmed_speech = packets > 0 or bool(
+            getattr(self, "_mobile_barge_in_frames", [])
+        ) or bool(getattr(self, "client_have_voice", False))
+        mobile_gate_was_active = bool(
+            getattr(self, "_mobile_barge_in_active", False)
+        )
+        if (
+            discard_unconfirmed
+            and mobile_gate_was_active
+            and has_unconfirmed_speech
+            and not confirmed
+        ):
+            self.reset_audio_states()
+        self._mobile_barge_in_active = False
+        self._mobile_barge_in_packets = 0
+        self._mobile_barge_in_confirmed = False
+        self._mobile_barge_in_frames = []
+        self._mobile_barge_in_preroll = []
 
     async def close(self, ws=None):
         """资源清理方法"""

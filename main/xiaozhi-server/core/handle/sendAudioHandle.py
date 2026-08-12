@@ -337,6 +337,9 @@ async def send_tts_message(
         return
     control_generation = None
     if state == "start":
+        reset_mobile_gate = getattr(conn, "reset_mobile_barge_in_state", None)
+        if callable(reset_mobile_gate):
+            reset_mobile_gate(discard_unconfirmed=True)
         control_generation = getattr(conn, "tts_control_generation", 0) + 1
         conn.tts_control_generation = control_generation
     message = {"type": "tts", "state": state, "session_id": conn.session_id}

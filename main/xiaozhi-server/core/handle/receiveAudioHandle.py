@@ -17,6 +17,8 @@ from core.handle.sendAudioHandle import send_stt_message, SentenceType
 TAG = __name__
 TTS_ECHO_HISTORY_TTL_SECONDS = 15.0
 TTS_ECHO_SIMILARITY_THRESHOLD = 0.72
+MOBILE_SPEAKER_BARGE_IN_CONFIRM_PACKETS = 6  # 6 * 60 ms Opus packets
+MOBILE_SPEAKER_BARGE_IN_PREROLL_PACKETS = 2
 
 
 def _normalize_echo_text(value: str) -> str:
@@ -62,6 +64,66 @@ def is_likely_tts_echo(conn: "ConnectionHandler", text: str) -> bool:
     return False
 
 
+def _clear_mobile_barge_in_gate(conn: "ConnectionHandler") -> None:
+    conn._mobile_barge_in_active = False
+    conn._mobile_barge_in_packets = 0
+    conn._mobile_barge_in_confirmed = False
+    conn._mobile_barge_in_frames = []
+    conn._mobile_barge_in_preroll = []
+
+
+def _discard_unconfirmed_mobile_speech(conn: "ConnectionHandler") -> None:
+    """丢弃播报期间不足确认窗的短促回声，不让它进入 ASR。"""
+    reset_audio_states = getattr(conn, "reset_audio_states", None)
+    if callable(reset_audio_states):
+        reset_audio_states()
+    else:
+        conn.client_have_voice = False
+        conn.client_voice_stop = False
+        asr_audio = getattr(conn, "asr_audio", None)
+        if asr_audio is not None:
+            asr_audio.clear()
+    _clear_mobile_barge_in_gate(conn)
+
+
+def confirm_mobile_speaker_barge_in(conn: "ConnectionHandler", have_voice: bool) -> bool:
+    """手机外放时确认持续人声，避免 AEC 残余在 VAD 起点立即截断 TTS。"""
+    gated = (
+        getattr(conn, "client_kind", "device") == "mobile"
+        and conn.client_aec
+        and conn.client_is_speaking
+        and conn.client_listen_mode != "manual"
+    )
+    if not gated:
+        _clear_mobile_barge_in_gate(conn)
+        return have_voice
+
+    if getattr(conn, "_mobile_barge_in_confirmed", False):
+        return have_voice
+
+    if have_voice:
+        packets = getattr(conn, "_mobile_barge_in_packets", 0) + 1
+        conn._mobile_barge_in_packets = packets
+        if packets >= MOBILE_SPEAKER_BARGE_IN_CONFIRM_PACKETS:
+            conn._mobile_barge_in_confirmed = True
+            conn.logger.bind(tag=TAG).info(
+                f"手机抢话已确认: continuous_audio_ms={packets * 60}"
+            )
+            return True
+    else:
+        # 确认窗要求连续音频包；一次无声即重新计数，不能跨间隙累积。
+        conn._mobile_barge_in_packets = 0
+        conn._mobile_barge_in_frames = []
+
+    if getattr(conn, "client_voice_stop", False):
+        packets = getattr(conn, "_mobile_barge_in_packets", 0)
+        conn.logger.bind(tag=TAG).info(
+            f"忽略播报期间短促音频: continuous_audio_ms={packets * 60}"
+        )
+        _discard_unconfirmed_mobile_speech(conn)
+    return False
+
+
 async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
     if getattr(conn, "close_after_chat", False):
         return
@@ -74,14 +136,63 @@ async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
         if not hasattr(conn, "vad_resume_task") or conn.vad_resume_task.done():
             conn.vad_resume_task = asyncio.create_task(resume_vad_detection(conn))
         return
-    # 服务端AEC功能需要实时触发打断
-    if conn.client_aec and have_voice:
-        if conn.client_is_speaking and conn.client_listen_mode != "manual":
+    mobile_gate_active = (
+        getattr(conn, "client_kind", "device") == "mobile"
+        and conn.client_aec
+        and conn.client_is_speaking
+        and conn.client_listen_mode != "manual"
+    )
+    mobile_was_confirmed = getattr(conn, "_mobile_barge_in_confirmed", False)
+    if mobile_gate_active and not mobile_was_confirmed:
+        conn._mobile_barge_in_active = True
+        preroll = getattr(conn, "_mobile_barge_in_preroll", None)
+        if preroll is None:
+            preroll = []
+            conn._mobile_barge_in_preroll = preroll
+        if have_voice:
+            frames = getattr(conn, "_mobile_barge_in_frames", None)
+            if frames is None:
+                frames = []
+                conn._mobile_barge_in_frames = frames
+            if not frames:
+                frames.extend(preroll)
+            frames.append(pcm_frame)
+            preroll.clear()
+        else:
+            preroll.append(pcm_frame)
+            del preroll[:-MOBILE_SPEAKER_BARGE_IN_PREROLL_PACKETS]
+    confirmed_voice = confirm_mobile_speaker_barge_in(conn, have_voice)
+    mobile_confirmation_just_reached = (
+        getattr(conn, "client_kind", "device") == "mobile"
+        and not mobile_was_confirmed
+        and getattr(conn, "_mobile_barge_in_confirmed", False)
+    )
+    confirmed_buffered_frames = (
+        list(getattr(conn, "_mobile_barge_in_frames", []))
+        if mobile_confirmation_just_reached
+        else []
+    )
+    # 服务端AEC功能需要实时触发打断；手机外放需先通过持续语音确认窗。
+    if conn.client_aec and confirmed_voice:
+        if (
+            conn.client_is_speaking
+            and conn.client_listen_mode != "manual"
+            and (
+                getattr(conn, "client_kind", "device") != "mobile"
+                or mobile_confirmation_just_reached
+            )
+        ):
             await handleAbortMessage(conn)
     # 设备长时间空闲检测，用于say goodbye
-    await no_voice_close_connect(conn, have_voice)
+    await no_voice_close_connect(conn, confirmed_voice)
+    if mobile_confirmation_just_reached:
+        for buffered_frame in confirmed_buffered_frames:
+            await conn.asr.receive_audio(conn, buffered_frame, True)
+        return
+    if mobile_gate_active and not getattr(conn, "_mobile_barge_in_confirmed", False):
+        return
     # 接收音频
-    await conn.asr.receive_audio(conn, pcm_frame, have_voice)
+    await conn.asr.receive_audio(conn, pcm_frame, confirmed_voice)
 
 
 async def resume_vad_detection(conn: "ConnectionHandler"):
