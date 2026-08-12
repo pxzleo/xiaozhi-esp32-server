@@ -165,7 +165,14 @@ class ProactiveContractTest {
         assertTrue(dismissSql.contains("e.delivery_status IN ('PENDING','CLAIMED')"));
         assertTrue(dismissSql.contains("e.claim_token=NULL"));
         assertTrue(dismissSql.contains("#{windowHours}=0"));
-        assertTrue(dismissSql.contains("e.created_at &lt; DATE_ADD(#{eventCreatedAt}"));
+        assertFalse(dismissSql.contains("&lt;"));
+        assertTrue(dismissSql.contains("e.created_at < DATE_ADD(#{eventCreatedAt}"));
+        String executableDismiss = dismissSql
+                .replace("#{userId}", "7")
+                .replace("#{groupKey}", "'group-key'")
+                .replace("#{eventCreatedAt}", "CURRENT_TIMESTAMP(3)")
+                .replace("#{windowHours}", "24");
+        CCJSqlParserUtil.parseStatements(executableDismiss);
 
         Method mobileTargets = DeviceDao.class.getMethod("selectMobileAlertTargetsForUpdate",
                 Long.class, String.class, String.class);

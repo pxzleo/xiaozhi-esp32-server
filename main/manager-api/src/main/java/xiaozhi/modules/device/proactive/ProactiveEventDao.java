@@ -114,7 +114,7 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
                 e.claim_token=NULL, e.claimed_at=NULL, e.updated_at=CURRENT_TIMESTAMP(3)
             WHERE e.delivery_group_key=#{groupKey}
               AND e.delivery_status IN ('PENDING','CLAIMED')
-              AND (#{windowHours}=0 OR e.created_at &lt; DATE_ADD(#{eventCreatedAt},
+              AND (#{windowHours}=0 OR e.created_at < DATE_ADD(#{eventCreatedAt},
                     INTERVAL #{windowHours} HOUR))
             """)
     int dismissSiblingCopiesAfterDelivery(@Param("userId") Long userId,
