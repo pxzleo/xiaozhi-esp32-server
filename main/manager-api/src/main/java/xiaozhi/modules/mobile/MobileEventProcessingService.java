@@ -3,7 +3,6 @@ package xiaozhi.modules.mobile;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.time.Instant;
 import java.util.Date;
 import java.util.HexFormat;
 import java.util.Map;
@@ -12,6 +11,8 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -25,6 +26,7 @@ import xiaozhi.modules.device.proactive.ProactiveMonitorService.MobileAlertClass
 
 @Service
 public class MobileEventProcessingService {
+    private static final Logger LOGGER = LoggerFactory.getLogger(MobileEventProcessingService.class);
     public static final String IGNORED = "ignored";
     public static final String PREFILTERED = "prefiltered";
     public static final String CLASSIFIED = "classified";
@@ -159,6 +161,8 @@ public class MobileEventProcessingService {
                     event, token, category, severity, confidence, spokenSummary, title,
                     dedupeKey, source, priority)).status();
         } catch (RenException error) {
+            LOGGER.warn("手机主动事件转换失败: instance={}, event={}, reason={}",
+                    event.getMobileInstanceId(), event.getEventId(), error.getMsg());
             finishError(event, token, "proactive_event_unavailable");
             return ERROR;
         }
@@ -214,9 +218,8 @@ public class MobileEventProcessingService {
         int attempt = Math.max(1, event.getProcessingAttempt() == null
                 ? 1 : event.getProcessingAttempt() + 1);
         long delay = Math.min(3600L, 30L << Math.min(attempt - 1, 7));
-        Date nextAttempt = Date.from(Instant.now().plusSeconds(delay));
         if (eventDao.finishError(event.getMobileInstanceId(), event.getEventId(), token,
-                reason, nextAttempt) != 1) {
+                reason, delay) != 1) {
             throw new RenException("手机事件错误终态写入失败");
         }
     }

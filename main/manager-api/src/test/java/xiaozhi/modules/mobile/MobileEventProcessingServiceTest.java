@@ -2,6 +2,7 @@ package xiaozhi.modules.mobile;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -45,7 +46,7 @@ class MobileEventProcessingServiceTest {
                 org.mockito.ArgumentMatchers.anyDouble(), any(), any())).thenReturn(1);
         when(eventDao.finishConverted(any(), any(), any(), any(), any(),
                 org.mockito.ArgumentMatchers.anyDouble(), any(), any())).thenReturn(1);
-        when(eventDao.finishError(any(), any(), any(), any(), any())).thenReturn(1);
+        when(eventDao.finishError(any(), any(), any(), any(), anyLong())).thenReturn(1);
     }
 
     @Test
@@ -134,7 +135,7 @@ class MobileEventProcessingServiceTest {
         assertEquals(MobileEventProcessingService.ERROR,
                 service.processClaimed(event, "worker", "token2"));
         verify(eventDao).finishError(eq(event.getMobileInstanceId()), eq(event.getEventId()),
-                eq("token2"), eq("classifier_unavailable"), any());
+                eq("token2"), eq("classifier_unavailable"), eq(60L));
     }
 
     @Test

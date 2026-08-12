@@ -152,7 +152,8 @@ public interface MobileEventDao {
 
     @Update("""
             UPDATE ai_mobile_event SET processing_status='error', reason_code=#{reason},
-                next_attempt_at=#{nextAttemptAt}, processing_lease_owner=NULL,
+                next_attempt_at=DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL #{delaySeconds} SECOND),
+                processing_lease_owner=NULL,
                 processing_lease_token=NULL, processing_lease_until=NULL,
                 processed_at=CURRENT_TIMESTAMP(3), updated_at=CURRENT_TIMESTAMP(3)
             WHERE mobile_instance_id=#{instanceId} AND event_id=#{eventId}
@@ -160,7 +161,7 @@ public interface MobileEventDao {
             """)
     int finishError(@Param("instanceId") String instanceId, @Param("eventId") String eventId,
             @Param("token") String token, @Param("reason") String reason,
-            @Param("nextAttemptAt") java.util.Date nextAttemptAt);
+            @Param("delaySeconds") long delaySeconds);
 
     @Select("""
             <script>

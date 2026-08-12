@@ -10,6 +10,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.EnumSet;
@@ -23,6 +24,8 @@ import java.util.Set;
 import java.util.UUID;
 
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -55,6 +58,7 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 
 @Service
 public class ProactiveService {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ProactiveService.class);
     private static final Set<String> EVENT_PAYLOAD_KEYS = Set.of(
             "title", "message", "summary", "category", "reference_id", "reference_url",
             "scheduled_at", "action", "source");
@@ -298,12 +302,15 @@ public class ProactiveService {
         entity.setDeliveryStatus(DeliveryStatus.PENDING.name());
         entity.setOutcome(Outcome.NONE.name());
         entity.setUpdatedAt(now);
-        eventDao.insertIfAbsent(entity);
+        int inserted = eventDao.insertIfAbsent(entity);
         ProactiveEventEntity stored = eventDao.selectByDeviceAndEventIdForUpdate(
                 device.getId(), eventId);
         if (stored == null) throw new RenException("主动事件写入失败");
-        verifyIdempotentEvent(stored, request);
-        return new EventWrite(true, toEvent(stored));
+        // MySQL DATETIME is timezone-less while the JDBC session is UTC. Re-reading a freshly
+        // inserted row can therefore shift Date by the host offset. The insert result is the
+        // authority for new-vs-existing; only an existing event needs full idempotency comparison.
+        if (inserted == 0) verifyIdempotentEvent(stored, request);
+        return new EventWrite(inserted == 1, toEvent(stored));
     }
 
     private String sha256(String value) {
@@ -673,16 +680,23 @@ public class ProactiveService {
     }
 
     private void verifyIdempotentEvent(ProactiveEventEntity stored, EventUpsert request) {
-        boolean equal = Objects.equals(stored.getTopic(), request.getTopic().name())
-                && Objects.equals(stored.getPriority(), request.getPriority().name())
-                && Objects.equals(stored.getReason(), request.getReason())
-                && Objects.equals(stored.getEventType(), request.getEventType().name())
-                && Objects.equals(readMap(stored.getPayload()), request.getPayload())
-                && sameSecond(stored.getCreatedAt(), request.getCreatedAt())
-                && sameSecond(stored.getExpiresAt(), request.getExpiresAt())
-                && Objects.equals(stored.getDedupeKey(), request.getDedupeKey())
-                && Objects.equals(stored.getRequiresResponse(), request.getRequiresResponse());
-        if (!equal) throw new RenException("event_id已存在但事件内容不一致");
+        List<String> mismatches = new ArrayList<>();
+        if (!Objects.equals(stored.getTopic(), request.getTopic().name())) mismatches.add("topic");
+        if (!Objects.equals(stored.getPriority(), request.getPriority().name())) mismatches.add("priority");
+        if (!Objects.equals(stored.getReason(), request.getReason())) mismatches.add("reason");
+        if (!Objects.equals(stored.getEventType(), request.getEventType().name())) mismatches.add("event_type");
+        if (!Objects.equals(readMap(stored.getPayload()), request.getPayload())) mismatches.add("payload");
+        if (!sameSecond(stored.getCreatedAt(), request.getCreatedAt())) mismatches.add("created_at");
+        if (!sameSecond(stored.getExpiresAt(), request.getExpiresAt())) mismatches.add("expires_at");
+        if (!Objects.equals(stored.getDedupeKey(), request.getDedupeKey())) mismatches.add("dedupe_key");
+        if (!Objects.equals(stored.getRequiresResponse(), request.getRequiresResponse())) {
+            mismatches.add("requires_response");
+        }
+        if (!mismatches.isEmpty()) {
+            LOGGER.warn("主动事件幂等校验失败: event={}, fields={}",
+                    stored.getEventId(), String.join(",", mismatches));
+            throw new RenException("event_id已存在但事件内容不一致");
+        }
     }
 
     private boolean sameSecond(Date left, Date right) {

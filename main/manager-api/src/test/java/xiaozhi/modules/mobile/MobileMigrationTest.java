@@ -1,5 +1,6 @@
 package xiaozhi.modules.mobile;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
@@ -102,6 +103,13 @@ class MobileMigrationTest {
         assertTrue(claim.contains("processing_lease_until < CURRENT_TIMESTAMP(3)"));
         assertTrue(claim.contains("processing_attempt=processing_attempt+1"));
         assertTrue(claim.contains("expires_at > CURRENT_TIMESTAMP(3)"));
+        String finishError = String.join("\n", MobileEventDao.class
+                .getMethod("finishError", String.class, String.class, String.class,
+                        String.class, long.class)
+                .getAnnotation(Update.class).value());
+        assertTrue(finishError.contains(
+                "next_attempt_at=DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL #{delaySeconds} SECOND)"));
+        assertFalse(finishError.contains("nextAttemptAt"));
 
         String latest = String.join("\n", MobileEventDao.class
                 .getMethod("updateLatestState", MobileEventEntity.class)

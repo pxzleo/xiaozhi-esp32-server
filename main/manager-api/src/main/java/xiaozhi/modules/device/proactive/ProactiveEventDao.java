@@ -41,7 +41,7 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             @Param("eventId") String eventId);
 
     @Insert("""
-            INSERT INTO ai_device_proactive_event
+            INSERT IGNORE INTO ai_device_proactive_event
                 (device_id, mac_address, event_id, topic, priority, reason, event_type, payload,
                  created_at, expires_at, dedupe_key, delivery_group_key, delivery_group_window_hours,
                  requires_response, delivery_status, outcome, updated_at)
@@ -49,7 +49,6 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
                     #{e.eventType}, CAST(#{e.payload} AS JSON), #{e.createdAt}, #{e.expiresAt}, #{e.dedupeKey},
                     #{e.deliveryGroupKey}, #{e.deliveryGroupWindowHours}, #{e.requiresResponse},
                     #{e.deliveryStatus}, #{e.outcome}, #{e.updatedAt})
-            ON DUPLICATE KEY UPDATE id = id
             """)
     int insertIfAbsent(@Param("e") ProactiveEventEntity event);
 

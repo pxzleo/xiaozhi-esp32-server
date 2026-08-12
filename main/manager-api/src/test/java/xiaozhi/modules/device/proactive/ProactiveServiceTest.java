@@ -911,6 +911,37 @@ class ProactiveServiceTest {
     }
 
     @Test
+    void newlyInsertedEventUsesInsertResultDespiteJdbcTimezoneShift() {
+        EventUpsert request = eventRequest();
+        request.setExpiresAt(new Date(request.getCreatedAt().getTime() + 60 * 60 * 1000L));
+        ProactiveEventEntity stored = eventEntity(request);
+        stored.setCreatedAt(new Date(request.getCreatedAt().getTime() - 8 * 60 * 60 * 1000L));
+        stored.setExpiresAt(new Date(request.getExpiresAt().getTime() - 8 * 60 * 60 * 1000L));
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(null, stored);
+        when(eventDao.insertIfAbsent(any(ProactiveEventEntity.class))).thenReturn(1);
+
+        var result = service.upsertEvent(request);
+
+        assertEquals("event-1", result.eventId());
+        verify(eventDao).insertIfAbsent(any(ProactiveEventEntity.class));
+    }
+
+    @Test
+    void duplicateDetectedByInsertIgnoreStillRunsStrictIdempotencyCheck() {
+        EventUpsert request = eventRequest();
+        ProactiveEventEntity conflicting = eventEntity(request);
+        conflicting.setReason("different reason");
+        when(eventDao.selectByDeviceAndEventIdForUpdate("device-1", "event-1"))
+                .thenReturn(null, conflicting);
+        when(eventDao.insertIfAbsent(any(ProactiveEventEntity.class))).thenReturn(0);
+
+        RenException error = assertThrows(RenException.class, () -> service.upsertEvent(request));
+
+        assertEquals("event_id已存在但事件内容不一致", error.getMsg());
+    }
+
+    @Test
     void sameEventIdCanBeAuditedByTwoDifferentDevices() {
         DeviceEntity other = new DeviceEntity();
         other.setId("device-2");
