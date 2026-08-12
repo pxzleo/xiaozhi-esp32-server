@@ -141,6 +141,6 @@ manager-web 的“主动助理”新增独立“手机感知事件”标签，�
 
 手机事件处理失败后的下一次执行时间由 MySQL `CURRENT_TIMESTAMP(3)` 直接加受控退避秒数生成，候选领取也使用同一数据库时钟，禁止用 JVM 时间写入无时区 `DATETIME`。创建主动事件时以 `INSERT IGNORE` 的影响行数判定本次是否新建；只有数据库中已存在的事件才执行完整幂等内容比较，避免新插入行被 JDBC 时区转换误判后回滚。
 
-普通通知不得完全信任客户端初判类别。manager-api 会在脱敏摘要上重新识别物流进度、明确账户安全、未接来电、临近预约/行程和重要车辆状态；其中“开始/正在配送、即将送达、已到驿站/快递柜、待取件”使用确定性受控摘要直接生成 `MOBILE_ALERT`，不依赖 LLM 严重度。普通下单成功、优惠促销和泛化物流状态不主动播报。手机实例可配置 `conservative/balanced/timely` 敏感度及 `security/call/parcel/appointment/message/other` 提醒范围；设置只影响普通通知，显式启用的地点围栏仍按自身规则处理。无法确定的重要通知才进入独立全局模型；均衡档继续要求 `high/critical + confidence>=0.85`，保守档只接受 `critical + >=0.90`，及时档接受 `medium/high/critical + >=0.75`。
+普通通知不得完全信任客户端初判类别。manager-api 会在脱敏摘要上重新识别物流进度、明确账户安全、未接来电、临近预约/行程和重要车辆状态；其中“开始/正在配送、即将送达、已到驿站/快递柜、待取件”使用确定性受控摘要直接生成 `MOBILE_ALERT`，不依赖 LLM 严重度。普通下单成功、优惠促销和泛化物流状态不主动播报。手机实例可配置 `conservative/balanced/timely` 敏感度及 `security/call/parcel/appointment/message/other` 提醒范围。地点围栏变化只进入手机感知事件审计，固定写入 `location_audit_only`，不调用 LLM，也不创建主动事件。无法确定的重要通知才进入独立全局模型；均衡档继续要求 `high/critical + confidence>=0.85`，保守档只接受 `critical + >=0.90`，及时档接受 `medium/high/critical + >=0.75`。
 
 同一通知生命周期的 `removed` 如果在 posted/updated 快照尚处于 `received/error` 时到达，只更新生命周期时间，不得覆盖待评估的权威摘要、类别和处理状态；处理完成后的 removed 仍撤销尚未投递的主动事件副本。这样短暂系统通知不会在后台处理前丢失，同时已经撤销的旧提醒也不会继续播报。

@@ -111,6 +111,38 @@ class MobileMigrationTest {
     }
 
     @Test
+    void locationAuditOnlyMigrationDismissesUndeliveredCopiesAndPreservesDeliveredHistory()
+            throws Exception {
+        String yaml;
+        try (var stream = getClass().getResourceAsStream("/db/changelog/db.changelog-master.yaml")) {
+            yaml = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertTrue(yaml.indexOf("id: 202608121500") > yaml.indexOf("id: 202608121300"));
+        try (var stream = getClass().getResourceAsStream("/db/changelog/202608121500.sql")) {
+            String sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            assertTrue(sql.contains("me.event_type = 'location.transition'"));
+            assertTrue(sql.contains("CREATE TEMPORARY TABLE `tmp_location_audit_groups`"));
+            assertTrue(sql.contains("PRIMARY KEY (`user_id`, `delivery_group_key`)"));
+            assertTrue(sql.contains("source.device_id = mi.device_id"));
+            assertTrue(sql.contains("source.event_id = me.proactive_event_id"));
+            assertTrue(sql.contains("location_group.user_id = copy_device.user_id"));
+            assertTrue(sql.contains("copies.delivery_status IN ('PENDING', 'CLAIMED', 'FAILED')"));
+            assertTrue(sql.contains("copies.delivery_status = 'DISMISSED'"));
+            int dismissJoin = sql.indexOf("UPDATE `ai_device_proactive_event` copies");
+            int dismissSet = sql.indexOf("SET copies.delivery_status = 'DISMISSED'", dismissJoin);
+            assertFalse(sql.substring(dismissJoin, dismissSet).contains("has_delivered = 0"));
+            assertTrue(sql.contains("delivered_device.user_id = location_group.user_id"));
+            assertTrue(sql.contains("delivered_claim.user_id = location_group.user_id"));
+            assertTrue(sql.contains("INSERT INTO `ai_proactive_delivery_claim`"));
+            assertTrue(sql.contains("delivery_status = 'DELIVERED'"));
+            assertTrue(sql.contains("location_group.has_delivered = 0"));
+            assertTrue(sql.contains("dc.delivery_status = 'FAILED'"));
+            assertTrue(sql.contains("reason_code = 'location_audit_only'"));
+            assertFalse(sql.contains("DELETE FROM"));
+        }
+    }
+
+    @Test
     void visibleDeviceAndAuditQueriesUseCanonicalMobileGroup() throws Exception {
         String deviceSql = String.join("\n", xiaozhi.modules.device.dao.DeviceDao.class
                 .getDeclaredMethod("selectVisibleByUserAndAgent", Long.class, String.class)
@@ -123,6 +155,8 @@ class MobileMigrationTest {
         assertTrue(deviceSql.contains("mi.canonical_instance_id=mi.mobile_instance_id"));
         assertTrue(deviceSql.contains("member.canonical_instance_id=mi.mobile_instance_id"));
         assertTrue(eventSql.contains("mi.canonical_instance_id=#{instanceId}"));
+        assertTrue(eventSql.indexOf("dc.delivery_status = 'DELIVERED'")
+                < eventSql.indexOf("p.expires_at IS NOT NULL"));
         String unbindSql = String.join("\n", xiaozhi.modules.device.dao.DeviceDao.class
                 .getDeclaredMethod("selectMobileGroupDeviceIds", Long.class, String.class)
                 .getAnnotation(org.apache.ibatis.annotations.Select.class).value());
@@ -178,7 +212,8 @@ class MobileMigrationTest {
                 .getAnnotation(Select.class).value());
         for (String sql : java.util.List.of(page, count)) {
             assertTrue(sql.contains("p.expires_at &lt;= CURRENT_TIMESTAMP(3) THEN 'EXPIRED'"));
-            assertTrue(sql.contains("p.delivery_status IN ('DELIVERED','FAILED','DISMISSED')"));
+            assertTrue(sql.contains("p.delivery_status = 'DELIVERED' THEN 'DELIVERED'"));
+            assertTrue(sql.contains("p.delivery_status IN ('FAILED','DISMISSED')"));
             assertTrue(sql.contains("DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)"));
             assertTrue(sql.contains("THEN 'PENDING'"));
             assertTrue(sql.contains("=#{deliveryStatus}"));
@@ -197,10 +232,12 @@ class MobileMigrationTest {
                 .getAnnotation(Select.class).value());
         for (String sql : java.util.List.of(page, count)) {
             int linkedTerminal = sql.indexOf(
-                    "p.delivery_status IN ('DELIVERED','FAILED','DISMISSED') THEN p.delivery_status");
+                    "p.delivery_status IN ('FAILED','DISMISSED') THEN p.delivery_status");
             int sharedClaim = sql.indexOf("COALESCE(dc.delivery_status,p.delivery_status)='CLAIMED'");
             assertTrue(linkedTerminal >= 0 && sharedClaim > linkedTerminal,
                     "当前关联副本终态必须先于共享领取账本派生");
+            assertTrue(sql.indexOf("dc.delivery_status = 'DELIVERED' THEN 'DELIVERED'")
+                    < linkedTerminal, "同用户真实投递账本必须优先于迁移后的 DISMISSED 来源副本");
         }
     }
 

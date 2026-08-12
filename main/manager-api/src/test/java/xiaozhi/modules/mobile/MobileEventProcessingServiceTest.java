@@ -73,24 +73,17 @@ class MobileEventProcessingServiceTest {
     }
 
     @Test
-    void locationUsesServerRebuiltSummaryAndNeverCallsModel() {
+    void locationIsRetainedForAuditButNeverCreatesProactiveAlert() {
         MobileEventEntity location = event("location.transition", "entered", null, "客户端文本");
         location.setEntitiesJson("{\"place_id\":\"place_12345678\",\"place_name\":\"公司\",\"transition\":\"enter\"}");
-        location.setProcessingLeaseToken("token");
-        when(instanceDao.selectCanonicalByInstance(location.getMobileInstanceId())).thenReturn(instance());
-        when(eventDao.selectByEventIdForUpdate(location.getMobileInstanceId(), location.getEventId()))
-                .thenReturn(location);
-        when(proactive.createMobileAlert(eq(location.getMobileInstanceId()), eq(7L), eq("agent-1"),
-                eq(location.getEventId()),
-                org.mockito.ArgumentMatchers.startsWith("sha256:"), eq("地点提醒"), eq("已进入公司"),
-                eq("android.geofence"), eq("location"), eq(Priority.NORMAL), any(), any()))
-                .thenReturn(new EventCreateResult(true, false, "mobile-1", null, new Date()));
 
-        assertEquals(MobileEventProcessingService.CONVERTED,
+        assertEquals(MobileEventProcessingService.IGNORED,
                 service.processClaimed(location, "worker", "token"));
-        verify(eventDao).finishConverted(location.getMobileInstanceId(), location.getEventId(),
-                "token", "location", "medium", 1.0, "已进入公司", "mobile-1");
+        verify(eventDao).finishIgnored(location.getMobileInstanceId(), location.getEventId(),
+                "token", "location_audit_only");
         verify(classifier, never()).classifyMobileEvent(any(), any(), any(), any());
+        verify(proactive, never()).createMobileAlert(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any());
     }
 
     @Test

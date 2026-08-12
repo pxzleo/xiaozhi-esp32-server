@@ -91,7 +91,8 @@ public class MobileEventProcessingService {
             return processNotification(event, token);
         }
         if ("location.transition".equals(event.getEventType())) {
-            return processLocation(event, token);
+            finishIgnored(event, token, "location_audit_only");
+            return IGNORED;
         }
         finishIgnored(event, token, "event_type_unsupported");
         return IGNORED;
@@ -164,29 +165,6 @@ public class MobileEventProcessingService {
                     case "medium" -> Priority.NORMAL;
                     default -> Priority.HIGH;
                 }, true, true);
-    }
-
-    private String processLocation(MobileEventEntity event, String token) {
-        final Map<String, String> entities;
-        try {
-            entities = readEntities(event);
-        } catch (RenException error) {
-            finishIgnored(event, token, "stored_event_shape_invalid");
-            return IGNORED;
-        }
-        String transition = entities.get("transition");
-        String prefix = Map.of("enter", "已进入", "exit", "已离开", "dwell", "已驻留")
-                .get(transition);
-        String placeId = entities.get("place_id");
-        String placeName = entities.get("place_name");
-        if (prefix == null || StringUtils.isAnyBlank(placeId, placeName)) {
-            finishIgnored(event, token, "stored_event_shape_invalid");
-            return IGNORED;
-        }
-        String summary = prefix + placeName;
-        String dedupeKey = "sha256:" + sha256(placeId + ":" + transition);
-        return convert(event, token, "location", "medium", 1.0, summary,
-                "地点提醒", dedupeKey, "android.geofence", Priority.NORMAL, false, false);
     }
 
     private String convert(MobileEventEntity event, String token, String category,

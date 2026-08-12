@@ -32,7 +32,7 @@ Android outbox 按 `mobile_instance_id` 隔离，worker 只能发送当前绑定
 
 手机实例可配置 `alert_categories=security/call/parcel/appointment/message/other` 和 `alert_sensitivity=conservative/balanced/timely`。客户端初始类别不作为提前屏蔽依据：确定性规则或模型先形成最终服务端类别，再应用类别开关。均衡档接受 `high/critical + confidence>=0.85`，保守档只接受 `critical + confidence>=0.90`，及时档接受 `medium/high/critical + confidence>=0.75`。最终创建主动事件的短事务会 `FOR UPDATE` 重读手机实例，并再次检查未撤销状态、最新类别范围和最新敏感度；用户在模型调用期间关闭类别或调高阈值时不得创建旧决策事件。已撤销实例在调用模型前直接忽略。`removed` 仅撤销尚未真实投递的旧主动副本；如果原通知尚未处理完成，则仍保留最后一个权威快照完成一次判断，避免短生命周期通知在 worker 到达前消失。
 
-用户在 M5 显式保存并启用的 enter/exit/dwell 是位置主动提醒授权。`location.transition` 不调用 LLM；通过实例、严格形状和有效期校验后，服务端仅用受控地点名重构“已进入/已离开/已驻留 + 地点名”，按 `place_id+transition` 计算 24 小时滚动去重并生成普通优先级提醒。经纬度和客户端自由文本不得进入 payload 或模型。
+用户在 M5 显式保存并启用的 enter/exit/dwell 仅授权手机记录位置状态变化。`location.transition` 不调用 LLM，也不生成主动事件或语音/状态栏主动提醒；通过实例、严格形状和有效期校验后只保留在手机感知事件审计中，处理原因固定为 `location_audit_only`。经纬度和客户端自由文本不得进入审计展示、主动 payload 或模型。
 
 同一通知生命周期的更晚 `updated/removed` 在更新手机事件的事务中失效旧 `delivery_group` 的未实际投递副本：PENDING 写入 dismissed 真实终态；CLAIMED 保留领取事实但把有效期推进到数据库当前时间，使后续权威读取和 complete CAS 拒绝；DELIVERED 不改写。`updated` 若再次达到提醒门槛，按 `dedupe_key + occurred_at revision` 生成新内部去重键，以新的投递组和最新受控 payload 创建提醒，不能命中旧 24 小时窗口复用旧内容。手机和音箱在实际播报前必须重新读取权威事件；Android 对 `MOBILE_ALERT` 使用同一 token 再次 claim，同 token 幂等且不得刷新 180 秒租约，复验冲突时停止呈现。当前 Android `/mobile/proactive/pending` 返回闭集中 `topic=system` 只对应 `MOBILE_ALERT`，因此 Android 以该 topic 触发二次复验；若以后该返回闭集增加其他 SYSTEM 事件，必须先增加可精确区分事件类型的协议字段并同步客户端，不能隐式复用该判断。
 
