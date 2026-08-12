@@ -296,7 +296,7 @@ class MobileMigrationTest {
             assertTrue(sql.contains("GROUP BY d2.user_id, e2.delivery_group_key"));
             assertTrue(sql.contains("e2.delivery_status='DELIVERED'"));
             assertTrue(sql.contains("ON DUPLICATE KEY UPDATE"));
-            assertTrue(sql.contains("ON DUPLICATE KEY UPDATE user_id=user_id"));
+            assertTrue(sql.contains("ON DUPLICATE KEY UPDATE delivery_group_key=VALUES(delivery_group_key)"));
             assertFalse(sql.contains("ON DUPLICATE KEY UPDATE\n  delivery_status='DELIVERED'"));
             assertTrue(sql.contains("dc.delivery_status='DELIVERED'"));
             assertTrue(sql.contains("dc.user_id=d.user_id"));

@@ -12,7 +12,7 @@ INNER JOIN (
   WHERE e2.delivery_status='DELIVERED' AND e2.delivery_group_key IS NOT NULL
   GROUP BY d2.user_id, e2.delivery_group_key
 ) chosen ON chosen.user_id=d.user_id AND chosen.delivered_id=delivered.id
-ON DUPLICATE KEY UPDATE user_id=user_id;
+ON DUPLICATE KEY UPDATE delivery_group_key=VALUES(delivery_group_key);
 
 UPDATE ai_device_proactive_event e
 INNER JOIN ai_device d ON d.id=e.device_id
