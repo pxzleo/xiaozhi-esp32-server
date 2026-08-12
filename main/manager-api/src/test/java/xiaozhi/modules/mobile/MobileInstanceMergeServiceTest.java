@@ -95,6 +95,33 @@ class MobileInstanceMergeServiceTest {
         verify(dao, never()).retireMergedAliases(7L, canonical.getMobileInstanceId());
     }
 
+    @Test
+    void inheritsLatestNonDefaultAlertSettingsWhenCanonicalStillUsesDefaults() {
+        MobileInstanceDao dao = mock(MobileInstanceDao.class);
+        MobileInstanceMergeService service = new MobileInstanceMergeService(dao);
+        MobileInstanceEntity canonical = instance("mob_" + "a".repeat(32), "a".repeat(32), "agent-1");
+        canonical.setAlertSensitivity("balanced");
+        canonical.setAlertCategories("security,call,parcel,appointment,message,other");
+        MobileInstanceEntity duplicate = instance("mob_" + "b".repeat(32), "b".repeat(32), "agent-1");
+        duplicate.setAlertSensitivity("timely");
+        duplicate.setAlertCategories("parcel,security");
+        duplicate.setUpdatedAt(new java.util.Date(200));
+        when(dao.selectByDeviceForUpdate(7L, canonical.getDeviceId())).thenReturn(canonical);
+        when(dao.selectByDeviceForUpdate(7L, duplicate.getDeviceId())).thenReturn(duplicate);
+        when(dao.selectCanonicalByInstanceForUpdate(canonical.getMobileInstanceId())).thenReturn(canonical);
+        when(dao.selectCanonicalGroupForUpdate(7L, canonical.getCanonicalInstanceId()))
+                .thenReturn(List.of(canonical));
+        when(dao.selectCanonicalGroupForUpdate(7L, duplicate.getCanonicalInstanceId()))
+                .thenReturn(List.of(duplicate));
+        when(dao.updateAlertSettings(7L, canonical.getMobileInstanceId(), "timely",
+                "parcel,security")).thenReturn(1);
+
+        service.merge(7L, new MergeRequest(canonical.getDeviceId(), List.of(duplicate.getDeviceId())));
+
+        verify(dao).updateAlertSettings(7L, canonical.getMobileInstanceId(), "timely",
+                "parcel,security");
+    }
+
     private MobileInstanceEntity instance(String id, String deviceId, String agentId) {
         MobileInstanceEntity entity = new MobileInstanceEntity();
         entity.setMobileInstanceId(id);

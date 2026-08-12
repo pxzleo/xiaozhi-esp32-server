@@ -49,6 +49,13 @@ public interface DeviceDao extends BaseMapper<DeviceEntity> {
     List<DeviceEntity> selectVisibleByUserAndAgent(@Param("userId") Long userId,
             @Param("agentId") String agentId);
 
+    @Select("SELECT alias.device_id FROM ai_mobile_instance selected "
+            + "INNER JOIN ai_mobile_instance alias "
+            + "ON alias.canonical_instance_id=selected.canonical_instance_id "
+            + "WHERE selected.user_id=#{userId} AND selected.device_id=#{deviceId}")
+    List<String> selectMobileGroupDeviceIds(@Param("userId") Long userId,
+            @Param("deviceId") String deviceId);
+
     /**
      * 获取此智能体全部设备的最后连接时间
      * 

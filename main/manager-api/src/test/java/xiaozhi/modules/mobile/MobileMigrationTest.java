@@ -123,6 +123,10 @@ class MobileMigrationTest {
         assertTrue(deviceSql.contains("mi.canonical_instance_id=mi.mobile_instance_id"));
         assertTrue(deviceSql.contains("member.canonical_instance_id=mi.mobile_instance_id"));
         assertTrue(eventSql.contains("mi.canonical_instance_id=#{instanceId}"));
+        String unbindSql = String.join("\n", xiaozhi.modules.device.dao.DeviceDao.class
+                .getDeclaredMethod("selectMobileGroupDeviceIds", Long.class, String.class)
+                .getAnnotation(org.apache.ibatis.annotations.Select.class).value());
+        assertTrue(unbindSql.contains("alias.canonical_instance_id=selected.canonical_instance_id"));
     }
 
     @Test

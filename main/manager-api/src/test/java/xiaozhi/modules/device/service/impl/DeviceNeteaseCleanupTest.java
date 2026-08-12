@@ -49,6 +49,24 @@ class DeviceNeteaseCleanupTest {
         verify(fixture.netease, org.mockito.Mockito.times(2)).revokeForDeviceRemoval("AA:02");
     }
 
+    @Test
+    void unbindCanonicalMobileDeviceRevokesAndDeletesWholeAliasGroup() {
+        Fixture fixture = new Fixture();
+        DeviceEntity canonical = device("canonical", "mob_canonical", 7L);
+        DeviceEntity alias = device("alias", "mob_alias", 7L);
+        when(fixture.dao.selectByIdForUpdate("canonical")).thenReturn(canonical);
+        when(fixture.dao.selectByIdForUpdate("alias")).thenReturn(alias);
+        when(fixture.dao.selectMobileGroupDeviceIds(7L, "canonical"))
+                .thenReturn(List.of("canonical", "alias"));
+
+        fixture.service.unbindDevice(7L, "canonical");
+
+        verify(fixture.netease).revokeForDeviceRemoval("mob_canonical");
+        verify(fixture.netease).revokeForDeviceRemoval("mob_alias");
+        verify(fixture.addressBook).deleteByMacAddresses(List.of("mob_canonical", "mob_alias"));
+        verify(fixture.dao).delete(any());
+    }
+
     private static DeviceEntity device(String id, String mac, Long userId) {
         DeviceEntity device = new DeviceEntity();
         device.setId(id);

@@ -326,14 +326,23 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
             redisUtils.delete(RedisKeys.getAgentDeviceCountById(device.getAgentId()));
         }
 
-        deviceNeteaseService.revokeForDeviceRemoval(macAddress);
+        List<String> mobileGroup = deviceDao.selectMobileGroupDeviceIds(userId, deviceId);
+        List<DeviceEntity> removedDevices = mobileGroup.isEmpty()
+                ? List.of(device) : mobileGroup.stream()
+                        .map(deviceDao::selectByIdForUpdate)
+                        .filter(java.util.Objects::nonNull)
+                        .toList();
+        removedDevices.stream().map(DeviceEntity::getMacAddress)
+                .forEach(deviceNeteaseService::revokeForDeviceRemoval);
         UpdateWrapper<DeviceEntity> wrapper = new UpdateWrapper<>();
         wrapper.eq("user_id", userId);
-        wrapper.eq("id", deviceId);
+        if (mobileGroup.isEmpty()) wrapper.eq("id", deviceId);
+        else wrapper.in("id", mobileGroup);
         baseDao.delete(wrapper);
 
         // 删除设备相关的通讯录权限记录
-        deviceAddressBookService.deleteByMacAddresses(Collections.singletonList(macAddress));
+        deviceAddressBookService.deleteByMacAddresses(
+                removedDevices.stream().map(DeviceEntity::getMacAddress).toList());
     }
 
     @Override

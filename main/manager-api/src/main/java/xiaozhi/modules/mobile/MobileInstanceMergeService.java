@@ -12,6 +12,9 @@ import xiaozhi.modules.mobile.MobileAssistantDTOs.MergeRequest;
 
 @Service
 public class MobileInstanceMergeService {
+    private static final String DEFAULT_SENSITIVITY = "balanced";
+    private static final String DEFAULT_CATEGORIES =
+            "security,call,parcel,appointment,message,other";
     private final MobileInstanceDao instanceDao;
 
     public MobileInstanceMergeService(MobileInstanceDao instanceDao) {
@@ -53,6 +56,7 @@ public class MobileInstanceMergeService {
         if (stableKeys.size() > 1) {
             throw new RenException("选中的记录来自不同手机，不能合并");
         }
+        inheritAlertSettings(userId, canonical, members);
         String stableKey = stableKeys.stream().findFirst().orElse(null);
         for (String sourceCanonicalId : sourceCanonicalIds) {
             instanceDao.clearStableKeysInGroup(userId, sourceCanonicalId);
@@ -69,5 +73,39 @@ public class MobileInstanceMergeService {
                 throw new RenException("手机稳定身份继承失败");
             }
         }
+    }
+
+    private void inheritAlertSettings(Long userId, MobileInstanceEntity canonical,
+            List<MobileInstanceEntity> members) {
+        if (!isDefaultSettings(canonical)) return;
+        MobileInstanceEntity source = members.stream()
+                .filter(member -> !isDefaultSettings(member))
+                .max(java.util.Comparator.comparing(this::settingsTimestamp))
+                .orElse(null);
+        if (source == null) return;
+        String sensitivity = org.apache.commons.lang3.StringUtils.defaultIfBlank(
+                source.getAlertSensitivity(), DEFAULT_SENSITIVITY);
+        String categories = org.apache.commons.lang3.StringUtils.defaultIfBlank(
+                source.getAlertCategories(), DEFAULT_CATEGORIES);
+        if (instanceDao.updateAlertSettings(userId, canonical.getMobileInstanceId(),
+                sensitivity, categories) != 1) {
+            throw new RenException("手机提醒设置继承失败");
+        }
+        canonical.setAlertSensitivity(sensitivity);
+        canonical.setAlertCategories(categories);
+    }
+
+    private boolean isDefaultSettings(MobileInstanceEntity entity) {
+        String sensitivity = org.apache.commons.lang3.StringUtils.defaultIfBlank(
+                entity.getAlertSensitivity(), DEFAULT_SENSITIVITY);
+        String categories = org.apache.commons.lang3.StringUtils.defaultIfBlank(
+                entity.getAlertCategories(), DEFAULT_CATEGORIES);
+        return DEFAULT_SENSITIVITY.equals(sensitivity) && DEFAULT_CATEGORIES.equals(categories);
+    }
+
+    private long settingsTimestamp(MobileInstanceEntity entity) {
+        java.util.Date date = entity.getUpdatedAt() != null
+                ? entity.getUpdatedAt() : entity.getLastConnectedAt();
+        return date == null ? Long.MIN_VALUE : date.getTime();
     }
 }
