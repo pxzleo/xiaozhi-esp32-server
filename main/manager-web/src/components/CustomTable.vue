@@ -1,11 +1,11 @@
 <template>
-  <div class="custom-table-wrapper">
-    <div class="table-container" :style="{ height: tableContainerHeight }">
+  <div :class="['custom-table-wrapper', { 'auto-height': autoHeight }]">
+    <div class="table-container" :style="{ height: autoHeight ? 'auto' : tableContainerHeight }">
       <el-table
         ref="tableRef"
         :data="data"
         :class="['custom-table', tableClass]"
-        height="100%"
+        :height="autoHeight ? undefined : '100%'"
         v-loading="loading"
         :element-loading-text="loadingText"
         :element-loading-spinner="loadingSpinner"
@@ -152,6 +152,10 @@ export default {
       type: Array,
       default: () => [10, 20, 50, 100]
     },
+    autoHeight: {
+      type: Boolean,
+      default: false
+    },
     // 加载状态
     loading: {
       type: Boolean,
@@ -257,6 +261,9 @@ export default {
       }
     }
   }
+}
+.custom-table-wrapper.auto-height {
+  flex: 0 0 auto;
 }
 :deep(.el-table) {
   .el-table__body-wrapper {

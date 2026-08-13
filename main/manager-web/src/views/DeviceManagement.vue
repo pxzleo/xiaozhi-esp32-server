@@ -30,6 +30,7 @@
               :current-page="currentPage"
               :page-size="pageSize"
               :page-size-options="pageSizeOptions"
+              auto-height
               @size-change="handlePageSizeChange"
               @page-change="goToPage"
             >
@@ -603,19 +604,19 @@ export default {
 
 .device-card {
   background: white;
-  flex: 1;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   border: none;
   box-shadow: none;
-  overflow: hidden;
+  overflow: visible;
 
   ::v-deep .el-card__body {
     padding: 14px 20px;
     display: flex;
     flex-direction: column;
-    flex: 1;
-    overflow: hidden;
+    flex: 0 0 auto;
+    overflow: visible;
   }
 }
 

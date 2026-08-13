@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -384,4 +385,13 @@ test('builds strict mobile audit filters and rejects cross-device response rows'
   assert.equal(mobileAuditBelongsToContext([
     { device_id: 'device-b', mobile_instance_id: 'mob-a' },
   ], 'device-a', 'mob-a'), false);
+});
+
+test('device management expands the current page so every bound device keeps an unbind entry', () => {
+  const deviceManagement = fs.readFileSync(new URL('../src/views/DeviceManagement.vue', import.meta.url), 'utf8');
+  const customTable = fs.readFileSync(new URL('../src/components/CustomTable.vue', import.meta.url), 'utf8');
+  assert.match(deviceManagement, /<CustomTable[\s\S]*?auto-height/);
+  assert.match(deviceManagement, /\.device-card[\s\S]*?flex: 0 0 auto;[\s\S]*?overflow: visible;/);
+  assert.match(customTable, /autoHeight \? undefined : '100%'/);
+  assert.match(customTable, /\.custom-table-wrapper\.auto-height[\s\S]*?flex: 0 0 auto;/);
 });
