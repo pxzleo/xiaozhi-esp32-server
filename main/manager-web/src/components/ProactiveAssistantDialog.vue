@@ -520,6 +520,7 @@ import {
   monitorsPayload,
   preferencePayload,
   deliveryRoutingPayload,
+  restrictDeliveryRoutingToDevices,
   recoverMonitorsFailure,
   recoverPreferenceFailure,
   inheritedWeatherLocation,
@@ -537,6 +538,7 @@ export default {
     visible: { type: Boolean, default: false },
     device: { type: Object, default: () => ({}) },
     accountOnly: { type: Boolean, default: false },
+    accountDevices: { type: Array, default: () => [] },
   },
   data() {
     return {
@@ -552,6 +554,7 @@ export default {
       routingLoaded: false,
       routingLoading: false,
       routingSaving: false,
+      routingDirectoryChanged: false,
       routingError: '',
       monitors: {},
       monitorLoadedDeviceId: '',
@@ -642,6 +645,15 @@ export default {
     'device.device_id'(deviceId, previousDeviceId) {
       if (this.visible && deviceId !== previousDeviceId) this.initializeForDevice();
     },
+    accountDevices(devices, previousDevices) {
+      if (this.visible && this.accountOnly && devices !== previousDevices) {
+        if (this.routingSaving) {
+          this.routingDirectoryChanged = true;
+          return;
+        }
+        this.loadDeliveryRouting();
+      }
+    },
   },
   mounted() {
     if (this.visible) this.initializeForDevice();
@@ -660,6 +672,7 @@ export default {
       this.routingLoaded = false;
       this.routingLoading = false;
       this.routingSaving = false;
+      this.routingDirectoryChanged = false;
       this.routingError = '';
       this.monitors = {};
       this.monitorLoadedDeviceId = '';
@@ -785,7 +798,10 @@ export default {
       Api.proactive.getDeliveryRouting(response => {
         if (!this.requestGate.isCurrent(request)) return;
         const routing = this.responseData(response);
-        const form = createDeliveryRoutingForm(routing || {});
+        const responseForm = createDeliveryRoutingForm(routing || {});
+        const form = this.accountOnly
+          ? restrictDeliveryRoutingToDevices(responseForm, this.accountDevices)
+          : responseForm;
         const invalidField = validateDeliveryRouting(form);
         if (invalidField) {
           this.handleRoutingFailure(null, true);
@@ -818,16 +834,23 @@ export default {
     },
     saveDeliveryRouting() {
       if (this.routingSaving || !this.routingLoaded) return;
-      const invalidField = validateDeliveryRouting(this.routingForm);
+      const form = this.accountOnly
+        ? restrictDeliveryRoutingToDevices(this.routingForm, this.accountDevices)
+        : this.routingForm;
+      this.routingForm = form;
+      const invalidField = validateDeliveryRouting(form);
       if (invalidField) {
         this.$message.warning(this.$t(`proactive.routing.validation.${invalidField}`));
         return;
       }
       const request = this.requestGate.begin('routing');
       this.routingSaving = true;
-      Api.proactive.updateDeliveryRouting(deliveryRoutingPayload(this.routingForm), response => {
+      Api.proactive.updateDeliveryRouting(deliveryRoutingPayload(form), response => {
         if (!this.requestGate.isCurrent(request)) return;
-        const form = createDeliveryRoutingForm(this.responseData(response) || {});
+        const responseForm = createDeliveryRoutingForm(this.responseData(response) || {});
+        const form = this.accountOnly
+          ? restrictDeliveryRoutingToDevices(responseForm, this.accountDevices)
+          : responseForm;
         const invalidField = validateDeliveryRouting(form);
         if (invalidField) {
           this.handleRoutingFailure(null);
@@ -836,10 +859,19 @@ export default {
         this.routingForm = form;
         this.routingSaving = false;
         this.routingError = '';
+        if (this.routingDirectoryChanged) {
+          this.routingDirectoryChanged = false;
+          this.saveDeliveryRouting();
+          return;
+        }
         this.$message.success(this.$t('proactive.routing.saveSuccess'));
       }, error => {
         if (!this.requestGate.isCurrent(request)) return;
         this.handleRoutingFailure(error);
+        if (this.routingDirectoryChanged) {
+          this.routingDirectoryChanged = false;
+          this.loadDeliveryRouting();
+        }
       });
     },
     selectAllDefaultDevices() {

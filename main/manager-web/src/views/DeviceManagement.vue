@@ -9,7 +9,7 @@
             <div class="operation-header">
               <h2 class="page-title">{{ $t('device.management') }}</h2>
               <div class="right-operations">
-                <CustomButton icon="el-icon-connection" @click="terminalSensingVisible = true">
+                <CustomButton icon="el-icon-connection" :disabled="loading" @click="terminalSensingVisible = true">
                   {{ $t('terminalSensing.title') }}
                 </CustomButton>
                 <el-input :placeholder="$t('device.searchPlaceholder')" v-model="searchKeyword" class="search-input"
@@ -107,7 +107,8 @@
     <ManualAddDeviceDialog :visible.sync="manualAddDeviceDialogVisible" :agent-id="currentAgentId"
       @refresh="fetchBindDevices(currentAgentId)" />
     <ProactiveAssistantDialog :visible.sync="proactiveDialogVisible" :device="proactiveDevice" />
-    <ProactiveAssistantDialog :visible.sync="terminalSensingVisible" :device="{}" account-only />
+    <ProactiveAssistantDialog :visible.sync="terminalSensingVisible" :device="{}"
+      :account-devices="deviceList" account-only />
     <el-footer>
       <version-footer />
     </el-footer>

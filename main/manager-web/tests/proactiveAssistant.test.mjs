@@ -27,6 +27,7 @@ import {
   recoverMonitorsFailure,
   recoverExternalMonitoringFailure,
   recoverPreferenceFailure,
+  restrictDeliveryRoutingToDevices,
   validateMonitors,
   validatePreference,
   validateDeliveryRouting,
@@ -80,6 +81,34 @@ test('defaults account delivery to every returned terminal and builds exact CAS 
     places: [],
     version: 0,
   });
+});
+
+test('restricts account routing to the same terminals shown by device management', () => {
+  const form = createDeliveryRoutingForm({
+    default_device_ids: ['phone', 'speaker', 'legacy', 'test-device'],
+    location_authority_mobile_instance_id: 'mob_0123456789abcdef0123456789abcdef',
+    devices: [
+      { device_id: 'phone', alias: '主力手机', terminal_type: 'mobile', mobile_instance_id: 'mob_0123456789abcdef0123456789abcdef' },
+      { device_id: 'speaker', alias: '客厅音箱', terminal_type: 'speaker' },
+      { device_id: 'legacy', alias: '旧音箱', terminal_type: 'speaker' },
+      { device_id: 'test-device', alias: 'Web测试设备', terminal_type: 'speaker' },
+    ],
+    places: [{ place_id: 'place_12345678', place_name: '家', device_ids: ['speaker', 'legacy'] }],
+    version: 1,
+  });
+  const restricted = restrictDeliveryRoutingToDevices(form, [
+    { device_id: 'phone' }, { device_id: 'speaker' },
+  ]);
+  assert.deepEqual(restricted.devices.map(device => device.device_id), ['phone', 'speaker']);
+  assert.deepEqual(restricted.default_device_ids, ['phone', 'speaker']);
+  assert.deepEqual(restricted.places[0].device_ids, ['speaker']);
+  assert.equal(restricted.location_authority_mobile_instance_id,
+    'mob_0123456789abcdef0123456789abcdef');
+  const empty = restrictDeliveryRoutingToDevices(form, []);
+  assert.deepEqual(empty.devices, []);
+  assert.deepEqual(empty.default_device_ids, []);
+  assert.deepEqual(empty.places[0].device_ids, []);
+  assert.equal(empty.location_authority_mobile_instance_id, null);
 });
 
 test('rejects unknown terminals, invalid places and stale routing shapes before save', () => {

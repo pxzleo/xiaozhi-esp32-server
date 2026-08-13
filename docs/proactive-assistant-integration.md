@@ -151,6 +151,8 @@ manager-web 的“主动助理”新增独立“手机感知事件”标签，�
 
 账号路由由普通用户接口 `GET/PUT /device/proactive/delivery-routing` 管理。未保存路由时默认账号下全部有效终端；已知地点使用地点的 `device_ids`，权威手机地点超过数据库时间十二小时后回退 `default_device_ids`。地点变化只更新路由状态，不产生主动提醒。手机使用既有移动凭据访问 `GET /mobile/proactive/delivery-routing`，并通过窄接口 `PUT /mobile/proactive/location-authority` 以版本号 CAS 选择位置权威手机。
 
+Web“终端与感知”必须复用当前设备管理页已经加载并展示的终端目录；接口返回的历史或测试终端若未出现在该目录中，不得继续显示为默认接收终端、地点接收终端或位置权威手机，保存时也不得带回这些陈旧终端 ID。
+
 设备使用独立 `display_name` 作为 Web 路由、固定地点和位置权威列表的主名称，原 `alias` 继续作为备注；终端 SQL 按 canonical 手机或非手机设备唯一返回，不得因历史手机实例联接产生重复行。Android 通过 `PUT /mobile/proactive/places` 只同步 `place_id/place_name` 账号地点目录，不上传坐标或轨迹；因此新建地点无需先触发一次围栏事件即可出现在 Web 地点下拉框。手机感知事件在“终端与感知”中按账号合并查询，敏感度设置仍明确选择具体采集手机。
 
 手机文字历史接口为 `GET /mobile/chat-history?before_id=&limit=`，按账号返回文字、角色、会话、时间和来源终端，不返回音频或硬件稳定标识。

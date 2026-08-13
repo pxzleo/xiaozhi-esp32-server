@@ -109,6 +109,25 @@ export function createDeliveryRoutingForm(routing = {}) {
   };
 }
 
+export function restrictDeliveryRoutingToDevices(form, accountDevices = []) {
+  const visibleIds = new Set(accountDevices.map(device => device?.device_id).filter(Boolean));
+  const devices = form.devices.filter(device => visibleIds.has(device.device_id));
+  const deviceIds = new Set(devices.map(device => device.device_id));
+  const mobileIds = new Set(devices.map(device => device.mobile_instance_id).filter(Boolean));
+  return {
+    ...form,
+    devices,
+    default_device_ids: form.default_device_ids.filter(id => deviceIds.has(id)),
+    location_authority_mobile_instance_id: mobileIds.has(form.location_authority_mobile_instance_id)
+      ? form.location_authority_mobile_instance_id
+      : null,
+    places: form.places.map(place => ({
+      ...place,
+      device_ids: place.device_ids.filter(id => deviceIds.has(id)),
+    })),
+  };
+}
+
 export function validateDeliveryRouting(form) {
   if (!form || !Number.isInteger(form.version) || form.version < 0) return 'version';
   if (!Array.isArray(form.devices) || !Array.isArray(form.default_device_ids) || !Array.isArray(form.places)) {
