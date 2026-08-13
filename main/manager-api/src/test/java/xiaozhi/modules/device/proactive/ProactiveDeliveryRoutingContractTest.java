@@ -6,7 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 import java.nio.file.Files;
@@ -37,7 +39,6 @@ class ProactiveDeliveryRoutingContractTest {
 
         ProactiveDeliveryRoutingService service = new ProactiveDeliveryRoutingService(
                 deviceDao, routingDao, mobileDao, userDao);
-
         assertEquals(List.of("d1", "d2"), service.resolveTargetDeviceIds(7L));
     }
 
@@ -83,6 +84,22 @@ class ProactiveDeliveryRoutingContractTest {
         assertTrue(sql.contains("'briefing'"));
         assertTrue(sql.contains("'weekdays'"));
         assertTrue(master.indexOf("202608131200.sql") > master.indexOf("202608121800.sql"));
+    }
+
+    @Test
+    void terminalDirectoryIsUniqueAndDisplayNamesAndPlaceCatalogAreMigrated() throws Exception {
+        String routableSql = DeviceDao.class.getMethod("selectRoutableByUser", Long.class)
+                .getAnnotation(Select.class).value()[0];
+        assertTrue(routableSql.contains("NOT EXISTS"));
+        assertTrue(routableSql.contains("EXISTS"));
+        assertFalse(routableSql.contains("LEFT JOIN ai_mobile_instance"));
+        String sql = Files.readString(Path.of("src/main/resources/db/changelog/202608131900.sql"));
+        String master = Files.readString(Path.of(
+                "src/main/resources/db/changelog/db.changelog-master.yaml"));
+        assertTrue(sql.contains("display_name"));
+        assertTrue(sql.contains("ai_proactive_place_catalog"));
+        assertTrue(sql.contains("source_mobile_instance_id"));
+        assertTrue(master.indexOf("202608131900.sql") > master.indexOf("202608131800.sql"));
     }
 
     @Test
@@ -168,6 +185,11 @@ class ProactiveDeliveryRoutingContractTest {
         SysUserDao userDao = mock(SysUserDao.class);
         ProactiveDeliveryRoutingService service = new ProactiveDeliveryRoutingService(
                 deviceDao, routingDao, mobileDao, userDao);
+        when(userDao.selectIdForUpdate(7L)).thenReturn(7L);
+        MobileInstanceEntity mobile = new MobileInstanceEntity();
+        mobile.setUserId(7L); mobile.setMobileInstanceId("mob_authority");
+        when(mobileDao.selectCanonicalByInstanceForUpdate("mob_authority")).thenReturn(mobile);
+        when(routingDao.selectPlaceCatalogForUpdate(7L)).thenReturn(List.of());
 
         service.recordLocation(7L, "mob_authority", "place_12345678", "家",
                 "entered", new java.util.Date(1_000));
@@ -183,6 +205,79 @@ class ProactiveDeliveryRoutingContractTest {
         } catch (ReflectiveOperationException error) {
             throw new AssertionError(error);
         }
+    }
+
+    @Test
+    void savedPlaceDirectoryIsAvailableBeforeAnyTransitionAndRemovesOnlyItsPhoneEntries() {
+        DeviceDao deviceDao = mock(DeviceDao.class);
+        ProactiveDeliveryRoutingDao routingDao = mock(ProactiveDeliveryRoutingDao.class);
+        MobileInstanceDao mobileDao = mock(MobileInstanceDao.class);
+        SysUserDao userDao = mock(SysUserDao.class);
+        ProactiveDeliveryRoutingService service = new ProactiveDeliveryRoutingService(
+                deviceDao, routingDao, mobileDao, userDao);
+        when(userDao.selectIdForUpdate(7L)).thenReturn(7L);
+        MobileInstanceEntity mobile = new MobileInstanceEntity();
+        mobile.setUserId(7L); mobile.setMobileInstanceId("mob_a");
+        when(mobileDao.selectCanonicalByInstanceForUpdate("mob_a")).thenReturn(mobile);
+        when(routingDao.selectPlaceCatalogForUpdate(7L)).thenReturn(List.of());
+        ProactiveDeliveryRoutingDTOs.PlaceDirectoryUpdate update =
+                new ProactiveDeliveryRoutingDTOs.PlaceDirectoryUpdate();
+        update.setVersion(1);
+        var first = new ProactiveDeliveryRoutingDTOs.PlaceDirectoryItem();
+        first.setPlaceId("place_12345678"); first.setPlaceName(" 家 ");
+        var second = new ProactiveDeliveryRoutingDTOs.PlaceDirectoryItem();
+        second.setPlaceId("place_87654321"); second.setPlaceName("公司");
+        update.setPlaces(List.of(first, second));
+        when(routingDao.selectPlaceDirectory(7L)).thenReturn(List.of(
+                new ProactiveDeliveryRoutingDao.PlaceCatalogRow(7L, "place_12345678",
+                        "家", "mob_a", "[]")));
+
+        var view = service.syncPlaceDirectory(7L, "mob_a", update);
+
+        verify(routingDao).upsertPlaceCatalog(7L, "mob_a", "place_12345678", "家");
+        verify(routingDao).upsertPlaceCatalog(7L, "mob_a", "place_87654321", "公司");
+        verify(routingDao).deleteMissingPlaceCatalog(eq(7L), eq("mob_a"), any());
+        assertEquals("家", view.places().getFirst().placeName());
+
+        update.setPlaces(List.of(first, first));
+        org.junit.jupiter.api.Assertions.assertThrows(xiaozhi.common.exception.RenException.class,
+                () -> service.syncPlaceDirectory(7L, "mob_a", update));
+        verify(routingDao, times(3)).upsertPlaceCatalog(any(), any(), any(), any());
+    }
+
+    @Test
+    void placeDirectoryRejectsCrossPhoneTakeoverAndRemovesStaleRouting() {
+        DeviceDao deviceDao = mock(DeviceDao.class);
+        ProactiveDeliveryRoutingDao routingDao = mock(ProactiveDeliveryRoutingDao.class);
+        MobileInstanceDao mobileDao = mock(MobileInstanceDao.class);
+        SysUserDao userDao = mock(SysUserDao.class);
+        when(userDao.selectIdForUpdate(7L)).thenReturn(7L);
+        MobileInstanceEntity mobile = new MobileInstanceEntity();
+        mobile.setUserId(7L); mobile.setMobileInstanceId("mob_b");
+        when(mobileDao.selectCanonicalByInstanceForUpdate("mob_b")).thenReturn(mobile);
+        ProactiveDeliveryRoutingService service = new ProactiveDeliveryRoutingService(
+                deviceDao, routingDao, mobileDao, userDao);
+        var ownedByA = new ProactiveDeliveryRoutingDao.PlaceCatalogRow(
+                7L, "place_12345678", "家", "mob_a", "[]");
+        when(routingDao.selectPlaceCatalogForUpdate(7L)).thenReturn(List.of(ownedByA));
+        var takeover = new ProactiveDeliveryRoutingDTOs.PlaceDirectoryUpdate();
+        takeover.setVersion(1);
+        var place = new ProactiveDeliveryRoutingDTOs.PlaceDirectoryItem();
+        place.setPlaceId("place_12345678"); place.setPlaceName("另一个家");
+        takeover.setPlaces(List.of(place));
+        org.junit.jupiter.api.Assertions.assertThrows(xiaozhi.common.exception.RenException.class,
+                () -> service.syncPlaceDirectory(7L, "mob_b", takeover));
+        verify(routingDao, never()).upsertPlaceCatalog(any(), any(), any(), any());
+
+        mobile.setMobileInstanceId("mob_a");
+        when(mobileDao.selectCanonicalByInstanceForUpdate("mob_a")).thenReturn(mobile);
+        when(routingDao.selectPlaceDirectory(7L)).thenReturn(List.of());
+        var empty = new ProactiveDeliveryRoutingDTOs.PlaceDirectoryUpdate();
+        empty.setVersion(1); empty.setPlaces(List.of());
+        service.syncPlaceDirectory(7L, "mob_a", empty);
+        verify(routingDao).clearRemovedFixedPlaces(7L, List.of("place_12345678"));
+        verify(routingDao).deleteRemovedPlaceRoutes(7L, List.of("place_12345678"));
+        verify(routingDao).deleteMissingPlaceCatalog(7L, "mob_a", List.of());
     }
 
     @Test

@@ -223,7 +223,8 @@ public interface MobileEventDao {
             LEFT JOIN ai_proactive_delivery_claim dc ON p.delivery_mode='LEGACY_COMPETE'
               AND dc.user_id=mi.user_id
                 AND dc.delivery_group_key=p.delivery_group_key
-            WHERE mi.canonical_instance_id=#{instanceId}
+            WHERE 1=1
+              <if test="instanceId != null">AND mi.canonical_instance_id=#{instanceId}</if>
               <if test="type != null">AND e.event_type=#{type}</if>
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
               <if test="deliveryStatus != null">AND (CASE
@@ -268,7 +269,8 @@ public interface MobileEventDao {
             LEFT JOIN ai_proactive_delivery_claim dc ON p.delivery_mode='LEGACY_COMPETE'
               AND dc.user_id=mi.user_id
                 AND dc.delivery_group_key=p.delivery_group_key
-            WHERE mi.canonical_instance_id=#{instanceId}
+            WHERE 1=1
+              <if test="instanceId != null">AND mi.canonical_instance_id=#{instanceId}</if>
               <if test="type != null">AND e.event_type=#{type}</if>
               <if test="processingStatus != null">AND e.processing_status=#{processingStatus}</if>
               <if test="deliveryStatus != null">AND (CASE

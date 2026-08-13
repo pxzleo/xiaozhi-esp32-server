@@ -200,8 +200,9 @@ class ProactiveContractTest {
                 Long.class, String.class, String.class);
         String targetSql = mobileTargets.getAnnotation(Select.class).value()[0];
         assertTrue(targetSql.contains("source.mobile_instance_id=#{mobileInstanceId}"));
-        assertTrue(targetSql.contains("target_mobile.mobile_instance_id=target_mobile.canonical_instance_id"));
-        assertTrue(targetSql.contains("target_mobile.mobile_instance_id IS NULL"));
+        assertTrue(targetSql.contains("canonical_mobile.mobile_instance_id=canonical_mobile.canonical_instance_id"));
+        assertTrue(targetSql.contains("NOT EXISTS"));
+        assertTrue(targetSql.contains("d.agent_id=#{agentId}"));
 
         Method directComplete = ProactiveDeliveryClaimDao.class.getMethod("completeUnclaimed",
                 Long.class, String.class, String.class, String.class, java.util.Date.class, int.class);

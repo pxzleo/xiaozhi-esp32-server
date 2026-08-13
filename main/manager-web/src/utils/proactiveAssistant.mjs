@@ -80,6 +80,8 @@ export function createDeliveryRoutingForm(routing = {}) {
       device_id: device.device_id,
       mac_address: typeof device.mac_address === 'string' ? device.mac_address : '',
       alias: typeof device.alias === 'string' ? device.alias : '',
+      display_name: typeof device.display_name === 'string' ? device.display_name
+        : (typeof device.alias === 'string' ? device.alias : ''),
       terminal_type: device.terminal_type === 'mobile' ? 'mobile' : 'speaker',
       mobile_instance_id: typeof device.mobile_instance_id === 'string' ? device.mobile_instance_id : '',
       fixed_place_id: typeof device.fixed_place_id === 'string' && device.fixed_place_id
@@ -115,6 +117,8 @@ export function validateDeliveryRouting(form) {
   const deviceIds = form.devices.map(device => device?.device_id);
   const knownDevices = new Set(deviceIds);
   if (deviceIds.some(id => typeof id !== 'string' || !id) || knownDevices.size !== deviceIds.length ||
+      form.devices.some(device => typeof device.display_name !== 'string' || !device.display_name.trim() ||
+        device.display_name.length > 64) ||
       form.default_device_ids.some(id => !knownDevices.has(id)) ||
       new Set(form.default_device_ids).size !== form.default_device_ids.length) return 'devices';
   const placeIds = form.places.map(place => place?.place_id);

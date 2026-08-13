@@ -54,6 +54,25 @@ class DeviceControllerTest {
         }
     }
 
+    @Test
+    @DisplayName("显示名称会去除首尾空格且不覆盖备注")
+    void displayNameIsIndependentFromAlias() {
+        DeviceService deviceService = mock(DeviceService.class);
+        DeviceEntity entity = ownedDevice();
+        entity.setAlias("原备注");
+        when(deviceService.selectById(DEVICE_ID)).thenReturn(entity);
+        when(deviceService.updateById(entity)).thenReturn(true);
+        DeviceUpdateDTO update = new DeviceUpdateDTO();
+        update.setDisplayName("  客厅终端  ");
+        try (MockedStatic<SecurityUser> securityUser = mockStatic(SecurityUser.class)) {
+            securityUser.when(SecurityUser::getUser).thenReturn(currentUser());
+            Result<Void> result = controller(deviceService).updateDeviceInfo(DEVICE_ID, update);
+            assertEquals(0, result.getCode());
+            assertEquals("客厅终端", entity.getDisplayName());
+            assertEquals("原备注", entity.getAlias());
+        }
+    }
+
     private DeviceController controller(DeviceService deviceService) {
         return new DeviceController(
                 deviceService,

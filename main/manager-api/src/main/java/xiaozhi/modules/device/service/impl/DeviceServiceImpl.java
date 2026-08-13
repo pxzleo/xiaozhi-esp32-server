@@ -148,6 +148,7 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
         deviceEntity.setUpdater(user.getId());
         deviceEntity.setUpdateDate(currentTime);
         deviceEntity.setLastConnectedAt(currentTime);
+        deviceEntity.setDisplayName("小智音箱 · " + shortIdentifier(macAddress));
         deviceDao.insert(deviceEntity);
 
         // 清理redis缓存、清除智能体设备数量缓存
@@ -300,6 +301,7 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
         vo.setDeviceType(device.getBoard());
         vo.setBoard(device.getBoard());
         vo.setAutoUpdate(device.getAutoUpdate());
+        vo.setDisplayName(xiaozhi.modules.device.service.DeviceDisplayName.resolve(device));
         vo.setCreateDateTimestamp(toTimestamp(device.getCreateDate()));
         vo.setLastConnectedAtTimestamp(toTimestamp(device.getLastConnectedAt()));
         return vo;
@@ -590,10 +592,16 @@ public class DeviceServiceImpl extends BaseServiceImpl<DeviceDao, DeviceEntity> 
         entity.setCreator(userId);
         entity.setUpdater(userId);
         entity.setAutoUpdate(1);
+        entity.setDisplayName("小智音箱 · " + shortIdentifier(dto.getMacAddress()));
         baseDao.insert(entity);
 
         // 添加：清除智能体设备数量缓存
         redisUtils.delete(RedisKeys.getAgentDeviceCountById(dto.getAgentId()));
+    }
+
+    private String shortIdentifier(String identifier) {
+        String value = StringUtils.defaultString(identifier);
+        return value.length() <= 4 ? value : value.substring(value.length() - 4);
     }
 
     @Override

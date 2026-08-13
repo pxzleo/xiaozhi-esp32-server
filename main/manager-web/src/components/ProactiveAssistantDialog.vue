@@ -1,6 +1,6 @@
 <template>
   <el-dialog
-    :title="$t('proactive.title')"
+    :title="accountOnly ? $t('terminalSensing.title') : $t('proactive.title')"
     :visible="visible"
     width="calc(100vw - 32px)"
     top="5vh"
@@ -8,7 +8,7 @@
     :close-on-click-modal="false"
     @close="handleClose"
   >
-    <div class="device-context">
+    <div v-if="!accountOnly" class="device-context">
       <div>
         <strong>{{ device.remark || device.model || '-' }}</strong>
         <span>{{ device.model || '-' }}</span>
@@ -17,7 +17,7 @@
     </div>
 
     <el-tabs v-model="activeTab" @tab-click="handleTabChange">
-      <el-tab-pane :label="$t('proactive.settings')" name="settings">
+      <el-tab-pane v-if="!accountOnly" :label="$t('proactive.settings')" name="settings">
         <div v-loading="preferenceLoading" class="section-body settings-body">
           <el-alert v-if="preferenceError" :title="preferenceError" type="error" :closable="false" show-icon />
           <div v-if="isSilentToday" class="silent-notice">
@@ -87,7 +87,7 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane :label="$t('proactive.routing.title')" name="routing">
+      <el-tab-pane v-if="accountOnly" :label="$t('proactive.routing.title')" name="routing">
         <div v-loading="routingLoading" class="section-body routing-body">
           <el-alert v-if="routingError" :title="routingError" type="error" :closable="false" show-icon />
           <div class="routing-intro">
@@ -201,7 +201,7 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane :label="$t('proactive.externalMonitors')" name="monitors">
+      <el-tab-pane v-if="!accountOnly" :label="$t('proactive.externalMonitors')" name="monitors">
         <div v-loading="monitorsLoading" class="section-body monitor-body">
           <el-alert v-if="monitorsError" :title="monitorsError" type="error" :closable="false" show-icon />
           <el-form :model="monitorForm" label-width="170px" size="small">
@@ -318,7 +318,7 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane :label="$t('proactive.events')" name="events">
+      <el-tab-pane v-if="!accountOnly" :label="$t('proactive.events')" name="events">
         <div class="section-body">
           <el-alert v-if="eventsError" :title="eventsError" type="error" :closable="false" show-icon />
           <div class="filter-row">
@@ -370,9 +370,14 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane :label="$t('proactive.mobileEvents')" name="mobileEvents">
+      <el-tab-pane v-if="accountOnly" :label="$t('proactive.mobileEvents')" name="mobileEvents">
         <div class="section-body">
           <el-alert v-if="mobileEventsError" :title="mobileEventsError" type="error" :closable="false" show-icon />
+          <el-select v-model="mobileAuditInstanceId" size="small" class="mobile-instance-select"
+            :placeholder="$t('proactive.mobile.chooseSettingsPhone')" @change="loadMobileAlertSettings">
+            <el-option v-for="terminal in mobileTerminals" :key="terminal.mobile_instance_id"
+              :label="terminalLabel(terminal)" :value="terminal.mobile_instance_id" />
+          </el-select>
           <el-form v-if="mobileAlertSettings" :model="mobileAlertSettings" label-width="140px" size="small" class="mobile-alert-settings">
             <el-form-item :label="$t('proactive.mobile.sensitivity')">
               <el-radio-group v-model="mobileAlertSettings.sensitivity">
@@ -456,7 +461,7 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane :label="$t('proactive.habits')" name="habits">
+      <el-tab-pane v-if="!accountOnly" :label="$t('proactive.habits')" name="habits">
         <div class="section-body">
           <el-alert v-if="habitsError" :title="habitsError" type="error" :closable="false" show-icon />
           <div class="table-scroll">
@@ -531,6 +536,7 @@ export default {
   props: {
     visible: { type: Boolean, default: false },
     device: { type: Object, default: () => ({}) },
+    accountOnly: { type: Boolean, default: false },
   },
   data() {
     return {
@@ -574,6 +580,7 @@ export default {
       mobileEventsError: '',
       mobileAlertSettings: null,
       mobileAlertSettingsSaving: false,
+      mobileAuditInstanceId: '',
       mobileAlertCategories: ['security', 'call', 'parcel', 'appointment', 'message', 'other'],
       mobileEventFilters: {
         type: '', processing_status: '', delivery_status: '', from: '', to: '', page: 1, limit: 20,
@@ -641,7 +648,7 @@ export default {
   },
   methods: {
     resetDialogState() {
-      this.activeTab = 'settings';
+      this.activeTab = this.accountOnly ? 'routing' : 'settings';
       this.preference = {};
       this.loadedDeviceId = '';
       this.preferenceError = '';
@@ -675,11 +682,19 @@ export default {
       this.mobileEventsError = '';
       this.mobileAlertSettings = null;
       this.mobileAlertSettingsSaving = false;
+      this.mobileAuditInstanceId = '';
       this.habits = [];
       this.habitsLoading = false;
       this.habitsError = '';
     },
     initializeForDevice() {
+      if (this.accountOnly) {
+        this.requestGate.activate('account');
+        this.resetDialogState();
+        this.requestGate.activate('account');
+        this.loadDeliveryRouting();
+        return;
+      }
       const deviceId = this.device.device_id || '';
       this.requestGate.activate(deviceId);
       this.resetDialogState();
@@ -779,6 +794,12 @@ export default {
         this.routingForm = form;
         this.routingLoading = false;
         this.routingLoaded = true;
+        if (this.accountOnly && !this.mobileAuditInstanceId) {
+          this.mobileAuditInstanceId = this.mobileTerminals[0]?.mobile_instance_id || '';
+        }
+        if (this.accountOnly && this.activeTab === 'mobileEvents' && this.mobileAuditInstanceId) {
+          this.loadMobileAlertSettings();
+        }
       }, error => {
         if (!this.requestGate.isCurrent(request)) return;
         this.handleRoutingFailure(error, true);
@@ -828,7 +849,7 @@ export default {
       this.routingForm.default_device_ids = [];
     },
     terminalLabel(terminal) {
-      return terminal.alias || terminal.mac_address || terminal.device_id;
+      return terminal.display_name;
     },
     terminalTypeLabel(terminal) {
       return this.$t(`proactive.routing.terminalType.${terminal.terminal_type}`);
@@ -1034,8 +1055,8 @@ export default {
     },
     loadMobileEvents() {
       const request = this.requestGate.begin('mobileEvents');
-      const instanceId = this.device.macAddress || '';
-      if (!request.deviceId || !/^mob_[0-9a-f]{32}$/.test(instanceId)) {
+      const instanceId = this.accountOnly ? '' : (this.device.macAddress || '');
+      if (!request.deviceId || (!this.accountOnly && !/^mob_[0-9a-f]{32}$/.test(instanceId))) {
         this.mobileEvents = [];
         this.mobileEventTotal = 0;
         this.mobileEventsLoading = false;
@@ -1045,12 +1066,12 @@ export default {
       this.mobileEventsLoading = true;
       this.mobileEventsError = '';
       Api.proactive.getMobileEvents({
-        ...this.mobileEventFilters, mobile_instance_id: instanceId,
+        ...this.mobileEventFilters, ...(instanceId ? { mobile_instance_id: instanceId } : {}),
       }, response => {
-        if (!this.requestGate.isCurrent(request) || instanceId !== (this.device.macAddress || '')) return;
+        if (!this.requestGate.isCurrent(request)) return;
         this.mobileEventsLoading = false;
         const data = this.responseData(response) || {};
-        if (!mobileAuditBelongsToContext(data.list, request.deviceId, instanceId)) {
+        if (!this.accountOnly && !mobileAuditBelongsToContext(data.list, request.deviceId, instanceId)) {
           this.mobileEvents = [];
           this.mobileEventTotal = 0;
           this.mobileEventsError = this.$t('proactive.mobile.loadFailed');
@@ -1060,7 +1081,7 @@ export default {
         this.mobileEvents = data.list;
         this.mobileEventTotal = Number(data.total) || 0;
       }, error => {
-        if (!this.requestGate.isCurrent(request) || instanceId !== (this.device.macAddress || '')) return;
+        if (!this.requestGate.isCurrent(request)) return;
         this.mobileEventsLoading = false;
         this.mobileEvents = [];
         this.mobileEventTotal = 0;
@@ -1070,10 +1091,11 @@ export default {
     },
     loadMobileAlertSettings() {
       const request = this.requestGate.begin('mobileAlertSettings');
-      const instanceId = this.device.macAddress || '';
+      const instanceId = this.accountOnly ? this.mobileAuditInstanceId : (this.device.macAddress || '');
       if (!request.deviceId || !/^mob_[0-9a-f]{32}$/.test(instanceId)) return;
       Api.proactive.getMobileAlertSettings(instanceId, response => {
-        if (!this.requestGate.isCurrent(request) || instanceId !== (this.device.macAddress || '')) return;
+        const currentInstance = this.accountOnly ? this.mobileAuditInstanceId : (this.device.macAddress || '');
+        if (!this.requestGate.isCurrent(request) || instanceId !== currentInstance) return;
         const data = this.responseData(response);
         if (!data || data.mobile_instance_id !== instanceId) return;
         this.mobileAlertSettings = { sensitivity: data.sensitivity, categories: [...data.categories] };
@@ -1083,7 +1105,7 @@ export default {
       });
     },
     saveMobileAlertSettings() {
-      const instanceId = this.device.macAddress || '';
+      const instanceId = this.accountOnly ? this.mobileAuditInstanceId : (this.device.macAddress || '');
       if (!validMobileAlertSettings(this.mobileAlertSettings) || this.mobileAlertSettingsSaving) {
         this.$message.warning(this.$t('proactive.mobile.settingsInvalid'));
         return;
@@ -1091,7 +1113,8 @@ export default {
       const request = this.requestGate.begin('mobileAlertSettings');
       this.mobileAlertSettingsSaving = true;
       Api.proactive.updateMobileAlertSettings(instanceId, this.mobileAlertSettings, response => {
-        if (!this.requestGate.isCurrent(request)) return;
+        const currentInstance = this.accountOnly ? this.mobileAuditInstanceId : (this.device.macAddress || '');
+        if (!this.requestGate.isCurrent(request) || instanceId !== currentInstance) return;
         this.mobileAlertSettingsSaving = false;
         const data = this.responseData(response);
         if (!data || data.mobile_instance_id !== instanceId) return;

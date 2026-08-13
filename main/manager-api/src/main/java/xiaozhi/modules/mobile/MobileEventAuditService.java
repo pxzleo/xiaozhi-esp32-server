@@ -26,8 +26,8 @@ public class MobileEventAuditService {
     public PageData<AuditView> audit(Long userId, String instanceId, String type,
             String processingStatus, String deliveryStatus, Instant from, Instant to,
             int page, int limit) {
-        MobileInstanceEntity instance = instanceDao.selectCanonicalByInstance(instanceId);
-        if (instance == null || userId == null || !userId.equals(instance.getUserId())) {
+        MobileInstanceEntity instance = instanceId == null ? null : instanceDao.selectCanonicalByInstance(instanceId);
+        if (userId == null || instanceId != null && (instance == null || !userId.equals(instance.getUserId()))) {
             throw new RenException("手机实例不存在");
         }
         if (from != null && to != null && from.isAfter(to)) throw new RenException("事件时间范围无效");
@@ -36,7 +36,7 @@ public class MobileEventAuditService {
         Long fromEpochMillis = from == null ? null : from.toEpochMilli();
         Long toEpochMillis = to == null ? null : to.toEpochMilli();
         String databaseDelivery = StringUtils.isBlank(deliveryStatus) ? null : deliveryStatus.toUpperCase();
-        String canonicalInstanceId = instance.getMobileInstanceId();
+        String canonicalInstanceId = instance == null ? null : instance.getMobileInstanceId();
         var rows = eventDao.pageAuditForUser(userId, canonicalInstanceId, type, processingStatus,
                 databaseDelivery, fromEpochMillis, toEpochMillis, safeLimit, ((long) safePage - 1L) * safeLimit);
         long total = eventDao.countAuditForUser(userId, canonicalInstanceId, type, processingStatus,

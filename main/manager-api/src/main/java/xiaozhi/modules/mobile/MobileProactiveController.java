@@ -23,6 +23,7 @@ import xiaozhi.modules.mobile.MobileProactiveDTOs.QuietHoursRequest;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.QuietHoursResponse;
 import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.LocationAuthorityUpdate;
 import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.RouteView;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.PlaceDirectoryUpdate;
 import xiaozhi.modules.device.proactive.ProactiveScheduleDTOs.Action;
 import xiaozhi.modules.device.proactive.ProactiveScheduleDTOs.View;
 
@@ -82,6 +83,18 @@ public class MobileProactiveController {
             @RequestHeader("Mobile-Protocol-Version") int protocolVersion,
             @Valid @RequestBody LocationAuthorityUpdate request) {
         return service.updateLocationAuthority(auth(authorization, instanceId, installationId,
+                credentialVersion, protocolVersion), request);
+    }
+
+    @PutMapping("/mobile/proactive/places")
+    public RouteView syncPlaces(
+            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,
+            @RequestHeader("Mobile-Instance-Id") String instanceId,
+            @RequestHeader("Client-Id") String installationId,
+            @RequestHeader("Mobile-Credential-Version") int credentialVersion,
+            @RequestHeader("Mobile-Protocol-Version") int protocolVersion,
+            @Valid @RequestBody PlaceDirectoryUpdate request) {
+        return service.syncPlaces(auth(authorization, instanceId, installationId,
                 credentialVersion, protocolVersion), request);
     }
 

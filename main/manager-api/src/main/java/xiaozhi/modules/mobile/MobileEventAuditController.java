@@ -35,7 +35,7 @@ public class MobileEventAuditController {
 
     @GetMapping
     public Result<PageData<AuditView>> audit(
-            @RequestParam("mobile_instance_id")
+            @RequestParam(value = "mobile_instance_id", required = false)
             @Pattern(regexp = "^mob_[0-9a-f]{32}$") String instanceId,
             @RequestParam(required = false)
             @Pattern(regexp = "^(notification\\.state_changed|location\\.transition)$") String type,

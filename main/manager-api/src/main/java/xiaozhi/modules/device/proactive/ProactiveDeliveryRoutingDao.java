@@ -18,6 +18,8 @@ public interface ProactiveDeliveryRoutingDao {
     record DeviceRouteRow(Long userId, String deviceId, String fixedPlaceId) {}
     record LocationRow(Long userId, String mobileInstanceId, String placeId,
             String transition, Date observedAt) {}
+    record PlaceCatalogRow(Long userId, String placeId, String placeName,
+            String sourceMobileInstanceId, String deviceIds) {}
 
     @Select("SELECT user_id,default_device_ids,location_authority_mobile_instance_id,version "
             + "FROM ai_proactive_delivery_route_account WHERE user_id=#{userId} FOR UPDATE")
@@ -30,6 +32,21 @@ public interface ProactiveDeliveryRoutingDao {
     @Select("SELECT user_id,place_id,place_name,device_ids FROM ai_proactive_delivery_route_place "
             + "WHERE user_id=#{userId} ORDER BY place_name,place_id")
     List<PlaceRow> selectPlaces(@Param("userId") Long userId);
+
+    @Select("""
+            SELECT catalog.user_id,catalog.place_id,catalog.place_name,
+                   catalog.source_mobile_instance_id,COALESCE(route.device_ids,JSON_ARRAY()) AS device_ids
+            FROM ai_proactive_place_catalog catalog
+            LEFT JOIN ai_proactive_delivery_route_place route
+              ON route.user_id=catalog.user_id AND route.place_id=catalog.place_id
+            WHERE catalog.user_id=#{userId}
+            ORDER BY place_name,place_id
+            """)
+    List<PlaceCatalogRow> selectPlaceDirectory(@Param("userId") Long userId);
+
+    @Select("SELECT user_id,place_id,place_name,source_mobile_instance_id,JSON_ARRAY() AS device_ids "
+            + "FROM ai_proactive_place_catalog WHERE user_id=#{userId} FOR UPDATE")
+    List<PlaceCatalogRow> selectPlaceCatalogForUpdate(@Param("userId") Long userId);
 
     @Select("SELECT user_id,device_id,fixed_place_id FROM ai_proactive_device_route "
             + "WHERE user_id=#{userId}")
@@ -123,4 +140,74 @@ public interface ProactiveDeliveryRoutingDao {
     int upsertObservedPlace(@Param("userId") Long userId,
             @Param("mobileInstanceId") String mobileInstanceId,
             @Param("placeId") String placeId, @Param("placeName") String placeName);
+
+    @Insert("""
+            INSERT INTO ai_proactive_place_catalog
+              (user_id,place_id,place_name,source_mobile_instance_id,updated_at)
+            VALUES (#{userId},#{placeId},#{placeName},#{mobileInstanceId},CURRENT_TIMESTAMP(3))
+            ON DUPLICATE KEY UPDATE place_name=VALUES(place_name),
+              source_mobile_instance_id=VALUES(source_mobile_instance_id),updated_at=CURRENT_TIMESTAMP(3)
+            """)
+    int upsertPlaceCatalog(@Param("userId") Long userId,
+            @Param("mobileInstanceId") String mobileInstanceId,
+            @Param("placeId") String placeId, @Param("placeName") String placeName);
+
+    @Delete("""
+            <script>
+            DELETE FROM ai_proactive_place_catalog
+            WHERE user_id=#{userId} AND source_mobile_instance_id=#{mobileInstanceId}
+            <if test="placeIds != null and !placeIds.isEmpty()">
+              AND place_id NOT IN
+              <foreach collection="placeIds" item="placeId" open="(" separator="," close=")">
+                #{placeId}
+              </foreach>
+            </if>
+            </script>
+            """)
+    int deleteMissingPlaceCatalog(@Param("userId") Long userId,
+            @Param("mobileInstanceId") String mobileInstanceId,
+            @Param("placeIds") List<String> placeIds);
+
+    @Update("""
+            <script>
+            UPDATE ai_proactive_device_route SET fixed_place_id=NULL,updated_at=CURRENT_TIMESTAMP(3)
+            WHERE user_id=#{userId} AND fixed_place_id IN
+            <foreach collection="placeIds" item="placeId" open="(" separator="," close=")">
+              #{placeId}
+            </foreach>
+            </script>
+            """)
+    int clearRemovedFixedPlaces(@Param("userId") Long userId,
+            @Param("placeIds") List<String> placeIds);
+
+    @Delete("""
+            <script>
+            DELETE FROM ai_proactive_delivery_route_place
+            WHERE user_id=#{userId} AND place_id IN
+            <foreach collection="placeIds" item="placeId" open="(" separator="," close=")">
+              #{placeId}
+            </foreach>
+            </script>
+            """)
+    int deleteRemovedPlaceRoutes(@Param("userId") Long userId,
+            @Param("placeIds") List<String> placeIds);
+
+    @Update("UPDATE ai_proactive_delivery_route_account SET "
+            + "location_authority_mobile_instance_id=#{targetId},version=version+1,"
+            + "updated_at=CURRENT_TIMESTAMP(3) WHERE user_id=#{userId} "
+            + "AND location_authority_mobile_instance_id=#{sourceId}")
+    int migrateAuthorityMobile(@Param("userId") Long userId,
+            @Param("sourceId") String sourceId, @Param("targetId") String targetId);
+
+    @Update("UPDATE ai_proactive_place_catalog SET source_mobile_instance_id=#{targetId},"
+            + "updated_at=CURRENT_TIMESTAMP(3) WHERE user_id=#{userId} "
+            + "AND source_mobile_instance_id=#{sourceId}")
+    int migratePlaceCatalogOwner(@Param("userId") Long userId,
+            @Param("sourceId") String sourceId, @Param("targetId") String targetId);
+
+    @Update("UPDATE ai_proactive_user_location SET mobile_instance_id=#{targetId},"
+            + "updated_at=CURRENT_TIMESTAMP(3) WHERE user_id=#{userId} "
+            + "AND mobile_instance_id=#{sourceId}")
+    int migrateObservedLocationOwner(@Param("userId") Long userId,
+            @Param("sourceId") String sourceId, @Param("targetId") String targetId);
 }

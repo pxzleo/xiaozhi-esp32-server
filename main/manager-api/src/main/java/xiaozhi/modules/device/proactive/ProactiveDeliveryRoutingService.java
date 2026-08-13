@@ -28,6 +28,9 @@ import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.PlaceUpdate
 import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.PlaceView;
 import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.RouteUpdate;
 import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.RouteView;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.PlaceDirectoryUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.PlaceDirectoryItem;
+import xiaozhi.modules.device.service.DeviceDisplayName;
 import xiaozhi.modules.mobile.MobileInstanceDao;
 import xiaozhi.modules.mobile.MobileInstanceEntity;
 import xiaozhi.modules.sys.dao.SysUserDao;
@@ -94,10 +97,10 @@ public class ProactiveDeliveryRoutingService {
                 ? owned.stream().map(DeviceEntity::getId).toList()
                 : distinctOwned(readIds(account.defaultDeviceIds()), ownedIds);
         List<DeviceView> devices = owned.stream().map(device -> new DeviceView(device.getId(),
-                device.getMacAddress(), device.getAlias(), mobileByDevice.containsKey(device.getId())
+                device.getMacAddress(), DeviceDisplayName.resolve(device), mobileByDevice.containsKey(device.getId())
                         ? "mobile" : "speaker", mobileByDevice.get(device.getId()),
                 fixedByDevice.get(device.getId()))).toList();
-        List<PlaceView> places = routingDao.selectPlaces(userId).stream()
+        List<PlaceView> places = routingDao.selectPlaceDirectory(userId).stream()
                 .map(place -> new PlaceView(place.placeId(), place.placeName(),
                         distinctOwned(readIds(place.deviceIds()), ownedIds)))
                 .toList();
@@ -119,11 +122,19 @@ public class ProactiveDeliveryRoutingService {
         Set<String> ownedIds = owned.stream().map(DeviceEntity::getId)
                 .collect(java.util.stream.Collectors.toSet());
         requireDistinctOwned(request.getDefaultDeviceIds(), ownedIds);
+        Map<String, ProactiveDeliveryRoutingDao.PlaceCatalogRow> placeCatalog = routingDao
+                .selectPlaceCatalogForUpdate(userId).stream().collect(java.util.stream.Collectors.toMap(
+                        ProactiveDeliveryRoutingDao.PlaceCatalogRow::placeId, item -> item));
         Set<String> placeIds = new HashSet<>();
         for (PlaceUpdate place : request.getPlaces()) {
             if (!placeIds.add(place.getPlaceId())) throw new RenException("地点ID重复");
+            ProactiveDeliveryRoutingDao.PlaceCatalogRow catalog = placeCatalog.get(place.getPlaceId());
+            if (catalog == null || !catalog.placeName().equals(place.getPlaceName().trim())) {
+                throw new RenException("地点目录已变化，请刷新后重试");
+            }
             requireDistinctOwned(place.getDeviceIds(), ownedIds);
         }
+        if (!placeIds.equals(placeCatalog.keySet())) throw new RenException("地点目录已变化，请刷新后重试");
         Set<String> routeDevices = new HashSet<>();
         for (DeviceRouteUpdate route : request.getDevices()) {
             if (!ownedIds.contains(route.getDeviceId()) || !routeDevices.add(route.getDeviceId())) {
@@ -155,7 +166,7 @@ public class ProactiveDeliveryRoutingService {
         routingDao.deletePlaces(userId);
         for (PlaceUpdate place : request.getPlaces()) {
             if (routingDao.insertPlace(new ProactiveDeliveryRoutingDao.PlaceRow(userId,
-                    place.getPlaceId(), place.getPlaceName().trim(),
+                    place.getPlaceId(), placeCatalog.get(place.getPlaceId()).placeName(),
                     writeIds(place.getDeviceIds()))) != 1) throw new RenException("地点路由保存失败");
         }
         for (DeviceRouteUpdate route : request.getDevices()) {
@@ -198,9 +209,59 @@ public class ProactiveDeliveryRoutingService {
         if (userId == null || canonicalMobileInstanceId == null || placeId == null
                 || !Set.of("entered", "exited", "dwelled").contains(transition)
                 || observedAt == null) return;
+        requireUserLock(userId);
+        requireCanonicalMobile(userId, canonicalMobileInstanceId);
+        requirePlaceOwnership(routingDao.selectPlaceCatalogForUpdate(userId),
+                canonicalMobileInstanceId, Set.of(placeId));
         routingDao.upsertObservedPlace(userId, canonicalMobileInstanceId, placeId, placeName);
+        routingDao.upsertPlaceCatalog(userId, canonicalMobileInstanceId, placeId, placeName);
         routingDao.recordAuthoritativeLocation(userId, canonicalMobileInstanceId,
                 placeId, transition, observedAt);
+    }
+
+    @Transactional
+    public RouteView syncPlaceDirectory(Long userId, String canonicalMobileInstanceId,
+            PlaceDirectoryUpdate request) {
+        if (request.getVersion() != 1) throw new RenException("地点目录协议版本无效");
+        requireUserLock(userId);
+        requireCanonicalMobile(userId, canonicalMobileInstanceId);
+        List<ProactiveDeliveryRoutingDao.PlaceCatalogRow> current = routingDao
+                .selectPlaceCatalogForUpdate(userId);
+        Set<String> placeIds = new HashSet<>();
+        requirePlaceOwnership(current, canonicalMobileInstanceId,
+                request.getPlaces().stream().map(PlaceDirectoryItem::getPlaceId)
+                        .collect(java.util.stream.Collectors.toSet()));
+        request.getPlaces().forEach(place -> {
+            if (!placeIds.add(place.getPlaceId())) throw new RenException("地点目录包含重复地点");
+            routingDao.upsertPlaceCatalog(userId, canonicalMobileInstanceId,
+                    place.getPlaceId(), place.getPlaceName().trim());
+        });
+        List<String> removed = current.stream()
+                .filter(item -> canonicalMobileInstanceId.equals(item.sourceMobileInstanceId()))
+                .map(ProactiveDeliveryRoutingDao.PlaceCatalogRow::placeId)
+                .filter(placeId -> !placeIds.contains(placeId)).toList();
+        if (!removed.isEmpty()) {
+            routingDao.clearRemovedFixedPlaces(userId, removed);
+            routingDao.deleteRemovedPlaceRoutes(userId, removed);
+        }
+        routingDao.deleteMissingPlaceCatalog(userId, canonicalMobileInstanceId, new ArrayList<>(placeIds));
+        return get(userId);
+    }
+
+    private void requireCanonicalMobile(Long userId, String mobileInstanceId) {
+        MobileInstanceEntity mobile = mobileDao.selectCanonicalByInstanceForUpdate(mobileInstanceId);
+        if (mobile == null || !userId.equals(mobile.getUserId())
+                || !mobileInstanceId.equals(mobile.getMobileInstanceId())) {
+            throw new RenException("地点目录所属手机不存在");
+        }
+    }
+
+    private void requirePlaceOwnership(List<ProactiveDeliveryRoutingDao.PlaceCatalogRow> current,
+            String mobileInstanceId, Set<String> incomingIds) {
+        boolean conflict = current.stream().anyMatch(item -> incomingIds.contains(item.placeId())
+                && item.sourceMobileInstanceId() != null
+                && !mobileInstanceId.equals(item.sourceMobileInstanceId()));
+        if (conflict) throw new RenException("地点ID已由另一部手机使用，请重新创建地点");
     }
 
     private List<String> distinctOwned(List<String> ids, Set<String> ownedIds) {

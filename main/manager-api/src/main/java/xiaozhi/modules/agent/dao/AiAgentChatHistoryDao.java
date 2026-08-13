@@ -24,7 +24,12 @@ public interface AiAgentChatHistoryDao extends BaseMapper<AgentChatHistoryEntity
 
     @Select("""
             SELECT h.id,h.session_id,h.chat_type,h.content,h.created_at,
-                   d.id AS device_id,d.alias AS device_alias,
+                   d.id AS device_id,COALESCE(NULLIF(TRIM(d.display_name),''),
+                     CASE WHEN NULLIF(TRIM(d.alias),'') IS NOT NULL
+                               AND LOWER(REPLACE(TRIM(d.alias),'-',':'))<>LOWER(d.mac_address)
+                          THEN TRIM(d.alias) END,
+                     CONCAT(CASE WHEN mi.mobile_instance_id IS NULL THEN '小智音箱 · ' ELSE '手机 · ' END,
+                       RIGHT(REPLACE(d.mac_address,':',''),4))) AS device_alias,
                    CASE WHEN mi.mobile_instance_id IS NULL THEN 'speaker' ELSE 'mobile' END AS terminal_type
             FROM ai_agent_chat_history h
             INNER JOIN ai_device d ON d.mac_address=h.mac_address AND d.user_id=#{userId}

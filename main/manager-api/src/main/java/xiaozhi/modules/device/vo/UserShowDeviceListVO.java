@@ -32,6 +32,9 @@ public class UserShowDeviceListVO {
     @Schema(description = "设备别名")
     private String alias;
 
+    @Schema(description = "用户自定义显示名称")
+    private String displayName;
+
     @Schema(description = "自动更新开关(0关闭/1开启)")
     private Integer autoUpdate;
 

@@ -40,6 +40,9 @@ public class DeviceEntity {
     @Schema(description = "设备别名")
     private String alias;
 
+    @Schema(description = "用户自定义显示名称")
+    private String displayName;
+
     @Schema(description = "智能体ID")
     private String agentId;
 

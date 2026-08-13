@@ -11,13 +11,15 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 import xiaozhi.common.exception.RenException;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDao;
 import xiaozhi.modules.mobile.MobileAssistantDTOs.MergeRequest;
 
 class MobileInstanceMergeServiceTest {
     @Test
     void mergesOnlyOwnedSameAgentCanonicalGroupsWithoutDeletingHistory() {
         MobileInstanceDao dao = mock(MobileInstanceDao.class);
-        MobileInstanceMergeService service = new MobileInstanceMergeService(dao);
+        ProactiveDeliveryRoutingDao routingDao = routingDao();
+        MobileInstanceMergeService service = new MobileInstanceMergeService(dao, routingDao);
         MobileInstanceEntity canonical = instance("mob_" + "a".repeat(32), "a".repeat(32), "agent-1");
         MobileInstanceEntity duplicate = instance("mob_" + "b".repeat(32), "b".repeat(32), "agent-1");
         when(dao.selectByDeviceForUpdate(7L, canonical.getDeviceId())).thenReturn(canonical);
@@ -32,13 +34,17 @@ class MobileInstanceMergeServiceTest {
 
         verify(dao).mergeCanonicalGroup(7L, duplicate.getCanonicalInstanceId(),
                 canonical.getCanonicalInstanceId());
+        verify(routingDao).migrateAuthorityMobile(7L, duplicate.getCanonicalInstanceId(),
+                canonical.getCanonicalInstanceId());
+        verify(routingDao).migratePlaceCatalogOwner(7L, duplicate.getCanonicalInstanceId(),
+                canonical.getCanonicalInstanceId());
         verify(dao, never()).retireMergedAliases(7L, canonical.getMobileInstanceId());
     }
 
     @Test
     void rejectsCrossAgentMerge() {
         MobileInstanceDao dao = mock(MobileInstanceDao.class);
-        MobileInstanceMergeService service = new MobileInstanceMergeService(dao);
+        MobileInstanceMergeService service = new MobileInstanceMergeService(dao, routingDao());
         MobileInstanceEntity canonical = instance("mob_" + "a".repeat(32), "a".repeat(32), "agent-1");
         MobileInstanceEntity duplicate = instance("mob_" + "b".repeat(32), "b".repeat(32), "agent-2");
         when(dao.selectByDeviceForUpdate(7L, canonical.getDeviceId())).thenReturn(canonical);
@@ -52,7 +58,7 @@ class MobileInstanceMergeServiceTest {
     @Test
     void rejectsDifferentStablePhonesAndKeepsBothGroupsUntouched() {
         MobileInstanceDao dao = mock(MobileInstanceDao.class);
-        MobileInstanceMergeService service = new MobileInstanceMergeService(dao);
+        MobileInstanceMergeService service = new MobileInstanceMergeService(dao, routingDao());
         MobileInstanceEntity canonical = instance("mob_" + "a".repeat(32), "a".repeat(32), "agent-1");
         canonical.setStableDeviceKey("1".repeat(64));
         MobileInstanceEntity duplicate = instance("mob_" + "b".repeat(32), "b".repeat(32), "agent-1");
@@ -75,7 +81,7 @@ class MobileInstanceMergeServiceTest {
     @Test
     void transfersSingleStableKeyToCanonicalWithoutDisconnectingCurrentSession() {
         MobileInstanceDao dao = mock(MobileInstanceDao.class);
-        MobileInstanceMergeService service = new MobileInstanceMergeService(dao);
+        MobileInstanceMergeService service = new MobileInstanceMergeService(dao, routingDao());
         MobileInstanceEntity canonical = instance("mob_" + "a".repeat(32), "a".repeat(32), "agent-1");
         MobileInstanceEntity duplicate = instance("mob_" + "b".repeat(32), "b".repeat(32), "agent-1");
         duplicate.setStableDeviceKey("3".repeat(64));
@@ -98,7 +104,7 @@ class MobileInstanceMergeServiceTest {
     @Test
     void inheritsLatestNonDefaultAlertSettingsWhenCanonicalStillUsesDefaults() {
         MobileInstanceDao dao = mock(MobileInstanceDao.class);
-        MobileInstanceMergeService service = new MobileInstanceMergeService(dao);
+        MobileInstanceMergeService service = new MobileInstanceMergeService(dao, routingDao());
         MobileInstanceEntity canonical = instance("mob_" + "a".repeat(32), "a".repeat(32), "agent-1");
         canonical.setAlertSensitivity("balanced");
         canonical.setAlertCategories("security,call,parcel,appointment,message,other");
@@ -130,5 +136,11 @@ class MobileInstanceMergeServiceTest {
         entity.setAgentId(agentId);
         entity.setUserId(7L);
         return entity;
+    }
+
+    private ProactiveDeliveryRoutingDao routingDao() {
+        ProactiveDeliveryRoutingDao dao = mock(ProactiveDeliveryRoutingDao.class);
+        when(dao.selectPlaceCatalogForUpdate(7L)).thenReturn(List.of());
+        return dao;
     }
 }

@@ -46,7 +46,7 @@ public interface MobileInstanceDao extends BaseMapper<MobileInstanceEntity> {
     List<MobileInstanceEntity> selectCanonicalGroupForUpdate(@Param("userId") Long userId,
             @Param("canonicalId") String canonicalId);
 
-    @Insert("INSERT IGNORE INTO ai_device (id, user_id, mac_address, auto_update, board, alias, agent_id, app_version, creator, create_date, updater, update_date) VALUES (#{deviceId}, #{userId}, #{mobileInstanceId}, 0, 'android-mobile', 'Android 小智', #{agentId}, #{appVersion}, #{userId}, NOW(), #{userId}, NOW())")
+    @Insert("INSERT IGNORE INTO ai_device (id, user_id, mac_address, auto_update, board, alias, display_name, agent_id, app_version, creator, create_date, updater, update_date) VALUES (#{deviceId}, #{userId}, #{mobileInstanceId}, 0, 'android-mobile', 'Android 小智', CONCAT('手机 · ',RIGHT(#{mobileInstanceId},4)), #{agentId}, #{appVersion}, #{userId}, NOW(), #{userId}, NOW())")
     int insertDeviceIgnore(MobileInstanceEntity entity);
 
     @Insert("INSERT IGNORE INTO ai_mobile_instance (mobile_instance_id, device_id, user_id, installation_id, stable_device_key, canonical_instance_id, agent_id, platform, app_version, capabilities, credential_hash, credential_version, created_at, updated_at) VALUES (#{mobileInstanceId}, #{deviceId}, #{userId}, #{installationId}, #{stableDeviceKey}, #{canonicalInstanceId}, #{agentId}, #{platform}, #{appVersion}, #{capabilities}, #{credentialHash}, #{credentialVersion}, #{createdAt}, #{updatedAt})")

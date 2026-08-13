@@ -9,6 +9,9 @@
             <div class="operation-header">
               <h2 class="page-title">{{ $t('device.management') }}</h2>
               <div class="right-operations">
+                <CustomButton icon="el-icon-connection" @click="terminalSensingVisible = true">
+                  {{ $t('terminalSensing.title') }}
+                </CustomButton>
                 <el-input :placeholder="$t('device.searchPlaceholder')" v-model="searchKeyword" class="search-input"
                   @keyup.enter.native="handleSearch" clearable />
                 <CustomButton icon="el-icon-search" type="confirm" @click="handleSearch">{{ $t('device.search') }}</CustomButton>
@@ -48,6 +51,15 @@
                   <span @click="scope.row.isEdit = true">
                     {{ scope.row.remark || '-' }}
                   </span>
+                </span>
+              </template>
+              <template slot="displayName" slot-scope="scope">
+                <el-input v-show="scope.row.isDisplayNameEdit" v-model="scope.row.displayName" size="mini"
+                  maxlength="64" show-word-limit @blur="onDisplayNameBlur(scope.row)"
+                  @keyup.enter.native="onDisplayNameEnter(scope.row)" />
+                <span v-show="!scope.row.isDisplayNameEdit" class="remark-view">
+                  <i class="el-icon-edit" @click="scope.row.isDisplayNameEdit = true" style="cursor:pointer"></i>
+                  <span @click="scope.row.isDisplayNameEdit = true">{{ scope.row.displayName }}</span>
                 </span>
               </template>
               <template slot="otaSwitch" slot-scope="scope">
@@ -95,6 +107,7 @@
     <ManualAddDeviceDialog :visible.sync="manualAddDeviceDialogVisible" :agent-id="currentAgentId"
       @refresh="fetchBindDevices(currentAgentId)" />
     <ProactiveAssistantDialog :visible.sync="proactiveDialogVisible" :device="proactiveDevice" />
+    <ProactiveAssistantDialog :visible.sync="terminalSensingVisible" :device="{}" account-only />
     <el-footer>
       <version-footer />
     </el-footer>
@@ -150,6 +163,7 @@ export default {
       mqttServiceAvailable: false,
       proactiveDialogVisible: false,
       proactiveDevice: {},
+      terminalSensingVisible: false,
     };
   },
   computed: {
@@ -158,6 +172,8 @@ export default {
       if (!keyword) return this.deviceList;
       return this.deviceList.filter(device =>
         (device.model && device.model.toLowerCase().includes(keyword)) ||
+        (device.displayName && device.displayName.toLowerCase().includes(keyword)) ||
+        (device.remark && device.remark.toLowerCase().includes(keyword)) ||
         (device.macAddress && device.macAddress.toLowerCase().includes(keyword))
       );
     },
@@ -183,6 +199,7 @@ export default {
         columns.push({ prop: 'deviceStatus', label: this.$t('device.deviceStatus'), align: 'center' });
       }
       columns.push({ prop: 'remark', label: this.$t('device.remark'), align: 'center' });
+      columns.push({ prop: 'displayName', label: this.$t('device.displayName'), align: 'center' });
       columns.push({ prop: 'otaSwitch', label: this.$t('device.autoUpdate'), align: 'center' });
       return columns;
     },
@@ -333,6 +350,35 @@ export default {
       row.isEdit = false;
       this.submitRemark(row);
     },
+    submitDisplayName(row) {
+      if (row._displayNameSubmitting) return;
+      const text = (row.displayName || '').trim();
+      if (!text || text.length > 64) {
+        row.displayName = row._originalDisplayName;
+        this.$message.warning(this.$t('device.displayNameInvalid'));
+        return;
+      }
+      if (text === row._originalDisplayName) return;
+      row._displayNameSubmitting = true;
+      this.updateDeviceInfo(row.device_id, { displayName: text }, (ok, resp) => {
+        if (ok) {
+          row._originalDisplayName = text;
+          this.$message.success(this.$t('device.displayNameSaved'));
+        } else {
+          row.displayName = row._originalDisplayName;
+          this.$message.error(resp.msg || this.$t('device.displayNameSaveFailed'));
+        }
+        row._displayNameSubmitting = false;
+      });
+    },
+    onDisplayNameBlur(row) {
+      row.isDisplayNameEdit = false;
+      setTimeout(() => this.submitDisplayName(row), 100);
+    },
+    onDisplayNameEnter(row) {
+      row.isDisplayNameEdit = false;
+      this.submitDisplayName(row);
+    },
     handleUnbind(device_id) {
       this.$confirm(this.$t('device.confirmUnbind'), this.$t('message.warning'), {
         confirmButtonText: this.$t('button.ok'),
@@ -387,6 +433,10 @@ export default {
               _originalRemark: device.alias,
               isEdit: false,
               _submitting: false,
+              displayName: device.displayName,
+              _originalDisplayName: device.displayName,
+              isDisplayNameEdit: false,
+              _displayNameSubmitting: false,
               otaSwitch: device.autoUpdate === 1,
               rawBindTime,
               lastConnectedAtTimestamp: parseTimestamp(device.lastConnectedAtTimestamp),

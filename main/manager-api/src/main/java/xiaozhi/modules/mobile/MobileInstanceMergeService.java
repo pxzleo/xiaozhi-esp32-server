@@ -9,6 +9,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import xiaozhi.common.exception.RenException;
 import xiaozhi.modules.mobile.MobileAssistantDTOs.MergeRequest;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDao;
 
 @Service
 public class MobileInstanceMergeService {
@@ -16,9 +17,12 @@ public class MobileInstanceMergeService {
     private static final String DEFAULT_CATEGORIES =
             "security,call,parcel,appointment,message,other";
     private final MobileInstanceDao instanceDao;
+    private final ProactiveDeliveryRoutingDao routingDao;
 
-    public MobileInstanceMergeService(MobileInstanceDao instanceDao) {
+    public MobileInstanceMergeService(MobileInstanceDao instanceDao,
+            ProactiveDeliveryRoutingDao routingDao) {
         this.instanceDao = instanceDao;
+        this.routingDao = routingDao;
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -63,6 +67,8 @@ public class MobileInstanceMergeService {
         }
         for (String sourceCanonicalId : sourceCanonicalIds) {
             if (!canonical.getCanonicalInstanceId().equals(sourceCanonicalId)) {
+                migrateLocationOwnership(userId, sourceCanonicalId,
+                        canonical.getCanonicalInstanceId());
                 instanceDao.mergeCanonicalGroup(userId, sourceCanonicalId,
                         canonical.getCanonicalInstanceId());
             }
@@ -73,6 +79,18 @@ public class MobileInstanceMergeService {
                 throw new RenException("手机稳定身份继承失败");
             }
         }
+    }
+
+    private void migrateLocationOwnership(Long userId, String sourceId, String targetId) {
+        List<ProactiveDeliveryRoutingDao.PlaceCatalogRow> places = routingDao
+                .selectPlaceCatalogForUpdate(userId);
+        boolean conflict = places.stream().filter(place -> sourceId.equals(place.sourceMobileInstanceId()))
+                .anyMatch(source -> places.stream().anyMatch(target -> target.placeId().equals(source.placeId())
+                        && targetId.equals(target.sourceMobileInstanceId())));
+        if (conflict) throw new RenException("合并手机包含重复地点ID，请先删除其中一侧地点");
+        routingDao.migrateAuthorityMobile(userId, sourceId, targetId);
+        routingDao.migratePlaceCatalogOwner(userId, sourceId, targetId);
+        routingDao.migrateObservedLocationOwner(userId, sourceId, targetId);
     }
 
     private void inheritAlertSettings(Long userId, MobileInstanceEntity canonical,

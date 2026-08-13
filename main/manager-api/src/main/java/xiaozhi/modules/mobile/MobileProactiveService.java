@@ -22,6 +22,7 @@ import xiaozhi.modules.device.proactive.ProactiveService;
 import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingService;
 import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.LocationAuthorityUpdate;
 import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.RouteView;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.PlaceDirectoryUpdate;
 import xiaozhi.modules.device.proactive.ProactiveScheduleService;
 import xiaozhi.modules.device.proactive.ProactiveScheduleDTOs.Action;
 import xiaozhi.modules.device.proactive.ProactiveScheduleDTOs.View;
@@ -97,6 +98,12 @@ public class MobileProactiveService {
             throw new MobileApiException(HttpStatus.CONFLICT, "DELIVERY_ROUTING_CONFLICT",
                     "投递路由配置已变化，请重新读取后再保存");
         }
+    }
+
+    public RouteView syncPlaces(MobileEventService.MobileAuth auth, PlaceDirectoryUpdate request) {
+        MobileInstanceEntity instance = mobileAuth.authenticate(auth, "location_gateway");
+        return routingService.syncPlaceDirectory(instance.getUserId(),
+                instance.getMobileInstanceId(), request);
     }
 
     public PendingResponse pending(MobileEventService.MobileAuth auth) {

@@ -5,7 +5,6 @@ import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.shiro.authz.annotation.RequiresPermissions;
-import org.springframework.beans.BeanUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -124,7 +123,19 @@ public class DeviceController {
         if (!entity.getUserId().equals(user.getId())) {
             return new Result<Void>().error("设备不存在");
         }
-        BeanUtils.copyProperties(deviceUpdateDTO, entity);
+        if (deviceUpdateDTO.getAutoUpdate() != null) {
+            entity.setAutoUpdate(deviceUpdateDTO.getAutoUpdate());
+        }
+        if (deviceUpdateDTO.getAlias() != null) {
+            entity.setAlias(deviceUpdateDTO.getAlias().trim());
+        }
+        if (deviceUpdateDTO.getDisplayName() != null) {
+            String displayName = deviceUpdateDTO.getDisplayName().trim();
+            if (displayName.isEmpty()) {
+                return new Result<Void>().error("显示名称不能为空");
+            }
+            entity.setDisplayName(displayName);
+        }
         if (!deviceService.updateById(entity)) {
             return new Result<Void>().error(ErrorCode.UPDATE_DATA_FAILED);
         }

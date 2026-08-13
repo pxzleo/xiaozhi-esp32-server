@@ -69,4 +69,17 @@ public final class ProactiveDeliveryRoutingDTOs {
         @Size(max = 36) @JsonProperty("mobile_instance_id") private String mobileInstanceId;
         @NotNull private Integer version;
     }
+
+    @Data
+    public static class PlaceDirectoryUpdate extends StrictRequest {
+        @NotNull private Integer version;
+        @NotNull @Valid @Size(max = 100) private List<PlaceDirectoryItem> places;
+    }
+
+    @Data
+    public static class PlaceDirectoryItem extends StrictRequest {
+        @NotBlank @Pattern(regexp = "^place_[0-9a-f]{8,32}$")
+        @JsonProperty("place_id") private String placeId;
+        @NotBlank @Size(max = 80) @JsonProperty("place_name") private String placeName;
+    }
 }
