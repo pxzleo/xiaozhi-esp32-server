@@ -529,6 +529,7 @@ export default {
       })
     },
     isGenerate(row) {
+      if (!row.firmwareVersion) return false;
       const version = row.firmwareVersion.replace(/\./g, '');
       return Number(version) >= 200;
     },

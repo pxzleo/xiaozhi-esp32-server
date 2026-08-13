@@ -3,7 +3,12 @@
 <mapper namespace="xiaozhi.modules.agent.dao.AgentDao">
     <!-- 获取智能体的设备数量 -->
     <select id="getDeviceCountByAgentId" resultType="java.lang.Integer">
-        SELECT COUNT(*) FROM ai_device WHERE agent_id = #{agentId}
+        SELECT COUNT(DISTINCT d.id)
+        FROM ai_device d
+        LEFT JOIN ai_mobile_instance mi ON mi.device_id = d.id
+        WHERE d.agent_id = #{agentId}
+          AND (mi.mobile_instance_id IS NULL
+               OR mi.canonical_instance_id = mi.mobile_instance_id)
     </select>
 
     <resultMap id="AgentInfoMap" type="xiaozhi.modules.agent.vo.AgentInfoVO">

@@ -394,4 +394,5 @@ test('device management expands the current page so every bound device keeps an 
   assert.match(deviceManagement, /\.device-card[\s\S]*?flex: 0 0 auto;[\s\S]*?overflow: visible;/);
   assert.match(customTable, /autoHeight \? undefined : '100%'/);
   assert.match(customTable, /\.custom-table-wrapper\.auto-height[\s\S]*?flex: 0 0 auto;/);
+  assert.match(deviceManagement, /if \(!row\.firmwareVersion\) return false;/);
 });

@@ -1683,6 +1683,22 @@ class AgentSnapshotServiceImplTest {
     }
 
     @Test
+    void agentDeviceCountUsesTheSameCanonicalMobileVisibilityAsDeviceManagement() throws Exception {
+        String xml = normalizeWhitespace(Files.readString(Path.of("src/main/resources/mapper/agent/AgentDao.xml")));
+        int selectStart = xml.indexOf("<select id=\"getDeviceCountByAgentId\"");
+        int selectEnd = xml.indexOf("</select>", selectStart);
+        assertTrue(selectStart >= 0);
+        assertTrue(selectEnd > selectStart);
+        String countSql = xml.substring(selectStart, selectEnd);
+
+        assertTrue(countSql.contains("COUNT(DISTINCT d.id)"));
+        assertTrue(countSql.contains("LEFT JOIN ai_mobile_instance mi ON mi.device_id = d.id"));
+        assertTrue(countSql.contains("mi.mobile_instance_id IS NULL"));
+        assertTrue(countSql.contains("mi.canonical_instance_id = mi.mobile_instance_id"));
+        assertFalse(countSql.contains("SELECT COUNT(*) FROM ai_device WHERE"));
+    }
+
+    @Test
     void toVOIncludesRestoreTraceFields() throws Exception {
         AgentSnapshotServiceImpl service = new AgentSnapshotServiceImpl(null, null, null, null, null, null, null, null,
                 null, null);
