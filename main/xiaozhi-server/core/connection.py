@@ -249,6 +249,14 @@ class ConnectionHandler:
         self._proactive_background_tasks = set()
         self._proactive_habit_tasks = set()
         self._proactive_delivery_futures = set()
+        self._schedule_sync_applied_revision = 0
+        self._schedule_sync_sent_revision = 0
+        self._schedule_sync_pending_payload = None
+        self._schedule_sync_pending_sent = False
+        self._schedule_action_applied_revision = 0
+        self._schedule_action_sent_revision = 0
+        self._schedule_action_pending_payload = None
+        self._schedule_action_pending_sent = False
 
     async def handle_connection(self, ws: websockets.ServerConnection):
         try:

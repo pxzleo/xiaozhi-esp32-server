@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from config.manage_api_client import (
     action_shared_schedule_by_source,
+    action_shared_schedule,
     claim_proactive_event,
     create_proactive_event,
     get_proactive_monitor_event,
@@ -23,6 +24,10 @@ from config.manage_api_client import (
     get_claimed_proactive_context,
     register_shared_schedule,
     trigger_shared_schedule_by_source,
+    trigger_shared_schedule,
+    get_shared_schedule_sync,
+    get_shared_schedule_actions,
+    acknowledge_shared_schedule_actions,
 )
 from config.logger import setup_logging
 from core.handle.abortHandle import cancelActiveLLMResponse
@@ -50,6 +55,8 @@ ASSISTANT_TRIGGERED_METHOD = "notifications/assistant/triggered"
 EXTERNAL_TRIGGERED_METHOD = "notifications/assistant/external_triggered"
 SCHEDULE_FOLLOW_UP_METHOD = "notifications/schedule/follow_up"
 DEVICE_HEALTH_METHOD = "notifications/device/health"
+SCHEDULE_SYNC_APPLIED_METHOD = "notifications/schedule/sync_applied"
+SCHEDULE_ACTION_APPLIED_METHOD = "notifications/schedule/action_applied"
 PROACTIVE_TTS_READY_TIMEOUT_SECONDS = 2
 DEVICE_REMINDER_TTS_WAIT_SECONDS = 15
 PROACTIVE_DELIVERY_TIMEOUT_SECONDS = 120
@@ -210,7 +217,7 @@ async def send_mcp_message(conn: "ConnectionHandler", payload: dict):
     """Helper to send MCP messages, encapsulating common logic."""
     if not conn.features.get("mcp"):
         logger.bind(tag=TAG).warning("客户端不支持MCP，无法发送MCP消息")
-        return
+        raise RuntimeError("客户端不支持MCP")
 
     message = json.dumps({"type": "mcp", "payload": payload})
 
@@ -219,6 +226,89 @@ async def send_mcp_message(conn: "ConnectionHandler", payload: dict):
         logger.bind(tag=TAG).debug(f"成功发送MCP消息: {message}")
     except Exception as e:
         logger.bind(tag=TAG).error(f"发送MCP消息失败: {e}")
+        raise
+
+
+async def _push_schedule_sync_once(conn):
+    mac_address = getattr(conn, "device_id", None)
+    if not isinstance(mac_address, str) or not mac_address:
+        return
+    since = getattr(conn, "_schedule_sync_applied_revision", 0)
+    response = getattr(conn, "_schedule_sync_pending_payload", None)
+    if response is None:
+        response = await get_shared_schedule_sync(mac_address, since, 16)
+        if not isinstance(response, dict) or response.get("protocol_version") != 1:
+            raise RuntimeError("权威日程同步响应无效")
+        next_cursor = response.get("cursor")
+        if not isinstance(next_cursor, int) or isinstance(next_cursor, bool) \
+                or next_cursor < since:
+            raise RuntimeError("权威日程同步游标无效")
+        conn._schedule_sync_pending_payload = response
+        conn._schedule_sync_pending_sent = False
+    else:
+        next_cursor = response.get("cursor")
+        sent = getattr(conn, "_schedule_sync_sent_revision", 0)
+        pending_sent = getattr(conn, "_schedule_sync_pending_sent", False)
+        if next_cursor < since or (pending_sent and sent != next_cursor) \
+                or (not pending_sent and sent != since):
+            raise RuntimeError("权威日程待确认页状态无效")
+    await send_mcp_message(conn, {
+        "jsonrpc": "2.0", "method": "notifications/schedule/sync", "params": response,
+    })
+    conn._schedule_sync_sent_revision = next_cursor
+    conn._schedule_sync_pending_sent = True
+
+
+async def _push_schedule_actions_once(conn):
+    mac_address = getattr(conn, "device_id", None)
+    if not isinstance(mac_address, str) or not mac_address:
+        return
+    after = getattr(conn, "_schedule_action_applied_revision", 0)
+    action = getattr(conn, "_schedule_action_pending_payload", None)
+    if action is None:
+        response = await get_shared_schedule_actions(mac_address, after, 1)
+        if not isinstance(response, dict) or response.get("protocol_version") != 1:
+            raise RuntimeError("权威日程动作响应无效")
+        actions = response.get("actions")
+        if not isinstance(actions, list):
+            raise RuntimeError("权威日程动作响应无效")
+        if not actions:
+            return
+        action = actions[0]
+        if not isinstance(action, dict):
+            raise RuntimeError("权威日程动作无效")
+        revision = action.get("revision")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision <= after:
+            raise RuntimeError("权威日程动作游标无效")
+        conn._schedule_action_pending_payload = action
+        conn._schedule_action_pending_sent = False
+    else:
+        revision = action.get("revision")
+        sent = getattr(conn, "_schedule_action_sent_revision", 0)
+        pending_sent = getattr(conn, "_schedule_action_pending_sent", False)
+        if revision <= after or (pending_sent and sent != revision) \
+                or (not pending_sent and sent != after):
+            raise RuntimeError("权威日程待确认动作状态无效")
+    await send_mcp_message(conn, {
+        "jsonrpc": "2.0", "method": "notifications/schedule/action", "params": action,
+    })
+    conn._schedule_action_sent_revision = revision
+    conn._schedule_action_pending_sent = True
+
+
+async def schedule_device_sync_loop(conn):
+    """连接级代理；设备持久化ACK前重复下发，断线时由连接清理统一取消。"""
+    while not getattr(conn, "connection_closed_event", asyncio.Event()).is_set():
+        try:
+            await _push_schedule_sync_once(conn)
+            await _push_schedule_actions_once(conn)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.bind(tag=TAG).error(
+                "权威日程设备同步失败: {}", type(error).__name__
+            )
+        await asyncio.sleep(10)
 
 
 async def handle_mcp_message(
@@ -363,6 +453,12 @@ async def handle_mcp_message(
                 conn, payload.get("params"), notification_state
             )
             return
+        if method == SCHEDULE_SYNC_APPLIED_METHOD:
+            _handle_schedule_sync_applied(conn, payload.get("params"))
+            return
+        if method == SCHEDULE_ACTION_APPLIED_METHOD:
+            await _handle_schedule_action_applied(conn, payload.get("params"))
+            return
         if isinstance(method, str) and method.startswith("notifications/"):
             logger.bind(tag=TAG).warning("拒绝未知的设备MCP通知")
             return
@@ -372,13 +468,55 @@ async def handle_mcp_message(
         error_data = payload["error"]
         error_msg = error_data.get("message", "未知错误")
         logger.bind(tag=TAG).error(f"收到MCP错误响应: {error_msg}")
-
         msg_id = int(payload.get("id", 0))
         if msg_id in mcp_client.call_results:
             await mcp_client.reject_call_result(
                 msg_id, RuntimeError(_user_facing_mcp_error(error_msg))
             )
 
+
+def _applied_revision(params, sent_revision):
+    if not isinstance(params, dict) or set(params) != {"version", "through_revision"}:
+        raise ValueError("日程应用确认字段无效")
+    revision = params.get("through_revision")
+    if params.get("version") != 1 or not isinstance(revision, int) \
+            or isinstance(revision, bool) or revision < 0 or revision != sent_revision:
+        raise ValueError("日程应用确认游标无效")
+    return revision
+
+
+def _handle_schedule_sync_applied(conn, params):
+    sent = getattr(conn, "_schedule_sync_sent_revision", 0)
+    revision = _applied_revision(params, sent)
+    current = getattr(conn, "_schedule_sync_applied_revision", 0)
+    pending_sent = getattr(conn, "_schedule_sync_pending_sent", False)
+    if revision < current or revision == current and not pending_sent:
+        return
+    if not pending_sent:
+        raise ValueError("日程同步尚未成功发送")
+    conn._schedule_sync_applied_revision = revision
+    conn._schedule_sync_pending_payload = None
+    conn._schedule_sync_pending_sent = False
+
+
+async def _handle_schedule_action_applied(conn, params):
+    sent = getattr(conn, "_schedule_action_sent_revision", 0)
+    revision = _applied_revision(params, sent)
+    current = getattr(conn, "_schedule_action_applied_revision", 0)
+    pending_sent = getattr(conn, "_schedule_action_pending_sent", False)
+    if revision < current or revision == current and not pending_sent:
+        return
+    if not pending_sent:
+        raise ValueError("日程动作尚未成功发送")
+    mac_address = getattr(conn, "device_id", None)
+    if not isinstance(mac_address, str) or not mac_address:
+        raise ValueError("设备MAC缺失")
+    response = await acknowledge_shared_schedule_actions(mac_address, revision)
+    if not isinstance(response, dict) or response.get("acked_revision") != revision:
+        raise RuntimeError("日程动作确认响应无效")
+    conn._schedule_action_applied_revision = revision
+    conn._schedule_action_pending_payload = None
+    conn._schedule_action_pending_sent = False
 
 async def _handle_netease_music_status_notification(
     conn, params, notification_state=None
@@ -665,7 +803,14 @@ async def _register_shared_schedule_with_retry(conn, schedule):
     last_error = None
     for attempt in range(4):
         try:
-            return await register_shared_schedule(schedule)
+            result = await register_shared_schedule(schedule)
+            try:
+                await _push_schedule_sync_once(conn)
+            except Exception as error:
+                logger.bind(tag=TAG).warning(
+                    "注册成功后的权威日程下发暂时失败: {}", type(error).__name__
+                )
+            return result
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -675,7 +820,31 @@ async def _register_shared_schedule_with_retry(conn, schedule):
     raise RuntimeError("共享日程注册重试失败") from last_error
 
 
-async def _sync_shared_schedule_action(conn, source_schedule_id, action, snoozed_until=None):
+def _validate_schedule_uuid(schedule_uuid):
+    if not isinstance(schedule_uuid, str) or not re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        schedule_uuid,
+    ):
+        raise ValueError("共享日程UUID无效")
+
+
+async def _sync_shared_schedule_action(
+    conn, source_schedule_id, action, snoozed_until=None, *, schedule_uuid=None,
+    local_id=None,
+):
+    if schedule_uuid is not None:
+        _validate_schedule_uuid(schedule_uuid)
+        mac_address = getattr(conn, "device_id", None)
+        if not isinstance(mac_address, str) or not mac_address:
+            raise ValueError("设备MAC缺失")
+        await action_shared_schedule(
+            schedule_uuid, action, snoozed_until,
+            requester_mac_address=mac_address,
+        )
+        return
+    if not isinstance(local_id, int) or isinstance(local_id, bool) or local_id <= 0 \
+            or str(source_schedule_id) != str(local_id):
+        raise ValueError("未绑定日程不是当前设备本地来源")
     mac_address = getattr(conn, "device_id", None)
     if not isinstance(mac_address, str) or not mac_address:
         raise ValueError("设备MAC缺失")
@@ -686,6 +855,15 @@ async def _sync_shared_schedule_action(conn, source_schedule_id, action, snoozed
         "snoozed_until": snoozed_until,
     }
     await action_shared_schedule_by_source(payload)
+
+
+async def _sync_shared_schedule_delete(
+    conn, source_schedule_id, schedule_uuid=None, *, local_id=None,
+):
+    await _sync_shared_schedule_action(
+        conn, source_schedule_id, "delete", schedule_uuid=schedule_uuid,
+        local_id=local_id,
+    )
 
 
 async def _sync_preference_with_retry(conn, preference):
@@ -705,12 +883,16 @@ async def _sync_preference_with_retry(conn, preference):
 
 
 async def _claim_shared_schedule_delivery(
-    conn, *, source_schedule_id, kind, label, triggered_at, **extra
+    conn, *, source_schedule_id, schedule_uuid, occurrence_at, kind, label,
+    triggered_at, speak=True, **extra
 ):
     mac_address = getattr(conn, "device_id", None)
     if not isinstance(mac_address, str) or not mac_address:
-        raise ValueError("设备MAC缺失")
+        return None
     triggered_at_ms = _local_datetime_epoch_milliseconds(conn, triggered_at)
+    if not isinstance(occurrence_at, int) or isinstance(occurrence_at, bool) \
+            or occurrence_at <= 0 or occurrence_at * 1000 != triggered_at_ms:
+        raise ValueError("设备日程权威触发时间不一致")
     try:
         payload = {
                 "source_mac_address": mac_address,
@@ -721,14 +903,32 @@ async def _claim_shared_schedule_delivery(
         if label is not None:
             payload["label"] = label
         payload.update(extra)
-        schedule = await trigger_shared_schedule_by_source(payload)
-        schedule_uuid = schedule.get("id") if isinstance(schedule, dict) else None
-        if not isinstance(schedule_uuid, str) or not re.fullmatch(
+        if schedule_uuid is not None:
+            if not isinstance(schedule_uuid, str) or not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                schedule_uuid,
+            ):
+                raise ValueError("共享日程UUID无效")
+            schedule = await trigger_shared_schedule(
+                schedule_uuid, triggered_at_ms, mac_address
+            )
+        else:
+            schedule = await trigger_shared_schedule_by_source(payload)
+        authoritative_uuid = schedule.get("id") if isinstance(schedule, dict) else None
+        if not isinstance(authoritative_uuid, str) or not re.fullmatch(
             r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
-            schedule_uuid,
+            authoritative_uuid,
         ):
             raise ValueError("共享日程响应无效")
-        event_id = f"schedule-{schedule_uuid}-{triggered_at_ms}"
+        try:
+            await _push_schedule_sync_once(conn)
+        except Exception as error:
+            logger.bind(tag=TAG).warning(
+                "触发成功后的权威日程下发暂时失败: {}", type(error).__name__
+            )
+        event_id = f"schedule-{authoritative_uuid}-{triggered_at_ms}"
+        if speak is not True:
+            return None
         claim_token = uuid.uuid4().hex
         if not await claim_proactive_event(event_id, mac_address, claim_token):
             return False
@@ -806,7 +1006,8 @@ def handle_successful_device_tool_result(conn, actual_name, result):
                         for day in weekdays
                     ) or len(weekdays) != len(set(weekdays)):
                         raise ValueError("设备日程星期字段无效")
-                    if not isinstance(label, str) or not label.strip():
+                    if not isinstance(label, str) or not label.strip() \
+                            or len(label.strip()) > 80:
                         raise ValueError("设备日程标题无效")
                     sections = task.get("sections", "")
                     if not isinstance(sections, str):
@@ -879,6 +1080,17 @@ def handle_successful_device_tool_result(conn, actual_name, result):
         if not isinstance(source_id, int) or isinstance(source_id, bool) or source_id <= 0:
             logger.bind(tag=TAG).error("设备日程动作来源ID无效")
             return
+        source_schedule_id = data.get("source_schedule_id", str(source_id))
+        if not isinstance(source_schedule_id, str) or not source_schedule_id:
+            logger.bind(tag=TAG).error("设备日程稳定来源ID无效")
+            return
+        schedule_uuid = data.get("schedule_uuid")
+        if schedule_uuid is not None:
+            try:
+                _validate_schedule_uuid(schedule_uuid)
+            except ValueError as error:
+                logger.bind(tag=TAG).error(str(error))
+                return
         action = "stop"
         snoozed_until = None
         if actual_name.endswith(".snooze"):
@@ -892,9 +1104,50 @@ def handle_successful_device_tool_result(conn, actual_name, result):
             action = "snooze"
         _schedule_visible_background_task(
             conn,
-            _sync_shared_schedule_action(conn, source_id, action, snoozed_until),
+            _sync_shared_schedule_action(
+                conn, source_schedule_id, action, snoozed_until,
+                schedule_uuid=schedule_uuid, local_id=source_id,
+            ),
             "共享日程动作同步",
         )
+        return
+    if actual_name in ("self.schedule.delete", "self.schedule.clear"):
+        data = result.get("data")
+        if not isinstance(data, dict):
+            logger.bind(tag=TAG).error("设备日程删除成功但返回data无效")
+            return
+        deleted_tasks = ([{
+            "id": data.get("deleted_id"),
+            "source_schedule_id": data.get("source_schedule_id"),
+            "schedule_uuid": data.get("schedule_uuid"),
+        }] if actual_name.endswith(".delete") else data.get("deleted_tasks"))
+        if not isinstance(deleted_tasks, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), int) or isinstance(item.get("id"), bool)
+            or item.get("id") <= 0
+            or not isinstance(item.get("source_schedule_id"), str)
+            or not item.get("source_schedule_id")
+            for item in deleted_tasks
+        ):
+            logger.bind(tag=TAG).error("设备日程删除ID无效")
+            return
+        try:
+            for deleted in deleted_tasks:
+                if deleted.get("schedule_uuid") is not None:
+                    _validate_schedule_uuid(deleted["schedule_uuid"])
+        except ValueError as error:
+            logger.bind(tag=TAG).error(str(error))
+            return
+        for deleted in deleted_tasks:
+            schedule_uuid = deleted.get("schedule_uuid")
+            _schedule_visible_background_task(
+                conn,
+                _sync_shared_schedule_delete(
+                    conn, deleted["source_schedule_id"], schedule_uuid,
+                    local_id=deleted["id"],
+                ),
+                "共享日程删除同步",
+            )
         return
     schedule_outcomes = {
         "self.schedule.complete_recent": ("delivered", "completed"),
@@ -931,9 +1184,26 @@ def handle_successful_device_tool_result(conn, actual_name, result):
                 "完成跟进结果同步",
             )
             if actual_name == "self.schedule.complete_recent":
+                source_schedule_id = result_data.get(
+                    "source_schedule_id", str(result_source_id)
+                )
+                if not isinstance(source_schedule_id, str) or not source_schedule_id:
+                    logger.bind(tag=TAG).error("设备日程稳定来源ID无效")
+                    return
+                schedule_uuid = result_data.get("schedule_uuid")
+                if schedule_uuid is not None:
+                    try:
+                        _validate_schedule_uuid(schedule_uuid)
+                    except ValueError as error:
+                        logger.bind(tag=TAG).error(str(error))
+                        return
                 _schedule_visible_background_task(
                     conn,
-                    _sync_shared_schedule_action(conn, result_source_id, "complete"),
+                    _sync_shared_schedule_action(
+                        conn, source_schedule_id, "complete",
+                        schedule_uuid=schedule_uuid,
+                        local_id=result_source_id,
+                    ),
                     "共享日程完成同步",
                 )
 
@@ -1167,6 +1437,11 @@ async def _handle_schedule_triggered_notification(
 
     version = params.get("version")
     schedule_id = params.get("id")
+    source_schedule_id = params.get("source_schedule_id")
+    schedule_uuid = params.get("schedule_uuid")
+    occurrence_at = params.get("occurrence_at")
+    authoritative_occurrence = source_schedule_id is not None or schedule_uuid is not None \
+        or occurrence_at is not None
     label = params.get("label")
     triggered_at = params.get("triggered_at")
     if not isinstance(version, int) or isinstance(version, bool) or version != 1:
@@ -1178,6 +1453,17 @@ async def _handle_schedule_triggered_notification(
         or schedule_id <= 0
     ):
         logger.bind(tag=TAG).warning("日程提醒通知ID无效")
+        return
+    if source_schedule_id is None:
+        source_schedule_id = str(schedule_id)
+    if not isinstance(source_schedule_id, str) or not source_schedule_id \
+            or len(source_schedule_id) > 64:
+        logger.bind(tag=TAG).warning("日程提醒源ID无效")
+        return
+    if schedule_uuid is not None and (not isinstance(schedule_uuid, str)
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                                schedule_uuid)):
+        logger.bind(tag=TAG).warning("日程提醒UUID无效")
         return
     schedule_kind = params.get("kind")
     if schedule_kind not in ("alarm", "reminder"):
@@ -1200,19 +1486,37 @@ async def _handle_schedule_triggered_notification(
     except ValueError:
         logger.bind(tag=TAG).warning("日程提醒通知触发时间无效")
         return
-    if params.get("speak") is not True:
-        logger.bind(tag=TAG).warning("日程提醒通知未要求语音播报")
+    if occurrence_at is None:
+        try:
+            occurrence_at = _local_datetime_epoch_milliseconds(conn, triggered_at) // 1000
+        except ValueError:
+            logger.bind(tag=TAG).warning("日程提醒发生时间无效")
+            return
+    if not isinstance(occurrence_at, int) or isinstance(occurrence_at, bool) or occurrence_at <= 0:
+        logger.bind(tag=TAG).warning("日程提醒发生时间无效")
+        return
+    speak = params.get("speak")
+    if not isinstance(speak, bool):
+        logger.bind(tag=TAG).warning("日程提醒播报标志无效")
+        return
+    if speak is False and not authoritative_occurrence:
+        logger.bind(tag=TAG).warning("旧版日程提醒不得静默补报")
         return
 
     shared_delivery = await _claim_shared_schedule_delivery(
         conn,
-        source_schedule_id=schedule_id,
+        source_schedule_id=source_schedule_id,
+        schedule_uuid=schedule_uuid,
+        occurrence_at=occurrence_at,
         kind=schedule_kind,
         label=normalized_label,
         triggered_at=triggered_at,
+        speak=speak,
     )
     if shared_delivery is False:
         logger.bind(tag=TAG).info("当前终端未被共享日程路由选中")
+        return
+    if speak is False:
         return
 
     if schedule_kind == "alarm":
@@ -1304,6 +1608,11 @@ async def _handle_assistant_triggered_notification(
         return
     version = params.get("version")
     schedule_id = params.get("id")
+    source_schedule_id = params.get("source_schedule_id")
+    schedule_uuid = params.get("schedule_uuid")
+    occurrence_at = params.get("occurrence_at")
+    authoritative_occurrence = source_schedule_id is not None or schedule_uuid is not None \
+        or occurrence_at is not None
     event_id = params.get("event_id")
     triggered_at = params.get("triggered_at")
     sections = params.get("sections")
@@ -1318,6 +1627,17 @@ async def _handle_assistant_triggered_notification(
     ):
         logger.bind(tag=TAG).warning("主动助理通知ID无效")
         return
+    if source_schedule_id is None:
+        source_schedule_id = str(schedule_id)
+    if not isinstance(source_schedule_id, str) or not source_schedule_id \
+            or len(source_schedule_id) > 64:
+        logger.bind(tag=TAG).warning("主动助理源日程ID无效")
+        return
+    if schedule_uuid is not None and (not isinstance(schedule_uuid, str)
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                                schedule_uuid)):
+        logger.bind(tag=TAG).warning("主动助理日程UUID无效")
+        return
     if params.get("workflow") != "daily_briefing":
         logger.bind(tag=TAG).warning("主动助理工作流无效")
         return
@@ -1330,6 +1650,15 @@ async def _handle_assistant_triggered_notification(
         datetime.strptime(triggered_at, "%Y-%m-%dT%H:%M:%S")
     except ValueError:
         logger.bind(tag=TAG).warning("主动助理触发时间无效")
+        return
+    if occurrence_at is None:
+        try:
+            occurrence_at = _local_datetime_epoch_milliseconds(conn, triggered_at) // 1000
+        except ValueError:
+            logger.bind(tag=TAG).warning("主动助理发生时间无效")
+            return
+    if not isinstance(occurrence_at, int) or isinstance(occurrence_at, bool) or occurrence_at <= 0:
+        logger.bind(tag=TAG).warning("主动助理发生时间无效")
         return
     normalized_timestamp = triggered_at.replace("-", "").replace(":", "")
     expected_event_id = f"{schedule_id}-{normalized_timestamp}"
@@ -1353,21 +1682,30 @@ async def _handle_assistant_triggered_notification(
     if "weather" in sections and not location:
         logger.bind(tag=TAG).warning("天气简报缺少地点")
         return
-    if params.get("speak") is not True:
-        logger.bind(tag=TAG).warning("主动助理通知未要求语音播报")
+    speak = params.get("speak")
+    if not isinstance(speak, bool):
+        logger.bind(tag=TAG).warning("主动助理播报标志无效")
+        return
+    if speak is False and not authoritative_occurrence:
+        logger.bind(tag=TAG).warning("旧版每日简报不得静默补报")
         return
 
     shared_delivery = await _claim_shared_schedule_delivery(
         conn,
-        source_schedule_id=schedule_id,
+        source_schedule_id=source_schedule_id,
+        schedule_uuid=schedule_uuid,
+        occurrence_at=occurrence_at,
         kind="briefing",
         label=None,
         triggered_at=triggered_at,
+        speak=speak,
         sections=sections,
         location=location,
     )
     if shared_delivery is False:
         logger.bind(tag=TAG).info("当前终端未被共享简报路由选中")
+        return
+    if speak is False:
         return
 
     seen = getattr(conn, "_assistant_briefing_events", None)
@@ -2174,7 +2512,6 @@ async def call_mcp_tool(
 
     tool_call_id = await mcp_client.get_next_id()
     result_future = asyncio.Future()
-    await mcp_client.register_call_result_future(tool_call_id, result_future)
 
     # 处理参数
     try:
@@ -2235,9 +2572,9 @@ async def call_mcp_tool(
     }
 
     logger.bind(tag=TAG).info(f"发送客户端mcp工具调用请求: {actual_name}，参数: {args}")
-    await send_mcp_message(conn, payload)
-
+    await mcp_client.register_call_result_future(tool_call_id, result_future)
     try:
+        await send_mcp_message(conn, payload)
         # Wait for response or timeout
         raw_result = await asyncio.wait_for(result_future, timeout=timeout)
         logger.bind(tag=TAG).info(
@@ -2258,9 +2595,7 @@ async def call_mcp_tool(
                     return content[0]["text"]
         # 如果结果不是预期的格式，将其转换为字符串
         return str(raw_result)
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as error:
+        raise TimeoutError("工具调用请求超时") from error
+    finally:
         await mcp_client.cleanup_call_result(tool_call_id)
-        raise TimeoutError("工具调用请求超时")
-    except Exception as e:
-        await mcp_client.cleanup_call_result(tool_call_id)
-        raise e

@@ -102,7 +102,7 @@ class ProactiveDeliveryRoutingContractTest {
         assertEquals(List.of(1,2,3,4,5), register.getWeekdays());
         String viewJson = mapper.writeValueAsString(new ProactiveScheduleDTOs.View("id", 7L,
                 "d1", "12", "alarm", "起床", "once", List.of(), List.of(), null, 1786578000000L,
-                "scheduled", null, null, 1, null));
+                "scheduled", 1786578000000L, null, null, 1, null));
         assertTrue(viewJson.contains("\"scheduled_at\":1786578000000"));
         assertTrue(!viewJson.contains("2026-"));
     }
@@ -140,6 +140,27 @@ class ProactiveDeliveryRoutingContractTest {
     }
 
     @Test
+    void scheduleLabelsUseEightyUnicodeCodePointsWithoutTruncation() {
+        var validator = jakarta.validation.Validation.buildDefaultValidatorFactory().getValidator();
+        String eightyEmoji="😀".repeat(80);
+        ProactiveScheduleDTOs.Register register=new ProactiveScheduleDTOs.Register();
+        register.setSourceMacAddress("AA"); register.setSourceScheduleId("1");
+        register.setKind("alarm"); register.setScheduledAt(1_786_578_000_000L);
+        register.setLabel(eightyEmoji);
+        assertTrue(validator.validate(register).isEmpty());
+        register.setLabel("😀".repeat(81));
+        assertFalse(validator.validate(register).isEmpty());
+
+        ProactiveScheduleDTOs.SourceTrigger trigger=new ProactiveScheduleDTOs.SourceTrigger();
+        trigger.setSourceMacAddress("AA"); trigger.setSourceScheduleId("1");
+        trigger.setKind("alarm"); trigger.setTriggeredAt(1_786_578_000_000L);
+        trigger.setLabel(eightyEmoji);
+        assertTrue(validator.validate(trigger).isEmpty());
+        trigger.setLabel("字".repeat(81));
+        assertFalse(validator.validate(trigger).isEmpty());
+    }
+
+    @Test
     void onlyConfiguredAuthorityCanCreateOrRenameObservedPlace() {
         DeviceDao deviceDao = mock(DeviceDao.class);
         ProactiveDeliveryRoutingDao routingDao = mock(ProactiveDeliveryRoutingDao.class);
@@ -162,6 +183,25 @@ class ProactiveDeliveryRoutingContractTest {
         } catch (ReflectiveOperationException error) {
             throw new AssertionError(error);
         }
+    }
+
+    @Test
+    void scheduleSyncMigrationHasRevisionTombstoneAndActionCursor() throws Exception {
+        String sql = Files.readString(Path.of(
+                "src/main/resources/db/changelog/202608131800.sql"));
+        assertTrue(sql.contains("next_trigger_at"));
+        assertTrue(sql.contains("sync_revision"));
+        assertTrue(sql.contains("deleted_at"));
+        assertTrue(sql.contains("CHAR_LENGTH(`label`) BETWEEN 1 AND 80"));
+        assertTrue(sql.contains("ai_proactive_schedule_revision"));
+        assertTrue(sql.contains("INSERT INTO `ai_proactive_schedule_revision`"));
+        assertTrue(sql.contains("SET s.sync_revision=r.revision"));
+        assertTrue(sql.contains("ai_proactive_schedule_action"));
+        assertTrue(sql.contains("ai_proactive_schedule_device_cursor"));
+        String dueSql = ProactiveScheduleDao.class.getMethod("selectDueForUpdate",String.class)
+                .getAnnotation(Select.class).value()[0];
+        assertTrue(dueSql.contains("CURRENT_TIMESTAMP(3)"));
+        assertTrue(dueSql.contains("SKIP LOCKED"));
     }
 
     private DeviceEntity device(String id, Long userId) {

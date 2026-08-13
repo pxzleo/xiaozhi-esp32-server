@@ -19,10 +19,13 @@ public class ProactiveScheduleEntity {
     private String sections;
     private String location;
     private Date scheduledAt;
+    private Date nextTriggerAt;
     private String state;
     private Date lastTriggeredAt;
     private Date snoozedUntil;
     private Integer version;
+    private Long syncRevision;
+    private Date deletedAt;
     private Date createdAt;
     private Date updatedAt;
 }

@@ -6,7 +6,7 @@
 
 ## 架构边界
 
-- 日程由设备本地保存和调度；服务端不新增数据库、HTTP 接口、manager-api 或 manager-web 页面。
+- 服务端数据库是账号共享日程、版本、下一触发时间和全局动作的权威来源；设备保留最多 16 项离线执行副本，本地创建可先成功并由 Python 重试注册。
 - 服务端通过设备动态上报的 MCP 工具描述，将 `self.schedule.create/list/delete/clear/stop/snooze` 暴露给主 LLM。工具名会按既有规则转换为下划线形式，设备描述中的自然表达示例和缺失信息追问规则保持可见。
 - 工具执行结果以设备返回为准。设备返回 `action=RESPONSE` 时，服务端直接播报 `response`，不再交给第二次 LLM 改写；设备报错时必须按失败处理，不能声称创建成功。
 - 工具调用前提示“我来处理一下”只用于 `web_search` 和 `search_from_ragflow`，日程工具不播放该提示。
@@ -28,8 +28,11 @@
   "params": {
     "version": 1,
     "id": 7,
+    "source_schedule_id": "7",
+    "schedule_uuid": "4d8b9aec-1e54-4d3e-a9f4-c37a7f21c995",
     "kind": "reminder",
     "label": "喝水",
+    "occurrence_at": 1786084200,
     "triggered_at": "2026-08-07T14:30:00",
     "speak": true
   }
@@ -44,7 +47,9 @@
 - `kind` 严格等于 `reminder` 或 `alarm`；
 - `label` 去除首尾空白后包含 1 至 80 个 Unicode 字符；
 - `triggered_at` 是有效本地日期时间，格式严格为 `YYYY-MM-DDTHH:MM:SS`，不带时区；
-- `speak` 严格为 `true`。
+- `source_schedule_id` 为 1–64 字符稳定源 ID；`schedule_uuid` 可省略，存在时必须为 UUID v4；
+- `occurrence_at` 是 Unix 秒且必须与 `triggered_at` 严格表示同一时刻；
+- `speak` 为布尔值；实时触发为 `true`，断线 outbox 补报为 `false`，后者只更新权威状态而不重复播报。
 
 有效的普通提醒直接生成并播报 `提醒你：{label}`，有效的闹铃直接生成并播报 `闹铃时间到了：{label}`，同时按普通助手回复写入对话记录，不调用 LLM。主动通知在把 `FIRST → TEXT → LAST` 放入 TTS 队列前必须先发送 `tts state=start` 并同步 `client_is_speaking=true`，设备端协议顺序严格为 `start → sentence_start → 音频 → stop`；缺少 start 时设备仍处于 Idle，会丢弃随后到达的音频。新连接的 TTS 允许继续后台初始化，但服务端必须等待该连接的 TTS 对象完成音频通道启动后才创建提醒语音，最长等待 2 秒；加上取消旧轮次和当前 IndexTTS 的首包超时后，服务端最坏启动预算不超过 13 秒，须早于设备端 15 秒等待上限。超时或初始化失败时记录不含提醒正文的明确错误，不得访问未就绪的 TTS。无效或未知通知只记录不含 `label` 正文的安全日志，并拒绝播报。
 
@@ -58,9 +63,18 @@
 
 MCP 消息仍由后台任务处理，但任务入口必须捕获并记录异常类型，禁止再产生无人获取的后台任务异常；该异常日志只记录异常类型，不附带 MCP payload 或提醒正文。连接关闭后，等待中的通知必须立即失效，不得再写入 TTS 队列或对话记录。
 
+## 权威副本同步
+
+Python 连接层代持 manager-api 的 server-secret，设备不保存该凭据。连接建立后及每 10 秒轮询账号增量，通过 JSON-RPC notification 下发：
+
+- `notifications/schedule/sync`：参数为 manager-api 的同步响应，含显式 upsert/delete、稳定 UUID、版本、`next_trigger_at`、来源 MAC、`is_local_source` 和当前投递状态；
+- `notifications/schedule/action`：每次只下发一个 stop/snooze/complete/delete 动作。
+
+设备写入 NVS 成功后回 `notifications/schedule/sync_applied` 或 `notifications/schedule/action_applied`，参数均为 `{version:1,through_revision}`。Python 在 ACK 前只重放同一 payload；动作 ACK 收到后才推进 manager-api 设备游标。`source_schedule_id` 只在 `is_local_source=true` 时用于绑定旧本地数字 ID，跨来源副本一律按 UUID 识别，防止不同设备都存在本地 ID 1 时误操作。
+
 ## 设备职责
 
-设备负责本地时间解释、日程持久化、到点触发、重启恢复、停止和稍后提醒。服务端只负责把动态工具提供给主 LLM、转发工具调用、处理权威设备响应，以及校验并播报到点通知。设备与服务端必须共同遵守上述版本化通知契约。
+设备负责离线副本持久化、离线到点、重启恢复及本地铃声；服务端负责权威调度、跨终端路由、版本和动作流。设备的 delete/clear/stop/snooze/complete 成功结果携带 `schedule_uuid/source_schedule_id`；Python 有 UUID 时只调用 UUID 动作接口，无 UUID 时仅允许当前设备自己的本地来源走 by-source。
 
 ## 完成跟进通知
 

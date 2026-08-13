@@ -299,12 +299,78 @@ async def trigger_shared_schedule_by_source(trigger: Dict) -> Dict:
     )
 
 
+async def trigger_shared_schedule(
+    schedule_uuid: str, triggered_at: int, requester_mac_address: str
+) -> Dict:
+    """按服务端稳定UUID幂等触发权威日程。"""
+    return await _execute_proactive_request(
+        "POST",
+        f"/config/proactive/schedules/{quote(schedule_uuid, safe='')}:trigger",
+        json={"triggered_at": triggered_at,
+              "requester_mac_address": requester_mac_address},
+        timeout=2.0,
+    )
+
+
 async def action_shared_schedule_by_source(action: Dict) -> Dict:
     """按设备稳定源ID同步停止、稍后提醒或完成动作。"""
     return await _execute_proactive_request(
         "POST",
         "/config/proactive/schedules/action-by-source",
         json=action,
+        timeout=2.0,
+    )
+
+
+async def action_shared_schedule(
+    schedule_uuid: str, action: str, snoozed_until=None, requester_mac_address=None
+) -> Dict:
+    """按服务端稳定UUID执行内部权威动作。"""
+    payload = {"action": action}
+    if snoozed_until is not None:
+        payload["snoozed_until"] = snoozed_until
+    if requester_mac_address is not None:
+        payload["requester_mac_address"] = requester_mac_address
+    return await _execute_proactive_request(
+        "POST",
+        f"/config/proactive/schedules/{quote(schedule_uuid, safe='')}:action",
+        json=payload,
+        timeout=2.0,
+    )
+
+
+async def get_shared_schedule_sync(
+    mac_address: str, since_revision: int = 0, limit: int = 100
+) -> Dict:
+    """按账号和目标音箱读取权威日程增量。"""
+    return await _execute_proactive_request(
+        "GET",
+        f"/config/proactive/schedules/device-sync/{quote(mac_address, safe='')}",
+        params={"since_revision": since_revision, "limit": limit},
+        timeout=2.0,
+    )
+
+
+async def get_shared_schedule_actions(
+    mac_address: str, after_revision: int = 0, limit: int = 100
+) -> Dict:
+    """读取尚未由目标音箱持久化确认的账号日程动作。"""
+    return await _execute_proactive_request(
+        "GET",
+        f"/config/proactive/schedules/device-actions/{quote(mac_address, safe='')}",
+        params={"after_revision": after_revision, "limit": limit},
+        timeout=2.0,
+    )
+
+
+async def acknowledge_shared_schedule_actions(
+    mac_address: str, through_revision: int
+) -> Dict:
+    """仅在设备确认动作已持久化后推进服务端动作游标。"""
+    return await _execute_proactive_request(
+        "POST",
+        f"/config/proactive/schedules/device-actions/{quote(mac_address, safe='')}:ack",
+        json={"protocol_version": 1, "through_revision": through_revision},
         timeout=2.0,
     )
 

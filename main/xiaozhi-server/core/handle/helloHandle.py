@@ -14,6 +14,7 @@ from core.utils.wakeup_word import WakeupWordsConfig
 from core.handle.sendAudioHandle import sendAudioMessage, send_tts_message
 from core.utils.util import remove_punctuation_and_length, opus_datas_to_wav_bytes
 from core.providers.tools.device_mcp import MCPClient, send_mcp_initialize_message
+from core.providers.tools.device_mcp.mcp_handler import schedule_device_sync_loop
 
 TAG = __name__
 
@@ -56,6 +57,9 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
             conn.mcp_client = MCPClient()
             # 发送初始化
             asyncio.create_task(send_mcp_initialize_message(conn))
+            sync_task = asyncio.create_task(schedule_device_sync_loop(conn))
+            conn._proactive_background_tasks.add(sync_task)
+            sync_task.add_done_callback(conn._proactive_background_tasks.discard)
         if features.get("aec"):
             conn.logger.bind(tag=TAG).debug("客户端启用了服务端AEC")
             conn.client_aec = True
