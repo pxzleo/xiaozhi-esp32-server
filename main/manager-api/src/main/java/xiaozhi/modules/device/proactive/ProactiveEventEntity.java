@@ -27,6 +27,7 @@ public class ProactiveEventEntity {
     private String dedupeKey;
     private String deliveryGroupKey;
     private Integer deliveryGroupWindowHours;
+    private String deliveryMode;
     private Boolean requiresResponse;
     private String deliveryStatus;
     private String outcome;

@@ -52,6 +52,12 @@ export default {
   silentToday(deviceId, callback, failCallback) {
     return send(`/device/proactive/preferences/${encodeURIComponent(deviceId)}/today-silent`, 'PUT', undefined, callback, failCallback);
   },
+  getDeliveryRouting(callback, failCallback) {
+    return send('/device/proactive/delivery-routing', 'GET', undefined, callback, failCallback);
+  },
+  updateDeliveryRouting(data, callback, failCallback) {
+    return send('/device/proactive/delivery-routing', 'PUT', data, callback, failCallback);
+  },
   getEvents(filters, callback, failCallback) {
     return send(`/device/proactive/events?${buildEventQuery(filters)}`, 'GET', undefined, callback, failCallback);
   },

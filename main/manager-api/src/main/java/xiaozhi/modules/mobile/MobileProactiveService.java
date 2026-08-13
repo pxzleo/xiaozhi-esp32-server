@@ -19,6 +19,12 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 import xiaozhi.modules.device.proactive.ProactiveMonitorService;
 import xiaozhi.modules.device.proactive.ProactivePreferenceConflictException;
 import xiaozhi.modules.device.proactive.ProactiveService;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingService;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.LocationAuthorityUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.RouteView;
+import xiaozhi.modules.device.proactive.ProactiveScheduleService;
+import xiaozhi.modules.device.proactive.ProactiveScheduleDTOs.Action;
+import xiaozhi.modules.device.proactive.ProactiveScheduleDTOs.View;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.ClaimRequest;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.ClaimResponse;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.CompleteRequest;
@@ -35,14 +41,62 @@ public class MobileProactiveService {
     private final ProactiveMonitorService monitorService;
     private final ProactiveService proactiveService;
     private final MobileProactiveAuditDao auditDao;
+    private final ProactiveDeliveryRoutingService routingService;
+    private final ProactiveScheduleService scheduleService;
 
     public MobileProactiveService(MobileEventService mobileAuth,
             ProactiveMonitorService monitorService, ProactiveService proactiveService,
-            MobileProactiveAuditDao auditDao) {
+            MobileProactiveAuditDao auditDao, ProactiveDeliveryRoutingService routingService) {
         this.mobileAuth = mobileAuth;
         this.monitorService = monitorService;
         this.proactiveService = proactiveService;
         this.auditDao = auditDao;
+        this.routingService = routingService;
+        this.scheduleService = null;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public MobileProactiveService(MobileEventService mobileAuth,
+            ProactiveMonitorService monitorService, ProactiveService proactiveService,
+            MobileProactiveAuditDao auditDao, ProactiveDeliveryRoutingService routingService,
+            ProactiveScheduleService scheduleService) {
+        this.mobileAuth=mobileAuth; this.monitorService=monitorService; this.proactiveService=proactiveService;
+        this.auditDao=auditDao; this.routingService=routingService; this.scheduleService=scheduleService;
+    }
+
+    MobileProactiveService(MobileEventService mobileAuth,
+            ProactiveMonitorService monitorService, ProactiveService proactiveService,
+            MobileProactiveAuditDao auditDao) {
+        this(mobileAuth, monitorService, proactiveService, auditDao, null);
+    }
+
+    public java.util.List<View> activeSchedules(MobileEventService.MobileAuth auth) {
+        MobileInstanceEntity instance=authenticate(auth);
+        return scheduleService.active(instance.getUserId());
+    }
+
+    public View scheduleAction(MobileEventService.MobileAuth auth, String id, Action request) {
+        MobileInstanceEntity instance=authenticate(auth);
+        try { return scheduleService.actionForUser(instance.getUserId(), id, request); }
+        catch (RenException error) { throw new MobileApiException(HttpStatus.CONFLICT,
+                "SCHEDULE_ACTION_CONFLICT", "闹铃或提醒已被其他终端处理"); }
+    }
+
+    public RouteView deliveryRouting(MobileEventService.MobileAuth auth) {
+        MobileInstanceEntity instance = mobileAuth.authenticate(auth, "location_gateway");
+        return routingService.get(instance.getUserId());
+    }
+
+    public RouteView updateLocationAuthority(MobileEventService.MobileAuth auth,
+            LocationAuthorityUpdate request) {
+        MobileInstanceEntity instance = mobileAuth.authenticate(auth, "location_gateway");
+        try {
+            return routingService.updateLocationAuthority(instance.getUserId(),
+                    request.getMobileInstanceId(), request.getVersion());
+        } catch (RenException error) {
+            throw new MobileApiException(HttpStatus.CONFLICT, "DELIVERY_ROUTING_CONFLICT",
+                    "投递路由配置已变化，请重新读取后再保存");
+        }
     }
 
     public PendingResponse pending(MobileEventService.MobileAuth auth) {
@@ -166,7 +220,8 @@ public class MobileProactiveService {
         String title = requireText(payload, "title", 100);
         String summary = event.eventType() == xiaozhi.modules.device.proactive.ProactiveEnums.EventType.MOBILE_ALERT
                 ? requireText(payload, "summary", 120) : requireText(payload, "message", 300);
-        boolean news = event.topic() == Topic.NEWS;
+        boolean news = event.eventType()
+                == xiaozhi.modules.device.proactive.ProactiveEnums.EventType.NEWS_ALERT;
         String tts = news && !summary.endsWith("要了解详情吗？")
                 ? summary + " 要了解详情吗？" : summary;
         String source = news ? requireText(payload, "source", 100) : optionalText(payload, "source");

@@ -322,7 +322,7 @@ class ProactiveMonitorContractTest {
         assertTrue(sql.contains("LEFT JOIN sys_params g"));
         assertTrue(sql.contains("proactive.external_monitoring_enabled"));
         assertTrue(sql.contains("LOWER(TRIM(g.param_value)) = 'true'"));
-        assertTrue(sql.contains("event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT')"));
+        assertTrue(sql.contains("event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT', 'REMINDER')"));
         assertTrue(sql.contains("e.event_type = 'MOBILE_ALERT'"));
         assertTrue(sql.contains("OR (m.enabled = 1 AND LOWER(TRIM(g.param_value)) = 'true')"));
         assertTrue(sql.contains("delivery_status = 'PENDING'"));

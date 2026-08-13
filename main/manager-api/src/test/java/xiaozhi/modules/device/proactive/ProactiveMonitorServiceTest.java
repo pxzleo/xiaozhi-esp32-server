@@ -238,6 +238,20 @@ class ProactiveMonitorServiceTest {
     }
 
     @Test
+    void sharedReminderDoesNotRequireNewsMonitor() {
+        when(paramsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, true))
+                .thenReturn("false");
+        when(monitorDao.probeAndRebaselineIfOffline("device-1")).thenReturn(2);
+        when(monitorDao.selectByDevice("device-1")).thenReturn(List.of());
+        when(proactiveService.getPreferenceByMac(device.getMacAddress())).thenReturn(
+                preference(Set.of(), Set.of()));
+        when(eventDao.selectPendingMonitorEvents("device-1")).thenReturn(List.of(
+                event(EventType.REMINDER, Topic.REMINDER, Priority.HIGH)));
+
+        assertTrue(service.pending("device-1").pending());
+    }
+
+    @Test
     void globalSwitchOffIsReadOnlyInUserViewAndKeepsPerDeviceSettingsEnabled() {
         when(paramsService.getValue(Constant.PROACTIVE_EXTERNAL_MONITORING_ENABLED, true))
                 .thenReturn("false");

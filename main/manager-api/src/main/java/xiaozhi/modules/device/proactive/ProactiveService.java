@@ -16,6 +16,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -75,11 +76,14 @@ public class ProactiveService {
     private final ProactiveGlobalDao globalDao;
     private final ProactiveHabitDao habitDao;
     private final ObjectMapper objectMapper;
+    private final ProactiveDeliveryRoutingService routingService;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public ProactiveService(DeviceDao deviceDao, ProactivePreferenceDao preferenceDao,
             ProactiveEventDao eventDao, ProactiveEventDedupeDao eventDedupeDao,
             ProactiveDeliveryClaimDao deliveryClaimDao,
-            ProactiveGlobalDao globalDao, ProactiveHabitDao habitDao, ObjectMapper objectMapper) {
+            ProactiveGlobalDao globalDao, ProactiveHabitDao habitDao, ObjectMapper objectMapper,
+            ProactiveDeliveryRoutingService routingService) {
         this.deviceDao = deviceDao;
         this.preferenceDao = preferenceDao;
         this.eventDao = eventDao;
@@ -88,6 +92,15 @@ public class ProactiveService {
         this.globalDao = globalDao;
         this.habitDao = habitDao;
         this.objectMapper = objectMapper;
+        this.routingService = routingService;
+    }
+
+    ProactiveService(DeviceDao deviceDao, ProactivePreferenceDao preferenceDao,
+            ProactiveEventDao eventDao, ProactiveEventDedupeDao eventDedupeDao,
+            ProactiveDeliveryClaimDao deliveryClaimDao, ProactiveGlobalDao globalDao,
+            ProactiveHabitDao habitDao, ObjectMapper objectMapper) {
+        this(deviceDao, preferenceDao, eventDao, eventDedupeDao, deliveryClaimDao,
+                globalDao, habitDao, objectMapper, null);
     }
 
     @Transactional
@@ -204,24 +217,33 @@ public class ProactiveService {
             throw new RenException("手机主动事件内部契约无效");
         }
         validateEventPayload(request.getPayload());
+        if (routingService != null) routingService.lockUser(userId);
         List<DeviceEntity> targets = deviceDao.selectMobileAlertTargetsForUpdate(
                 userId, agentId, mobileInstanceId);
-        if (targets.isEmpty() || targets.stream()
-                .noneMatch(device -> device.getMacAddress() != null
-                        && device.getMacAddress().matches("^mob_[0-9a-f]{32}$"))) {
-            throw new RenException("手机主动事件目标设备不存在");
+        if (routingService != null) {
+            Set<String> routed = new HashSet<>(routingService.resolveTargetDeviceIds(userId));
+            targets = targets.stream().filter(target -> routed.contains(target.getId())).toList();
         }
+        DeviceEntity sourceMobile = deviceDao.selectList(new LambdaQueryWrapper<DeviceEntity>()
+                .eq(DeviceEntity::getMacAddress, mobileInstanceId).last("LIMIT 1")).stream()
+                .findFirst().orElseThrow(() -> new RenException("手机主动事件源设备不存在"));
         EventCreateResult mobileResult = null;
         for (DeviceEntity target : targets) {
             request.setMacAddress(target.getMacAddress());
             EventCreateResult result = createRollingWindowEvent(target, request);
-            if (target.getMacAddress() != null
-                    && target.getMacAddress().matches("^mob_[0-9a-f]{32}$")) {
-                if (mobileResult != null) throw new RenException("手机主动事件目标包含多个主手机");
+            if (target.getId().equals(sourceMobile.getId())) {
                 mobileResult = result;
             }
         }
-        if (mobileResult == null) throw new RenException("手机主动事件目标设备不存在");
+        if (mobileResult == null) {
+            request.setMacAddress(sourceMobile.getMacAddress());
+            mobileResult = createRollingWindowEvent(sourceMobile, request);
+            if (mobileResult.created()
+                    && eventDao.dismissRoutingExcluded(sourceMobile.getId(),
+                            mobileResult.authoritativeEventId()) != 1) {
+                throw new RenException("手机主动事件路由审计副本终结失败");
+            }
+        }
         return mobileResult;
     }
 
@@ -230,7 +252,6 @@ public class ProactiveService {
         if (!request.isMonitorTopicValid()) throw new RenException("外界监测事件的topic与event_type不匹配");
         if (!request.isDedupePolicyValid()) throw new RenException("外界监测事件去重策略无效");
         validateEventPayload(request.getPayload());
-        if (deviceDao.selectByIdForUpdate(device.getId()) == null) throw new RenException("设备不存在");
         boolean external = isExternal(request.getEventType());
         if (external) {
             String globalValue = globalDao.selectExternalMonitoringValueForUpdate();
@@ -245,6 +266,31 @@ public class ProactiveService {
                 || !request.getDedupeKey().matches("[A-Za-z0-9:_-]{1,128}"))) {
             throw new RenException("外界监测事件dedupe_key格式无效");
         }
+        List<DeviceEntity> targets = List.of(device);
+        if (routingService != null) {
+            Set<String> targetIds = new HashSet<>(routingService.resolveTargetDeviceIds(device.getUserId()));
+            targets = devicesForUser(device.getUserId()).stream()
+                    .filter(target -> targetIds.contains(target.getId())).toList();
+        } else if (deviceDao.selectByIdForUpdate(device.getId()) == null) {
+            throw new RenException("设备不存在");
+        }
+        EventCreateResult sourceResult = null;
+        EventCreateResult firstResult = null;
+        for (DeviceEntity target : targets) {
+            EventCreateResult result = createEventForDevice(target, request);
+            if (firstResult == null) firstResult = result;
+            if (target.getId().equals(device.getId())) sourceResult = result;
+        }
+        if (sourceResult != null) return sourceResult;
+        EventCreateResult audit = createEventForDevice(device, request);
+        if (audit.created() && eventDao.dismissRoutingExcluded(device.getId(),
+                audit.authoritativeEventId()) != 1) {
+            throw new RenException("主动事件路由审计副本终结失败");
+        }
+        return firstResult == null ? audit : firstResult;
+    }
+
+    private EventCreateResult createEventForDevice(DeviceEntity device, EventUpsert request) {
         if (request.getDedupePolicy() == DedupePolicy.ROLLING_WINDOW) {
             return createRollingWindowEvent(device, request);
         }
@@ -321,6 +367,7 @@ public class ProactiveService {
                 ? request.getDedupeKey() : request.getEventId();
         entity.setDeliveryGroupKey(sha256(request.getEventType().name() + ":" + groupIdentity));
         entity.setDeliveryGroupWindowHours(rollingGroup ? request.getDedupeWindowHours() : 0);
+        entity.setDeliveryMode("MULTICAST");
         entity.setRequiresResponse(request.getRequiresResponse());
         entity.setDeliveryStatus(DeliveryStatus.PENDING.name());
         entity.setOutcome(Outcome.NONE.name());
@@ -376,7 +423,8 @@ public class ProactiveService {
                 target.name(), request.getOutcome().name(), new Date()) != 1) {
             throw new RenException("主动事件状态已变化");
         }
-        if (StringUtils.isNotBlank(current.getDeliveryGroupKey()) && target == DeliveryStatus.DELIVERED) {
+        boolean multicast = "MULTICAST".equals(current.getDeliveryMode());
+        if (!multicast && StringUtils.isNotBlank(current.getDeliveryGroupKey()) && target == DeliveryStatus.DELIVERED) {
             if (source == DeliveryStatus.CLAIMED) {
                 if (deliveryClaimDao.complete(device.getUserId(), current.getDeliveryGroupKey(),
                         claimToken, "DELIVERED", new Date()) != 1) {
@@ -395,7 +443,8 @@ public class ProactiveService {
                     current.getDeliveryGroupKey(), current.getCreatedAt(),
                     current.getDeliveryGroupWindowHours() == null
                             ? 0 : current.getDeliveryGroupWindowHours());
-        } else if (source == DeliveryStatus.CLAIMED && StringUtils.isNotBlank(current.getDeliveryGroupKey())) {
+        } else if (!multicast && source == DeliveryStatus.CLAIMED
+                && StringUtils.isNotBlank(current.getDeliveryGroupKey())) {
             if (deliveryClaimDao.complete(device.getUserId(), current.getDeliveryGroupKey(),
                     claimToken, "FAILED", new Date()) != 1) {
                 throw new RenException("主动事件跨前端终态更新失败");
@@ -416,6 +465,7 @@ public class ProactiveService {
                 && DeliveryStatus.CLAIMED.name().equals(event.getDeliveryStatus())
                 && request.getClaimToken().equals(event.getClaimToken());
         if (!eventClaimed || StringUtils.isBlank(event.getDeliveryGroupKey())) return false;
+        if ("MULTICAST".equals(event.getDeliveryMode())) return true;
         deliveryClaimDao.insertIfAbsent(device.getUserId(), event.getDeliveryGroupKey());
         if (deliveryClaimDao.claim(device.getUserId(), event.getDeliveryGroupKey(), device.getId(),
                 eventId, request.getClaimToken(), event.getCreatedAt(),

@@ -38,6 +38,10 @@ public interface MobileInstanceDao extends BaseMapper<MobileInstanceEntity> {
     MobileInstanceEntity selectCanonicalByInstance(@Param("instanceId") String instanceId);
 
     @Select("SELECT * FROM ai_mobile_instance WHERE user_id=#{userId} "
+            + "AND mobile_instance_id=canonical_instance_id ORDER BY created_at,mobile_instance_id")
+    List<MobileInstanceEntity> selectCanonicalByUser(@Param("userId") Long userId);
+
+    @Select("SELECT * FROM ai_mobile_instance WHERE user_id=#{userId} "
             + "AND canonical_instance_id=#{canonicalId} FOR UPDATE")
     List<MobileInstanceEntity> selectCanonicalGroupForUpdate(@Param("userId") Long userId,
             @Param("canonicalId") String canonicalId);

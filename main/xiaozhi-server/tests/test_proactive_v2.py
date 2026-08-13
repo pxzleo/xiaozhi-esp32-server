@@ -331,6 +331,90 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preference, self.conn.proactive_preferences)
         self.assertEqual(2, update.await_count)
 
+    async def test_successful_schedule_create_registers_full_authoritative_task(self):
+        self.conn.common_config = {"server": {"timezone_offset": 8}}
+        task = {
+            "id": 17,
+            "kind": "reminder",
+            "repeat": "weekly",
+            "label": "喝水",
+            "trigger_at": "2026-08-13T09:30:00",
+            "weekdays": [1, 4],
+        }
+        with patch.object(
+            mcp_handler, "register_shared_schedule", AsyncMock(return_value={"id": "schedule"})
+        ) as register:
+            mcp_handler.handle_successful_device_tool_result(
+                self.conn,
+                "self.schedule.create",
+                {"action": "RESPONSE", "data": {"task": task}},
+            )
+            await asyncio.gather(*self.conn._proactive_background_tasks)
+        register.assert_awaited_once_with({
+            "source_mac_address": "AA:BB",
+            "source_schedule_id": "17",
+            "kind": "reminder",
+            "label": "喝水",
+            "scheduled_at": 1_786_584_600_000,
+            "recurrence": "weekly",
+            "weekdays": [1, 4],
+            "sections": [],
+            "location": None,
+        })
+
+    async def test_schedule_trigger_routes_before_local_speech_and_completes_delivery(self):
+        self.conn.common_config = {"server": {"timezone_offset": 8}}
+        params = {
+            "version": 1,
+            "id": 7,
+            "kind": "alarm",
+            "label": "起床",
+            "triggered_at": "2026-08-13T09:30:00",
+            "speak": True,
+        }
+        schedule = {"id": "4d8b9aec-1e54-4d3e-a9f4-c37a7f21c995"}
+        with patch.object(
+            mcp_handler, "trigger_shared_schedule_by_source", AsyncMock(return_value=schedule)
+        ) as trigger, patch.object(
+            mcp_handler, "claim_proactive_event", AsyncMock(return_value=True)
+        ) as claim, patch.object(
+            mcp_handler, "_speak_proactive_notification", AsyncMock(side_effect=_completed_speech)
+        ) as speak, patch.object(
+            mcp_handler, "update_proactive_event_status", AsyncMock()
+        ) as update:
+            await mcp_handler._handle_schedule_triggered_notification(self.conn, params)
+            await asyncio.gather(*self.conn._proactive_audit_tasks)
+        event_id = "schedule-4d8b9aec-1e54-4d3e-a9f4-c37a7f21c995-1786584600000"
+        trigger.assert_awaited_once_with({
+            "source_mac_address": "AA:BB",
+            "source_schedule_id": "7",
+            "kind": "alarm",
+            "label": "起床",
+            "triggered_at": 1_786_584_600_000,
+        })
+        claim.assert_awaited_once()
+        self.assertEqual(event_id, claim.await_args.args[0])
+        speak.assert_awaited_once()
+        self.assertEqual("delivered", update.await_args.args[2])
+
+    async def test_unselected_schedule_source_does_not_speak(self):
+        self.conn.common_config = {"server": {"timezone_offset": 8}}
+        params = {
+            "version": 1, "id": 7, "kind": "reminder", "label": "喝水",
+            "triggered_at": "2026-08-13T09:30:00", "speak": True,
+        }
+        with patch.object(
+            mcp_handler,
+            "trigger_shared_schedule_by_source",
+            AsyncMock(return_value={"id": "4d8b9aec-1e54-4d3e-a9f4-c37a7f21c995"}),
+        ), patch.object(
+            mcp_handler, "claim_proactive_event", AsyncMock(return_value=False)
+        ), patch.object(
+            mcp_handler, "_speak_proactive_notification", AsyncMock()
+        ) as speak:
+            await mcp_handler._handle_schedule_triggered_notification(self.conn, params)
+        speak.assert_not_awaited()
+
     async def test_successful_schedule_completion_updates_follow_up_outcome(self):
         self.conn._current_followup_audit_event_id = "event-1"
         self.conn._current_followup_source_id = 7
@@ -339,7 +423,9 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(
             mcp_handler, "update_proactive_event_status", AsyncMock()
-        ) as update:
+        ) as update, patch.object(
+            mcp_handler, "action_shared_schedule_by_source", AsyncMock(return_value={})
+        ) as action:
             mcp_handler.handle_successful_device_tool_result(
                 self.conn,
                 "self.schedule.complete_recent",
@@ -349,6 +435,50 @@ class ProactiveNotificationV2Test(unittest.IsolatedAsyncioTestCase):
         update.assert_awaited_once_with(
             "event-1", "AA:BB", "delivered", "completed"
         )
+        action.assert_awaited_once_with({
+            "source_mac_address": "AA:BB",
+            "source_schedule_id": "7",
+            "action": "complete",
+            "snoozed_until": None,
+        })
+
+    async def test_successful_schedule_stop_syncs_global_action(self):
+        with patch.object(
+            mcp_handler, "action_shared_schedule_by_source", AsyncMock(return_value={})
+        ) as action:
+            mcp_handler.handle_successful_device_tool_result(
+                self.conn,
+                "self.schedule.stop",
+                {"action": "RESPONSE", "data": {"stopped_id": 9, "kind": "alarm"}},
+            )
+            await asyncio.gather(*self.conn._proactive_background_tasks)
+        action.assert_awaited_once_with({
+            "source_mac_address": "AA:BB",
+            "source_schedule_id": "9",
+            "action": "stop",
+            "snoozed_until": None,
+        })
+
+    async def test_successful_schedule_snooze_syncs_global_time(self):
+        self.conn.common_config = {"server": {"timezone_offset": 8}}
+        with patch.object(
+            mcp_handler, "action_shared_schedule_by_source", AsyncMock(return_value={})
+        ) as action:
+            mcp_handler.handle_successful_device_tool_result(
+                self.conn,
+                "self.schedule.snooze",
+                {"action": "RESPONSE", "data": {
+                    "source_id": 9,
+                    "task": {"trigger_at": "2026-08-13T09:35:00"},
+                }},
+            )
+            await asyncio.gather(*self.conn._proactive_background_tasks)
+        action.assert_awaited_once_with({
+            "source_mac_address": "AA:BB",
+            "source_schedule_id": "9",
+            "action": "snooze",
+            "snoozed_until": 1_786_584_900_000,
+        })
 
     async def test_successful_schedule_dismiss_uses_real_tool_name(self):
         self.conn._current_followup_audit_event_id = "event-1"
@@ -1278,6 +1408,22 @@ class ManageApiProactiveClientTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(0.5, call.kwargs["timeout"])
             self.assertEqual(1, call.kwargs["_max_retries"])
             self.assertEqual(0.1, call.kwargs["_retry_delay"])
+
+    async def test_shared_schedule_wrappers_use_server_secret_endpoints(self):
+        client = SimpleNamespace(_execute_async_request=AsyncMock(return_value={"id": "s"}))
+        with patch.object(manage_api_client.ManageApiClient, "_instance", client):
+            await manage_api_client.register_shared_schedule({"source_schedule_id": "7"})
+            await manage_api_client.trigger_shared_schedule_by_source({"source_schedule_id": "7"})
+            await manage_api_client.action_shared_schedule_by_source({"source_schedule_id": "7"})
+        self.assertEqual("/config/proactive/schedules", client._execute_async_request.await_args_list[0].args[1])
+        self.assertEqual(
+            "/config/proactive/schedules/trigger-by-source",
+            client._execute_async_request.await_args_list[1].args[1],
+        )
+        self.assertEqual(
+            "/config/proactive/schedules/action-by-source",
+            client._execute_async_request.await_args_list[2].args[1],
+        )
 
 
 class ContextSuggestionTest(unittest.TestCase):

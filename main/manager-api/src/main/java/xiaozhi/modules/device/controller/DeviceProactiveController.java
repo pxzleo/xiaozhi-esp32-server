@@ -31,6 +31,9 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 import xiaozhi.modules.device.proactive.ProactiveEnums;
 import xiaozhi.modules.device.proactive.ProactiveService;
 import xiaozhi.modules.device.proactive.ProactiveMonitorService;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingService;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.RouteUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.RouteView;
 import xiaozhi.modules.security.user.SecurityUser;
 
 @RestController
@@ -40,10 +43,23 @@ import xiaozhi.modules.security.user.SecurityUser;
 public class DeviceProactiveController {
     private final ProactiveService service;
     private final ProactiveMonitorService monitorService;
+    private final ProactiveDeliveryRoutingService routingService;
 
-    public DeviceProactiveController(ProactiveService service, ProactiveMonitorService monitorService) {
+    public DeviceProactiveController(ProactiveService service, ProactiveMonitorService monitorService,
+            ProactiveDeliveryRoutingService routingService) {
         this.service = service;
         this.monitorService = monitorService;
+        this.routingService = routingService;
+    }
+
+    @GetMapping("/delivery-routing")
+    public Result<RouteView> deliveryRouting() {
+        return new Result<RouteView>().ok(routingService.get(SecurityUser.getUserId()));
+    }
+
+    @PutMapping("/delivery-routing")
+    public Result<RouteView> updateDeliveryRouting(@Valid @RequestBody RouteUpdate request) {
+        return new Result<RouteView>().ok(routingService.update(SecurityUser.getUserId(), request));
     }
 
     @GetMapping("/monitors/{deviceId}")

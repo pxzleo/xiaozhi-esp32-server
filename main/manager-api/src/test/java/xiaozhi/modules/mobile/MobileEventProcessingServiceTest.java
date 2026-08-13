@@ -32,6 +32,7 @@ class MobileEventProcessingServiceTest {
     private MobileEventProcessingTransactionService transactions;
     private MobileEventProcessingService service;
     private MobileAlertDecisionPolicy decisionPolicy;
+    private xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingService routingService;
 
     @BeforeEach
     void setUp() {
@@ -40,8 +41,9 @@ class MobileEventProcessingServiceTest {
         classifier = mock(ProactiveMonitorService.class);
         proactive = mock(ProactiveService.class);
         decisionPolicy = new MobileAlertDecisionPolicy();
+        routingService = mock(xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingService.class);
         transactions = new MobileEventProcessingTransactionService(
-                eventDao, instanceDao, proactive, decisionPolicy);
+                eventDao, instanceDao, proactive, decisionPolicy, routingService);
         service = new MobileEventProcessingService(
                 eventDao, classifier, transactions, new ObjectMapper(), decisionPolicy);
         when(eventDao.finishIgnored(any(), any(), any(), any())).thenReturn(1);

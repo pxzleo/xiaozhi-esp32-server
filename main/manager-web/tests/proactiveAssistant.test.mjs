@@ -11,6 +11,7 @@ import {
   buildEventQuery,
   buildMobileEventQuery,
   classifierModelId,
+  createDeliveryRoutingForm,
   createMonitorsForm,
   createPreferenceForm,
   inheritedWeatherLocation,
@@ -22,16 +23,77 @@ import {
   monitorGlobalStatus,
   monitorsPayload,
   preferencePayload,
+  deliveryRoutingPayload,
   recoverMonitorsFailure,
   recoverExternalMonitoringFailure,
   recoverPreferenceFailure,
   validateMonitors,
   validatePreference,
+  validateDeliveryRouting,
   validClassifierModelId,
   validMobileAlertSettings,
   externalMonitoringSetting,
   externalMonitoringEditable,
 } from '../src/utils/proactiveAssistant.mjs';
+
+test('normalizes account delivery routing without inventing device or place ids', () => {
+  const form = createDeliveryRoutingForm({
+    default_device_ids: ['device-speaker'],
+    location_authority_mobile_instance_id: 'mob_0123456789abcdef0123456789abcdef',
+    devices: [
+      { device_id: 'device-phone', mac_address: 'mob_0123456789abcdef0123456789abcdef', alias: '手机', terminal_type: 'mobile', mobile_instance_id: 'mob_0123456789abcdef0123456789abcdef', fixed_place_id: null },
+      { device_id: 'device-speaker', mac_address: 'AA:BB', alias: '客厅音箱', terminal_type: 'speaker', fixed_place_id: 'place_12345678' },
+    ],
+    places: [{ place_id: 'place_12345678', place_name: '家', device_ids: ['device-phone', 'device-speaker'] }],
+    active_place_id: 'place_12345678',
+    location_observed_at: '2026-08-13T01:00:00Z',
+    version: 3,
+  });
+
+  assert.deepEqual(form.default_device_ids, ['device-speaker']);
+  assert.equal(form.location_authority_mobile_instance_id, 'mob_0123456789abcdef0123456789abcdef');
+  assert.equal(form.devices[0].mobile_instance_id, 'mob_0123456789abcdef0123456789abcdef');
+  assert.equal(form.devices[1].fixed_place_id, 'place_12345678');
+  assert.deepEqual(form.places[0].device_ids, ['device-phone', 'device-speaker']);
+  assert.equal(form.version, 3);
+  assert.equal(validateDeliveryRouting(form), '');
+});
+
+test('defaults account delivery to every returned terminal and builds exact CAS payload', () => {
+  const form = createDeliveryRoutingForm({
+    devices: [
+      { device_id: 'device-phone', terminal_type: 'mobile' },
+      { device_id: 'device-speaker', terminal_type: 'speaker' },
+    ],
+    places: [],
+    version: 0,
+  });
+  assert.deepEqual(form.default_device_ids, ['device-phone', 'device-speaker']);
+  assert.deepEqual(deliveryRoutingPayload(form), {
+    default_device_ids: ['device-phone', 'device-speaker'],
+    location_authority_mobile_instance_id: null,
+    devices: [
+      { device_id: 'device-phone', fixed_place_id: null },
+      { device_id: 'device-speaker', fixed_place_id: null },
+    ],
+    places: [],
+    version: 0,
+  });
+});
+
+test('rejects unknown terminals, invalid places and stale routing shapes before save', () => {
+  const base = createDeliveryRoutingForm({
+    default_device_ids: ['device-phone'],
+    devices: [{ device_id: 'device-phone', terminal_type: 'mobile' }],
+    places: [{ place_id: 'place_12345678', place_name: '家', device_ids: ['device-phone'] }],
+    version: 1,
+  });
+  assert.equal(validateDeliveryRouting({ ...base, default_device_ids: ['unknown'] }), 'devices');
+  assert.equal(validateDeliveryRouting({ ...base, places: [{ ...base.places[0], place_id: 'home' }] }), 'places');
+  assert.equal(validateDeliveryRouting({ ...base, places: [{ ...base.places[0], device_ids: ['unknown'] }] }), 'devices');
+  assert.equal(validateDeliveryRouting({ ...base, devices: [{ ...base.devices[0], fixed_place_id: 'place_deadbeef' }] }), 'places');
+  assert.equal(validateDeliveryRouting({ ...base, version: -1 }), 'version');
+});
 
 test('strictly validates mobile alert sensitivity and scope', () => {
   assert.equal(validMobileAlertSettings({ sensitivity: 'balanced', categories: ['parcel', 'security'] }), true);

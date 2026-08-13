@@ -87,6 +87,120 @@
         </div>
       </el-tab-pane>
 
+      <el-tab-pane :label="$t('proactive.routing.title')" name="routing">
+        <div v-loading="routingLoading" class="section-body routing-body">
+          <el-alert v-if="routingError" :title="routingError" type="error" :closable="false" show-icon />
+          <div class="routing-intro">
+            <i class="el-icon-location-outline" aria-hidden="true"></i>
+            <div>
+              <strong>{{ $t('proactive.routing.introTitle') }}</strong>
+              <p>{{ $t('proactive.routing.introHelp') }}</p>
+              <p>{{ $t('proactive.routing.futureOnly') }}</p>
+            </div>
+          </div>
+
+          <template v-if="routingLoaded">
+            <section class="routing-section">
+              <div class="routing-heading-row">
+                <div>
+                  <h3>{{ $t('proactive.routing.defaults') }}</h3>
+                  <p>{{ $t('proactive.routing.defaultsHelp') }}</p>
+                </div>
+                <div class="routing-quick-actions">
+                  <el-button type="text" size="small" @click="selectAllDefaultDevices">
+                    {{ $t('proactive.routing.selectAll') }}
+                  </el-button>
+                  <el-button type="text" size="small" @click="clearDefaultDevices">
+                    {{ $t('proactive.routing.clearAll') }}
+                  </el-button>
+                </div>
+              </div>
+              <el-alert v-if="!routingForm.devices.length" :title="$t('proactive.routing.noDevices')"
+                type="info" :closable="false" show-icon />
+              <el-checkbox-group v-else v-model="routingForm.default_device_ids" class="terminal-choice-list">
+                <el-checkbox v-for="terminal in routingForm.devices" :key="terminal.device_id"
+                  :label="terminal.device_id" class="terminal-choice">
+                  <span class="terminal-name">{{ terminalLabel(terminal) }}</span>
+                  <el-tag size="mini" type="info">{{ terminalTypeLabel(terminal) }}</el-tag>
+                </el-checkbox>
+              </el-checkbox-group>
+              <div v-if="!routingForm.default_device_ids.length" class="field-help routing-warning">
+                {{ $t('proactive.routing.emptyDefaultsHelp') }}
+              </div>
+            </section>
+
+            <section class="routing-section">
+              <div class="routing-heading-row">
+                <div>
+                  <h3>{{ $t('proactive.routing.places') }}</h3>
+                  <p>{{ $t('proactive.routing.placesHelp') }}</p>
+                </div>
+                <div v-if="routingForm.active_place_id" class="active-place">
+                  <span>{{ $t('proactive.routing.activePlace') }}</span>
+                  <strong>{{ placeName(routingForm.active_place_id) }}</strong>
+                </div>
+              </div>
+              <el-alert v-if="!routingForm.places.length" :title="$t('proactive.routing.noPlaces')"
+                type="info" :closable="false" show-icon />
+              <div v-else class="place-route-list">
+                <div v-for="place in routingForm.places" :key="place.place_id" class="place-route-row">
+                  <div class="place-route-name">
+                    <i class="el-icon-map-location" aria-hidden="true"></i>
+                    <div><strong>{{ place.place_name }}</strong><span>{{ place.place_id }}</span></div>
+                  </div>
+                  <el-select v-model="place.device_ids" multiple collapse-tags
+                    :placeholder="$t('proactive.routing.chooseDevices')" class="route-device-select">
+                    <el-option v-for="terminal in routingForm.devices" :key="terminal.device_id"
+                      :label="terminalLabel(terminal)" :value="terminal.device_id" />
+                  </el-select>
+                </div>
+              </div>
+              <div class="field-help">{{ $t('proactive.routing.locationDoesNotNotify') }}</div>
+            </section>
+
+            <section v-if="fixedTerminals.length" class="routing-section">
+              <div class="routing-heading-row">
+                <div>
+                  <h3>{{ $t('proactive.routing.fixedDevices') }}</h3>
+                  <p>{{ $t('proactive.routing.fixedDevicesHelp') }}</p>
+                </div>
+              </div>
+              <div class="fixed-device-list">
+                <div v-for="terminal in fixedTerminals" :key="terminal.device_id" class="fixed-device-row">
+                  <span>{{ terminalLabel(terminal) }}</span>
+                  <el-select v-model="terminal.fixed_place_id" clearable
+                    :placeholder="$t('proactive.routing.noFixedPlace')">
+                    <el-option v-for="place in routingForm.places" :key="place.place_id"
+                      :label="place.place_name" :value="place.place_id" />
+                  </el-select>
+                </div>
+              </div>
+            </section>
+
+            <section class="routing-section">
+              <div class="routing-heading-row">
+                <div>
+                  <h3>{{ $t('proactive.routing.locationAuthority') }}</h3>
+                  <p>{{ $t('proactive.routing.locationAuthorityHelp') }}</p>
+                </div>
+              </div>
+              <el-select v-model="routingForm.location_authority_mobile_instance_id" clearable
+                :placeholder="$t('proactive.routing.noLocationAuthority')" class="route-device-select">
+                <el-option v-for="terminal in mobileTerminals" :key="terminal.mobile_instance_id"
+                  :label="terminalLabel(terminal)" :value="terminal.mobile_instance_id" />
+              </el-select>
+            </section>
+
+            <div class="settings-actions routing-actions">
+              <el-button type="primary" size="small" :loading="routingSaving"
+                :disabled="routingLoading || !routingForm.devices.length" @click="saveDeliveryRouting">
+                {{ $t('proactive.routing.save') }}
+              </el-button>
+            </div>
+          </template>
+        </div>
+      </el-tab-pane>
+
       <el-tab-pane :label="$t('proactive.externalMonitors')" name="monitors">
         <div v-loading="monitorsLoading" class="section-body monitor-body">
           <el-alert v-if="monitorsError" :title="monitorsError" type="error" :closable="false" show-icon />
@@ -390,6 +504,7 @@ import {
   applyMonitorPreset,
   belongsToDevice,
   createMonitorsForm,
+  createDeliveryRoutingForm,
   createPreferenceForm,
   defaultDailyLimit,
   listBelongsToDevice,
@@ -399,12 +514,14 @@ import {
   monitorGlobalStatus,
   monitorsPayload,
   preferencePayload,
+  deliveryRoutingPayload,
   recoverMonitorsFailure,
   recoverPreferenceFailure,
   inheritedWeatherLocation,
   inheritedWeatherLocationError,
   validateMonitors,
   validatePreference,
+  validateDeliveryRouting,
   validMobileAlertSettings,
 } from '@/utils/proactiveAssistant.mjs';
 
@@ -425,6 +542,11 @@ export default {
       preferenceLoading: false,
       saving: false,
       silencing: false,
+      routingForm: createDeliveryRoutingForm(),
+      routingLoaded: false,
+      routingLoading: false,
+      routingSaving: false,
+      routingError: '',
       monitors: {},
       monitorLoadedDeviceId: '',
       monitorForm: createMonitorsForm(),
@@ -497,6 +619,13 @@ export default {
     monitorGlobalStatusText() {
       return this.$t(`proactive.monitor.globalStatus.${monitorGlobalStatus(this.monitors)}`);
     },
+    fixedTerminals() {
+      return this.routingForm.devices.filter(terminal => terminal.terminal_type !== 'mobile');
+    },
+    mobileTerminals() {
+      return this.routingForm.devices.filter(terminal => terminal.terminal_type === 'mobile'
+        && terminal.mobile_instance_id);
+    },
   },
   watch: {
     visible(isVisible) {
@@ -520,6 +649,11 @@ export default {
       this.preferenceLoading = false;
       this.saving = false;
       this.silencing = false;
+      this.routingForm = createDeliveryRoutingForm();
+      this.routingLoaded = false;
+      this.routingLoading = false;
+      this.routingSaving = false;
+      this.routingError = '';
       this.monitors = {};
       this.monitorLoadedDeviceId = '';
       this.monitorForm = createMonitorsForm();
@@ -564,6 +698,7 @@ export default {
       this.$emit('update:visible', false);
     },
     handleTabChange() {
+      if (this.activeTab === 'routing') this.loadDeliveryRouting();
       if (this.activeTab === 'monitors') {
         this.loadMonitors();
       }
@@ -625,6 +760,82 @@ export default {
     clearQuietHours() {
       this.form.quiet_start = '';
       this.form.quiet_end = '';
+    },
+    loadDeliveryRouting() {
+      const request = this.requestGate.begin('routing');
+      if (!request.deviceId) return;
+      this.routingLoading = true;
+      this.routingLoaded = false;
+      this.routingError = '';
+      Api.proactive.getDeliveryRouting(response => {
+        if (!this.requestGate.isCurrent(request)) return;
+        const routing = this.responseData(response);
+        const form = createDeliveryRoutingForm(routing || {});
+        const invalidField = validateDeliveryRouting(form);
+        if (invalidField) {
+          this.handleRoutingFailure(null, true);
+          return;
+        }
+        this.routingForm = form;
+        this.routingLoading = false;
+        this.routingLoaded = true;
+      }, error => {
+        if (!this.requestGate.isCurrent(request)) return;
+        this.handleRoutingFailure(error, true);
+      });
+    },
+    handleRoutingFailure(error, clearState = false) {
+      this.routingLoading = false;
+      this.routingSaving = false;
+      if (clearState) {
+        this.routingForm = createDeliveryRoutingForm();
+        this.routingLoaded = false;
+      }
+      this.routingError = this.errorMessage(error, clearState
+        ? 'proactive.routing.loadFailed' : 'proactive.routing.saveFailed');
+      this.$message.error(this.routingError);
+    },
+    saveDeliveryRouting() {
+      if (this.routingSaving || !this.routingLoaded) return;
+      const invalidField = validateDeliveryRouting(this.routingForm);
+      if (invalidField) {
+        this.$message.warning(this.$t(`proactive.routing.validation.${invalidField}`));
+        return;
+      }
+      const request = this.requestGate.begin('routing');
+      this.routingSaving = true;
+      Api.proactive.updateDeliveryRouting(deliveryRoutingPayload(this.routingForm), response => {
+        if (!this.requestGate.isCurrent(request)) return;
+        const form = createDeliveryRoutingForm(this.responseData(response) || {});
+        const invalidField = validateDeliveryRouting(form);
+        if (invalidField) {
+          this.handleRoutingFailure(null);
+          return;
+        }
+        this.routingForm = form;
+        this.routingSaving = false;
+        this.routingError = '';
+        this.$message.success(this.$t('proactive.routing.saveSuccess'));
+      }, error => {
+        if (!this.requestGate.isCurrent(request)) return;
+        this.handleRoutingFailure(error);
+      });
+    },
+    selectAllDefaultDevices() {
+      this.routingForm.default_device_ids = this.routingForm.devices.map(terminal => terminal.device_id);
+    },
+    clearDefaultDevices() {
+      this.routingForm.default_device_ids = [];
+    },
+    terminalLabel(terminal) {
+      return terminal.alias || terminal.mac_address || terminal.device_id;
+    },
+    terminalTypeLabel(terminal) {
+      return this.$t(`proactive.routing.terminalType.${terminal.terminal_type}`);
+    },
+    placeName(placeId) {
+      const place = this.routingForm.places.find(item => item.place_id === placeId);
+      return place ? place.place_name : placeId;
     },
     loadMonitors() {
       const request = this.requestGate.begin('monitors');
@@ -1031,6 +1242,55 @@ export default {
 .threshold-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .threshold-grid .el-form-item { margin-right: 18px; }
 .monitor-actions { margin-top: 18px; }
+.routing-body { position: relative; padding: 4px 12px 0 0; }
+.routing-intro {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 24px;
+  padding: 14px 16px;
+  border-left: 3px solid #409eff;
+  background: #f5f9ff;
+  color: #303133;
+}
+.routing-intro > i { margin-top: 2px; color: #409eff; font-size: 22px; }
+.routing-intro p, .routing-heading-row p { margin: 4px 0 0; color: #909399; font-size: 12px; line-height: 18px; }
+.routing-section { padding: 0 0 22px; }
+.routing-section + .routing-section { padding-top: 20px; border-top: 1px solid #ebeef5; }
+.routing-heading-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 14px; }
+.routing-heading-row h3 { margin: 0; color: #303133; font-size: 15px; line-height: 22px; }
+.routing-quick-actions { flex: 0 0 auto; }
+.terminal-choice-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 28px; }
+.terminal-choice {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 0 !important;
+  padding: 11px 0;
+  border-bottom: 1px solid #f0f2f5;
+}
+.terminal-choice ::v-deep .el-checkbox__label { display: inline-flex; align-items: center; min-width: 0; gap: 8px; }
+.terminal-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #303133; }
+.routing-warning { color: #e6a23c; }
+.active-place { display: flex; align-items: baseline; gap: 8px; color: #909399; font-size: 12px; }
+.active-place strong { color: #409eff; font-size: 14px; }
+.place-route-list, .fixed-device-list { border-top: 1px solid #ebeef5; }
+.place-route-row, .fixed-device-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(280px, 1.5fr);
+  align-items: center;
+  gap: 22px;
+  padding: 14px 0;
+  border-bottom: 1px solid #ebeef5;
+  transition: background-color 0.16s ease;
+}
+.place-route-row:hover, .fixed-device-row:hover { background: #fafcff; }
+.place-route-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.place-route-name > i { color: #409eff; font-size: 18px; }
+.place-route-name strong, .place-route-name span { display: block; }
+.place-route-name span { margin-top: 3px; color: #a4a9b0; font-size: 11px; }
+.route-device-select, .fixed-device-row .el-select { width: 100%; }
+.fixed-device-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #303133; }
+.routing-actions { padding-left: 0; }
 
 .proactive-dialog ::v-deep .el-dialog {
   max-width: 1120px;
@@ -1055,6 +1315,11 @@ export default {
   .settings-actions { padding-left: 0; }
   .monitor-status-grid { grid-template-columns: 1fr; margin-left: 0; }
   .monitor-advanced { margin-left: 0; }
+  .routing-body { padding-right: 0; }
+  .terminal-choice-list { grid-template-columns: 1fr; }
+  .routing-heading-row { display: block; }
+  .routing-quick-actions, .active-place { margin-top: 8px; }
+  .place-route-row, .fixed-device-row { grid-template-columns: 1fr; gap: 9px; }
   .threshold-grid { grid-template-columns: 1fr; }
   .inline-help { display: block; margin: 4px 0 0; }
   .filter-row .el-select { flex: 1 1 180px; width: auto; }

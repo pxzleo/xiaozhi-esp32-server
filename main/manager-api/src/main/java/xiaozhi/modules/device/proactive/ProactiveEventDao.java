@@ -18,7 +18,7 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             SET delivery_status = 'PENDING', claim_token = NULL, claimed_at = NULL,
                 updated_at = CURRENT_TIMESTAMP(3)
             WHERE device_id = #{deviceId}
-              AND event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT')
+              AND event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT', 'REMINDER')
               AND delivery_status = 'CLAIMED'
               AND (claimed_at IS NULL OR claimed_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))
               AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP(3))
@@ -44,11 +44,11 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             INSERT IGNORE INTO ai_device_proactive_event
                 (device_id, mac_address, event_id, topic, priority, reason, event_type, payload,
                  created_at, expires_at, dedupe_key, delivery_group_key, delivery_group_window_hours,
-                 requires_response, delivery_status, outcome, updated_at)
+                 delivery_mode, requires_response, delivery_status, outcome, updated_at)
             VALUES (#{e.deviceId}, #{e.macAddress}, #{e.eventId}, #{e.topic}, #{e.priority}, #{e.reason},
                     #{e.eventType}, CAST(#{e.payload} AS JSON), #{e.createdAt}, #{e.expiresAt}, #{e.dedupeKey},
-                    #{e.deliveryGroupKey}, #{e.deliveryGroupWindowHours}, #{e.requiresResponse},
-                    #{e.deliveryStatus}, #{e.outcome}, #{e.updatedAt})
+                    #{e.deliveryGroupKey}, #{e.deliveryGroupWindowHours}, #{e.deliveryMode},
+                    #{e.requiresResponse}, #{e.deliveryStatus}, #{e.outcome}, #{e.updatedAt})
             """)
     int insertIfAbsent(@Param("e") ProactiveEventEntity event);
 
@@ -87,7 +87,8 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
                 e.updated_at = CURRENT_TIMESTAMP(3)
             WHERE e.device_id = #{deviceId} AND e.event_id = #{eventId}
               AND (e.expires_at IS NULL OR e.expires_at > CURRENT_TIMESTAMP(3))
-              AND (e.event_type NOT IN ('WEATHER_ALERT', 'NEWS_ALERT')
+              AND (e.delivery_mode='MULTICAST'
+                   OR e.event_type NOT IN ('WEATHER_ALERT', 'NEWS_ALERT')
                    OR (m.enabled = 1 AND LOWER(TRIM(g.param_value)) = 'true'))
               AND (e.delivery_status = 'PENDING'
                    OR (e.delivery_status = 'CLAIMED' AND e.claim_token = #{claimToken})
@@ -106,6 +107,24 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             """)
     int releaseClaim(@Param("deviceId") String deviceId, @Param("eventId") String eventId,
             @Param("claimToken") String claimToken);
+
+    @Update("UPDATE ai_device_proactive_event SET delivery_status='DISMISSED',outcome='DISMISSED',"
+            + "updated_at=CURRENT_TIMESTAMP(3) WHERE device_id=#{deviceId} AND event_id=#{eventId} "
+            + "AND delivery_mode='MULTICAST' AND delivery_status='PENDING'")
+    int dismissRoutingExcluded(@Param("deviceId") String deviceId,
+            @Param("eventId") String eventId);
+
+    @Update("""
+            UPDATE ai_device_proactive_event e
+            INNER JOIN ai_device d ON d.id=e.device_id AND d.user_id=#{userId}
+            SET e.delivery_status='DISMISSED',e.outcome='DISMISSED',e.claim_token=NULL,
+                e.claimed_at=NULL,e.updated_at=CURRENT_TIMESTAMP(3)
+            WHERE e.delivery_mode='MULTICAST' AND e.event_type='REMINDER'
+              AND JSON_UNQUOTE(JSON_EXTRACT(e.payload,'$.reference_id'))=#{scheduleId}
+              AND e.delivery_status IN ('PENDING','CLAIMED')
+            """)
+    int dismissActiveScheduleEvents(@Param("userId") Long userId,
+            @Param("scheduleId") String scheduleId);
 
     @Update("""
             UPDATE ai_device_proactive_event e
@@ -141,7 +160,8 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             FROM ai_device_proactive_event e
             INNER JOIN ai_device d ON d.id = e.device_id AND d.user_id = #{userId}
             LEFT JOIN ai_proactive_delivery_claim dc
-              ON dc.user_id=d.user_id AND dc.delivery_group_key=e.delivery_group_key
+              ON e.delivery_mode='LEGACY_COMPETE'
+             AND dc.user_id=d.user_id AND dc.delivery_group_key=e.delivery_group_key
             <where>
               <if test="deviceId != null">AND (e.device_id = #{deviceId} OR e.device_id IN (
                 SELECT alias.device_id FROM ai_mobile_instance alias
@@ -179,7 +199,8 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
             SELECT COUNT(*) FROM ai_device_proactive_event e
             INNER JOIN ai_device d ON d.id = e.device_id AND d.user_id = #{userId}
             LEFT JOIN ai_proactive_delivery_claim dc
-              ON dc.user_id=d.user_id AND dc.delivery_group_key=e.delivery_group_key
+              ON e.delivery_mode='LEGACY_COMPETE'
+             AND dc.user_id=d.user_id AND dc.delivery_group_key=e.delivery_group_key
             <where>
               <if test="deviceId != null">AND (e.device_id = #{deviceId} OR e.device_id IN (
                 SELECT alias.device_id FROM ai_mobile_instance alias
@@ -224,14 +245,15 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
              AND LOWER(TRIM(g.param_value)) = 'true'
             INNER JOIN ai_device d ON d.id = e.device_id
             LEFT JOIN ai_proactive_delivery_claim dc
-              ON dc.user_id = d.user_id AND dc.delivery_group_key = e.delivery_group_key
+              ON e.delivery_mode='LEGACY_COMPETE'
+             AND dc.user_id = d.user_id AND dc.delivery_group_key = e.delivery_group_key
             WHERE e.device_id = #{deviceId}
-              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT')
+              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT', 'REMINDER')
               AND (e.expires_at IS NULL OR e.expires_at > CURRENT_TIMESTAMP(3))
               AND e.delivery_status = 'PENDING'
-              AND (e.event_type = 'MOBILE_ALERT'
+              AND (e.delivery_mode='MULTICAST' OR e.event_type = 'MOBILE_ALERT'
                    OR (m.enabled = 1 AND LOWER(TRIM(g.param_value)) = 'true'))
-              AND (dc.user_id IS NULL OR dc.delivery_status = 'FAILED'
+              AND (e.delivery_mode='MULTICAST' OR dc.user_id IS NULL OR dc.delivery_status = 'FAILED'
                    OR (dc.delivery_status = 'CLAIMED'
                        AND (dc.claimed_at IS NULL OR dc.claimed_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND)))
                    OR (dc.delivery_status = 'DELIVERED' AND e.delivery_group_window_hours > 0
@@ -258,10 +280,10 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
               ON g.param_code = 'proactive.external_monitoring_enabled'
              AND LOWER(TRIM(g.param_value)) = 'true'
             WHERE e.mac_address = #{macAddress} AND e.event_id = #{eventId}
-              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT')
+              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT', 'REMINDER')
               AND e.delivery_status IN ('PENDING','CLAIMED')
               AND (e.expires_at IS NULL OR e.expires_at > CURRENT_TIMESTAMP(3))
-              AND (e.event_type = 'MOBILE_ALERT'
+              AND (e.event_type IN ('MOBILE_ALERT', 'REMINDER')
                    OR (m.enabled = 1 AND LOWER(TRIM(g.param_value)) = 'true'))
             """)
     ProactiveEventEntity selectMonitorEventByMacAndEventId(@Param("macAddress") String macAddress,
@@ -270,7 +292,7 @@ public interface ProactiveEventDao extends BaseMapper<ProactiveEventEntity> {
     @Select("""
             SELECT e.* FROM ai_device_proactive_event e
             WHERE e.mac_address = #{macAddress} AND e.event_id = #{eventId}
-              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT')
+              AND e.event_type IN ('WEATHER_ALERT', 'NEWS_ALERT', 'MOBILE_ALERT', 'REMINDER')
               AND e.claim_token = #{claimToken}
               AND ((e.delivery_status = 'CLAIMED'
                     AND e.claimed_at >= DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 180 SECOND))

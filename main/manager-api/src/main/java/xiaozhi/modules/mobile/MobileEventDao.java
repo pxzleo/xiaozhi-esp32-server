@@ -220,7 +220,8 @@ public interface MobileEventDao {
                 ON canonical.mobile_instance_id=mi.canonical_instance_id
             LEFT JOIN ai_device_proactive_event p ON p.device_id=canonical.device_id
                 AND p.event_id=e.proactive_event_id
-            LEFT JOIN ai_proactive_delivery_claim dc ON dc.user_id=mi.user_id
+            LEFT JOIN ai_proactive_delivery_claim dc ON p.delivery_mode='LEGACY_COMPETE'
+              AND dc.user_id=mi.user_id
                 AND dc.delivery_group_key=p.delivery_group_key
             WHERE mi.canonical_instance_id=#{instanceId}
               <if test="type != null">AND e.event_type=#{type}</if>
@@ -264,7 +265,8 @@ public interface MobileEventDao {
                 ON canonical.mobile_instance_id=mi.canonical_instance_id
             LEFT JOIN ai_device_proactive_event p ON p.device_id=canonical.device_id
                 AND p.event_id=e.proactive_event_id
-            LEFT JOIN ai_proactive_delivery_claim dc ON dc.user_id=mi.user_id
+            LEFT JOIN ai_proactive_delivery_claim dc ON p.delivery_mode='LEGACY_COMPETE'
+              AND dc.user_id=mi.user_id
                 AND dc.delivery_group_key=p.delivery_group_key
             WHERE mi.canonical_instance_id=#{instanceId}
               <if test="type != null">AND e.event_type=#{type}</if>

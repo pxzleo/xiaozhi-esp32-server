@@ -29,6 +29,26 @@ import xiaozhi.modules.device.proactive.ProactiveEnums.Topic;
 
 class ProactiveContractTest {
     @Test
+    void sharedReminderUsesPendingAndAuthorityReadsWithoutExternalMonitorGate() throws Exception {
+        Method pending = ProactiveEventDao.class.getMethod("selectPendingMonitorEvents", String.class);
+        String pendingSql = pending.getAnnotation(Select.class).value()[0];
+        assertTrue(pendingSql.contains("'MOBILE_ALERT', 'REMINDER'"));
+        assertTrue(pendingSql.contains("e.delivery_mode='MULTICAST'"));
+
+        Method authority = ProactiveEventDao.class.getMethod(
+                "selectMonitorEventByMacAndEventId", String.class, String.class);
+        String authoritySql = authority.getAnnotation(Select.class).value()[0];
+        assertTrue(authoritySql.contains("'MOBILE_ALERT', 'REMINDER'"));
+        assertTrue(authoritySql.contains("e.event_type IN ('MOBILE_ALERT', 'REMINDER')"));
+
+        Method claimed = ProactiveEventDao.class.getMethod("selectClaimedMonitorEvent",
+                String.class, String.class, String.class, java.util.Date.class);
+        String claimedSql = claimed.getAnnotation(Select.class).value()[0];
+        assertTrue(claimedSql.contains("'MOBILE_ALERT', 'REMINDER'"));
+        assertFalse(claimedSql.contains("ai_device_proactive_monitor"));
+        assertFalse(claimedSql.contains("proactive.external_monitoring_enabled"));
+    }
+    @Test
     void deliveredContextOlderThanLeaseRemainsReadableWhileClaimedDoesNot() throws Exception {
         Method claimedContext = ProactiveEventDao.class.getMethod("selectClaimedMonitorEvent",
                 String.class, String.class, String.class, java.util.Date.class);
@@ -137,6 +157,8 @@ class ProactiveContractTest {
         CCJSqlParserUtil.parse(executablePending);
         assertTrue(pendingSql.contains("INNER JOIN ai_device d ON d.id = e.device_id"));
         assertTrue(pendingSql.contains("ai_proactive_delivery_claim"));
+        assertTrue(pendingSql.contains("e.delivery_mode='LEGACY_COMPETE'"));
+        assertTrue(pendingSql.contains("e.delivery_mode='MULTICAST'"));
         assertTrue(pendingSql.contains("dc.user_id = d.user_id"));
         assertTrue(pendingSql.contains("dc.delivery_group_key = e.delivery_group_key"));
 
@@ -178,7 +200,7 @@ class ProactiveContractTest {
                 Long.class, String.class, String.class);
         String targetSql = mobileTargets.getAnnotation(Select.class).value()[0];
         assertTrue(targetSql.contains("source.mobile_instance_id=#{mobileInstanceId}"));
-        assertTrue(targetSql.contains("target_mobile.mobile_instance_id=source.canonical_instance_id"));
+        assertTrue(targetSql.contains("target_mobile.mobile_instance_id=target_mobile.canonical_instance_id"));
         assertTrue(targetSql.contains("target_mobile.mobile_instance_id IS NULL"));
 
         Method directComplete = ProactiveDeliveryClaimDao.class.getMethod("completeUnclaimed",
@@ -387,7 +409,7 @@ class ProactiveContractTest {
         assertTrue(monitorReadSql.contains("LOWER(TRIM(g.param_value)) = 'true'"));
         assertTrue(monitorReadSql.contains("WHEN 'WEATHER_ALERT' THEN 'WEATHER'"));
         assertTrue(monitorReadSql.contains("WHEN 'NEWS_ALERT' THEN 'NEWS'"));
-        assertTrue(monitorReadSql.contains("e.event_type = 'MOBILE_ALERT'"));
+        assertTrue(monitorReadSql.contains("e.event_type IN ('MOBILE_ALERT', 'REMINDER')"));
         assertTrue(monitorReadSql.contains("OR (m.enabled = 1 AND LOWER(TRIM(g.param_value)) = 'true')"));
         assertTrue(monitorReadSql.contains("e.expires_at > CURRENT_TIMESTAMP(3)"));
         assertTrue(monitorReadSql.contains("e.delivery_status IN ('PENDING','CLAIMED')"));

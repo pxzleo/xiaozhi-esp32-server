@@ -145,3 +145,14 @@ manager-web 的“主动助理”新增独立“手机感知事件”标签，�
 普通通知不得完全信任客户端初判类别。manager-api 会在脱敏摘要上重新识别物流进度、明确账户安全、未接来电、临近预约/行程和重要车辆状态；其中“开始/正在配送、即将送达、已到驿站/快递柜、待取件”使用确定性受控摘要直接生成 `MOBILE_ALERT`，不依赖 LLM 严重度。普通下单成功、优惠促销和泛化物流状态不主动播报。手机实例可配置 `conservative/balanced/timely` 敏感度及 `security/call/parcel/appointment/message/other` 提醒范围。地点围栏变化只进入手机感知事件审计，固定写入 `location_audit_only`，不调用 LLM，也不创建主动事件。无法确定的重要通知才进入独立全局模型；均衡档继续要求 `high/critical + confidence>=0.85`，保守档只接受 `critical + >=0.90`，及时档接受 `medium/high/critical + >=0.75`。
 
 同一通知生命周期的 `removed` 如果在 posted/updated 快照尚处于 `received/error` 时到达，只更新生命周期时间，不得覆盖待评估的权威摘要、类别和处理状态；处理完成后的 removed 仍撤销尚未投递的主动事件副本。这样短暂系统通知不会在后台处理前丢失，同时已经撤销的旧提醒也不会继续播报。
+# 多终端共享与投递路由（2026-08-13）
+
+同一账号下新建的主动事件使用 `delivery_mode=MULTICAST`：服务端按账号路由为每个目标终端建立独立事件副本，各终端独立领取和完成。迁移前事件保持 `LEGACY_COMPETE`，仍使用账号级竞争领取账本，部署后不会补发历史事件。
+
+账号路由由普通用户接口 `GET/PUT /device/proactive/delivery-routing` 管理。未保存路由时默认账号下全部有效终端；已知地点使用地点的 `device_ids`，权威手机地点超过数据库时间十二小时后回退 `default_device_ids`。地点变化只更新路由状态，不产生主动提醒。手机使用既有移动凭据访问 `GET /mobile/proactive/delivery-routing`，并通过窄接口 `PUT /mobile/proactive/location-authority` 以版本号 CAS 选择位置权威手机。
+
+手机文字历史接口为 `GET /mobile/chat-history?before_id=&limit=`，按账号返回文字、角色、会话、时间和来源终端，不返回音频或硬件稳定标识。
+
+共享日程由 server-secret 接口注册和触发：`POST /config/proactive/schedules`、`POST /config/proactive/schedules/trigger-by-source`。时间字段均为 Unix 毫秒；`kind` 支持 `alarm/reminder/briefing`，`recurrence` 支持 `once/daily/weekdays/weekends/weekly`。简报必须保存 `sections`（仅 `weather/news`）和天气所需的 `location`，触发响应返回权威 `event_id`；各终端据此获取实时内容，不能只播空壳标题。日程派生事件的 `requires_response=false`，避免终端把播报误判为必须确认的主动对话。设备本地 stop/snooze/complete 成功后，通过 server-secret `POST /config/proactive/schedules/action-by-source` 同步全局动作，请求为 `{source_mac_address,source_schedule_id,action,snoozed_until}`；接口在数据库行锁内读取当前版本并执行 CAS，调用方不得自行猜测版本，重复相同动作幂等。任意手机也可通过 `POST /mobile/proactive/schedules/{id}:action` 执行相同动作，CAS 成功后全局终结仍待投递或已领取的事件副本。
+
+边界：全局 stop 能阻止未开始或仍由服务端跟踪的投递，但旧固件已经在本地响铃时，必须由设备消费共享终态才能立即停止；设备离线时服务端不能撤回其已经独立触发的本地声音。设备端同步属于协议接入要求，不能仅凭服务端终态宣称物理设备已经静音。

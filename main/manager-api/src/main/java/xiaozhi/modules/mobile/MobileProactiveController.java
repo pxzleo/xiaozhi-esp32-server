@@ -21,6 +21,10 @@ import xiaozhi.modules.mobile.MobileProactiveDTOs.CompleteResponse;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.PendingResponse;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.QuietHoursRequest;
 import xiaozhi.modules.mobile.MobileProactiveDTOs.QuietHoursResponse;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.LocationAuthorityUpdate;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingDTOs.RouteView;
+import xiaozhi.modules.device.proactive.ProactiveScheduleDTOs.Action;
+import xiaozhi.modules.device.proactive.ProactiveScheduleDTOs.View;
 
 @RestController
 @Validated
@@ -57,6 +61,51 @@ public class MobileProactiveController {
             @Valid @RequestBody QuietHoursRequest request) {
         return service.updateQuietHours(auth(authorization, instanceId, installationId,
                 credentialVersion, protocolVersion), request);
+    }
+
+    @GetMapping("/mobile/proactive/delivery-routing")
+    public RouteView deliveryRouting(@RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,
+            @RequestHeader("Mobile-Instance-Id") String instanceId,
+            @RequestHeader("Client-Id") String installationId,
+            @RequestHeader("Mobile-Credential-Version") int credentialVersion,
+            @RequestHeader("Mobile-Protocol-Version") int protocolVersion) {
+        return service.deliveryRouting(auth(authorization, instanceId, installationId,
+                credentialVersion, protocolVersion));
+    }
+
+    @PutMapping("/mobile/proactive/location-authority")
+    public RouteView updateLocationAuthority(
+            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,
+            @RequestHeader("Mobile-Instance-Id") String instanceId,
+            @RequestHeader("Client-Id") String installationId,
+            @RequestHeader("Mobile-Credential-Version") int credentialVersion,
+            @RequestHeader("Mobile-Protocol-Version") int protocolVersion,
+            @Valid @RequestBody LocationAuthorityUpdate request) {
+        return service.updateLocationAuthority(auth(authorization, instanceId, installationId,
+                credentialVersion, protocolVersion), request);
+    }
+
+    @GetMapping("/mobile/proactive/schedules")
+    public java.util.List<View> activeSchedules(
+            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,
+            @RequestHeader("Mobile-Instance-Id") String instanceId,
+            @RequestHeader("Client-Id") String installationId,
+            @RequestHeader("Mobile-Credential-Version") int credentialVersion,
+            @RequestHeader("Mobile-Protocol-Version") int protocolVersion) {
+        return service.activeSchedules(auth(authorization,instanceId,installationId,
+                credentialVersion,protocolVersion));
+    }
+
+    @PostMapping("/mobile/proactive/schedules/{id}:action")
+    public View scheduleAction(@PathVariable @Pattern(regexp="^[0-9a-f-]{36}$") String id,
+            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,
+            @RequestHeader("Mobile-Instance-Id") String instanceId,
+            @RequestHeader("Client-Id") String installationId,
+            @RequestHeader("Mobile-Credential-Version") int credentialVersion,
+            @RequestHeader("Mobile-Protocol-Version") int protocolVersion,
+            @Valid @RequestBody Action request) {
+        return service.scheduleAction(auth(authorization,instanceId,installationId,
+                credentialVersion,protocolVersion),id,request);
     }
 
     @PostMapping("/mobile/proactive/{eventId}:claim")

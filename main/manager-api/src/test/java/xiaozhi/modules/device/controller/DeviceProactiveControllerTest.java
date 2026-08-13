@@ -34,7 +34,7 @@ class DeviceProactiveControllerTest {
                 new ClassifierAvailabilityView(true, true, null));
         when(monitorService.getMonitors(7L, "device-1")).thenReturn(view);
         DeviceProactiveController controller = new DeviceProactiveController(
-                mock(ProactiveService.class), monitorService);
+                mock(ProactiveService.class), monitorService, mock(xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingService.class));
 
         try (MockedStatic<SecurityUser> securityUser = mockStatic(SecurityUser.class)) {
             securityUser.when(SecurityUser::getUserId).thenReturn(7L);
@@ -47,7 +47,7 @@ class DeviceProactiveControllerTest {
     void unknownHazardOrNewsCategoryIsRejectedBeforeControllerService() throws Exception {
         ProactiveMonitorService monitorService = mock(ProactiveMonitorService.class);
         DeviceProactiveController controller = new DeviceProactiveController(
-                mock(ProactiveService.class), monitorService);
+                mock(ProactiveService.class), monitorService, mock(xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingService.class));
         var mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
         String request = """
                 {"weather":{"enabled":true,"interval_minutes":30,"config":{

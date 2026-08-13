@@ -98,12 +98,14 @@ public class ShiroConfig {
         filterMap.put("/mobile/events:batch", "anon");
         filterMap.put("/mobile/events/status", "anon");
         filterMap.put("/mobile/proactive/**", "anon");
+        filterMap.put("/mobile/chat-history", "anon");
         // 将config路径使用server服务过滤器
         filterMap.put("/config/**", "server");
         filterMap.put("/device/netease/**", "device");
         filterMap.put("/device/proactive/pending", "device");
         filterMap.put("/device/address-book/call", "server");
         filterMap.put("/agent/chat-history/report", "server");
+        filterMap.put("/config/proactive/schedules/**", "server");
         filterMap.put("/agent/chat-history/download/**", "anon");
         filterMap.put("/agent/chat-summary/**", "server");
         filterMap.put("/agent/chat-title/**", "server");

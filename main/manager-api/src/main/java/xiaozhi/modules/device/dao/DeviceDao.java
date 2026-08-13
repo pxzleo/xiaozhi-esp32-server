@@ -22,6 +22,16 @@ public interface DeviceDao extends BaseMapper<DeviceEntity> {
     @Select("SELECT * FROM ai_device WHERE user_id = #{userId} FOR UPDATE")
     List<DeviceEntity> selectByUserIdForUpdate(@Param("userId") Long userId);
 
+    @Select("SELECT d.* FROM ai_device d LEFT JOIN ai_mobile_instance mi ON mi.device_id=d.id "
+            + "WHERE d.user_id=#{userId} AND (mi.mobile_instance_id IS NULL "
+            + "OR mi.mobile_instance_id=mi.canonical_instance_id) FOR UPDATE")
+    List<DeviceEntity> selectRoutableByUserForUpdate(@Param("userId") Long userId);
+
+    @Select("SELECT d.* FROM ai_device d LEFT JOIN ai_mobile_instance mi ON mi.device_id=d.id "
+            + "WHERE d.user_id=#{userId} AND (mi.mobile_instance_id IS NULL "
+            + "OR mi.mobile_instance_id=mi.canonical_instance_id) ORDER BY d.sort,d.id")
+    List<DeviceEntity> selectRoutableByUser(@Param("userId") Long userId);
+
     @Select("SELECT * FROM ai_device WHERE agent_id = #{agentId} FOR UPDATE")
     List<DeviceEntity> selectByAgentIdForUpdate(@Param("agentId") String agentId);
 
@@ -30,9 +40,9 @@ public interface DeviceDao extends BaseMapper<DeviceEntity> {
             INNER JOIN ai_mobile_instance source
               ON source.mobile_instance_id=#{mobileInstanceId} AND source.user_id=#{userId}
             LEFT JOIN ai_mobile_instance target_mobile ON target_mobile.device_id=d.id
-            WHERE d.user_id=#{userId} AND d.agent_id=#{agentId}
+            WHERE d.user_id=#{userId}
               AND (target_mobile.mobile_instance_id IS NULL
-                   OR target_mobile.mobile_instance_id=source.canonical_instance_id)
+                   OR target_mobile.mobile_instance_id=target_mobile.canonical_instance_id)
             FOR UPDATE
             """)
     List<DeviceEntity> selectMobileAlertTargetsForUpdate(@Param("userId") Long userId,

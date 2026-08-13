@@ -120,7 +120,9 @@ class MobileProactiveContractTest {
         String source = Files.readString(Path.of(
                 "src/main/java/xiaozhi/modules/security/config/ShiroConfig.java"));
         int mobile = source.indexOf("filterMap.put(\"/mobile/proactive/**\", \"anon\")");
+        int history = source.indexOf("filterMap.put(\"/mobile/chat-history\", \"anon\")");
         int fallback = source.indexOf("filterMap.put(\"/**\", \"oauth2\")");
         assertTrue(mobile >= 0 && fallback > mobile);
+        assertTrue(history >= 0 && fallback > history);
     }
 }

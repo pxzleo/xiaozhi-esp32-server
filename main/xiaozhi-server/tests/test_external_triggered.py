@@ -9,6 +9,18 @@ from core.providers.tools.device_mcp.proactive_policy import reset_proactive_pol
 
 
 def event(kind="news"):
+    if kind == "briefing":
+        return {
+            "event_id": "ext-1", "mac_address": "AA:BB",
+            "event_type": "reminder", "topic": "news", "priority": "high",
+            "delivery_status": "pending", "requires_response": False,
+            "expires_at": int((time.time() + 3600) * 1000),
+            "payload": {
+                "title": "每日简报", "message": "每日简报",
+                "reference_id": "schedule-1", "action": "weather,news",
+                "source": "广州", "scheduled_at": "2026-08-13T09:30:00",
+            },
+        }
     if kind == "mobile":
         return {
             "event_id": "ext-1", "mac_address": "AA:BB",
@@ -99,6 +111,38 @@ class ExternalTriggeredTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertFalse(conn._external_news_waiting_response)
         self.assertEqual("failed", status.await_args.args[2])
+
+    async def test_shared_briefing_builds_real_content_before_speech(self):
+        conn = connection()
+
+        async def briefing(_conn, sections, location, suggestion_topics=None):
+            self.assertEqual(["weather", "news"], sections)
+            self.assertEqual("广州", location)
+            return "广州天气和新闻简报"
+
+        async def speak(target, text, name, state, completion_event=None):
+            self.assertEqual("广州天气和新闻简报", text)
+            self.assertEqual("每日简报", name)
+            target.sentence_id = "sid"
+            completion_event.set_result(True)
+            return "sid"
+
+        with patch.object(
+            mcp_handler, "get_proactive_monitor_event", AsyncMock(return_value=event("briefing"))
+        ), patch.object(
+            mcp_handler, "claim_proactive_event", AsyncMock(return_value=True)
+        ), patch.object(
+            mcp_handler, "build_daily_briefing", side_effect=briefing
+        ), patch.object(
+            mcp_handler, "_speak_proactive_notification", side_effect=speak
+        ), patch.object(
+            mcp_handler, "update_proactive_event_status", AsyncMock()
+        ) as status:
+            await mcp_handler._handle_external_triggered_notification(
+                conn, {"version": 1, "event_id": "ext-1", "speak": True}
+            )
+            await asyncio.gather(*conn._proactive_audit_tasks)
+        self.assertEqual("delivered", status.await_args.args[2])
 
     async def test_mobile_alert_uses_controlled_summary_without_followup_context(self):
         conn = connection()

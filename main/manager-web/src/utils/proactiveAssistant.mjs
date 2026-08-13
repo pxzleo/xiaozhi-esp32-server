@@ -28,6 +28,8 @@ export const NEWS_CATEGORIES = [
   'public_safety', 'natural_disaster', 'major_policy', 'international_conflict',
   'major_economy', 'major_technology',
 ];
+const PLACE_ID_PATTERN = /^place_[0-9a-f]{8,32}$/;
+const MOBILE_INSTANCE_ID_PATTERN = /^mob_[0-9a-f]{32}$/;
 
 export class DeviceRequestGate {
   constructor() {
@@ -69,6 +71,82 @@ export class DeviceRequestGate {
 
 export function defaultDailyLimit(mode) {
   return { conservative: 1, active: 5, aggressive: 0 }[mode] ?? 1;
+}
+
+export function createDeliveryRoutingForm(routing = {}) {
+  const devices = Array.isArray(routing.devices) ? routing.devices
+    .filter(device => device && typeof device.device_id === 'string' && device.device_id)
+    .map(device => ({
+      device_id: device.device_id,
+      mac_address: typeof device.mac_address === 'string' ? device.mac_address : '',
+      alias: typeof device.alias === 'string' ? device.alias : '',
+      terminal_type: device.terminal_type === 'mobile' ? 'mobile' : 'speaker',
+      mobile_instance_id: typeof device.mobile_instance_id === 'string' ? device.mobile_instance_id : '',
+      fixed_place_id: typeof device.fixed_place_id === 'string' && device.fixed_place_id
+        ? device.fixed_place_id
+        : null,
+    })) : [];
+  const defaultDeviceIds = Array.isArray(routing.default_device_ids)
+    ? [...routing.default_device_ids]
+    : devices.map(device => device.device_id);
+  return {
+    default_device_ids: defaultDeviceIds,
+    location_authority_mobile_instance_id:
+      MOBILE_INSTANCE_ID_PATTERN.test(routing.location_authority_mobile_instance_id || '')
+        ? routing.location_authority_mobile_instance_id
+        : null,
+    devices,
+    places: Array.isArray(routing.places) ? routing.places.map(place => ({
+      place_id: typeof place?.place_id === 'string' ? place.place_id : '',
+      place_name: typeof place?.place_name === 'string' ? place.place_name : '',
+      device_ids: Array.isArray(place?.device_ids) ? [...place.device_ids] : [],
+    })) : [],
+    active_place_id: typeof routing.active_place_id === 'string' ? routing.active_place_id : null,
+    location_observed_at: typeof routing.location_observed_at === 'string' ? routing.location_observed_at : null,
+    version: routing.version === undefined ? 0 : routing.version,
+  };
+}
+
+export function validateDeliveryRouting(form) {
+  if (!form || !Number.isInteger(form.version) || form.version < 0) return 'version';
+  if (!Array.isArray(form.devices) || !Array.isArray(form.default_device_ids) || !Array.isArray(form.places)) {
+    return 'devices';
+  }
+  const deviceIds = form.devices.map(device => device?.device_id);
+  const knownDevices = new Set(deviceIds);
+  if (deviceIds.some(id => typeof id !== 'string' || !id) || knownDevices.size !== deviceIds.length ||
+      form.default_device_ids.some(id => !knownDevices.has(id)) ||
+      new Set(form.default_device_ids).size !== form.default_device_ids.length) return 'devices';
+  const placeIds = form.places.map(place => place?.place_id);
+  const knownPlaces = new Set(placeIds);
+  if (placeIds.some(id => !PLACE_ID_PATTERN.test(id || '')) || knownPlaces.size !== placeIds.length ||
+      form.places.some(place => typeof place.place_name !== 'string' || !place.place_name.trim() ||
+        place.place_name.length > 80 || !Array.isArray(place.device_ids))) return 'places';
+  if (form.places.some(place => place.device_ids.some(id => !knownDevices.has(id)) ||
+      new Set(place.device_ids).size !== place.device_ids.length)) return 'devices';
+  if (form.devices.some(device => device.fixed_place_id !== null && !knownPlaces.has(device.fixed_place_id))) {
+    return 'places';
+  }
+  if (form.location_authority_mobile_instance_id !== null &&
+      !MOBILE_INSTANCE_ID_PATTERN.test(form.location_authority_mobile_instance_id)) return 'devices';
+  return '';
+}
+
+export function deliveryRoutingPayload(form) {
+  return {
+    default_device_ids: [...form.default_device_ids],
+    location_authority_mobile_instance_id: form.location_authority_mobile_instance_id,
+    devices: form.devices.map(device => ({
+      device_id: device.device_id,
+      fixed_place_id: device.fixed_place_id || null,
+    })),
+    places: form.places.map(place => ({
+      place_id: place.place_id,
+      place_name: place.place_name,
+      device_ids: [...place.device_ids],
+    })),
+    version: form.version,
+  };
 }
 
 export function belongsToDevice(value, deviceId) {

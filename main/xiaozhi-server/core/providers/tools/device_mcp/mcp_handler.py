@@ -9,17 +9,20 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from config.manage_api_client import (
+    action_shared_schedule_by_source,
     claim_proactive_event,
     create_proactive_event,
     get_proactive_monitor_event,
     update_proactive_event_status,
     update_proactive_preference,
     get_claimed_proactive_context,
+    register_shared_schedule,
+    trigger_shared_schedule_by_source,
 )
 from config.logger import setup_logging
 from core.handle.abortHandle import cancelActiveLLMResponse
@@ -643,6 +646,48 @@ def _schedule_visible_background_task(conn, coroutine, name):
     task.add_done_callback(tasks.discard)
 
 
+def _local_datetime_epoch_milliseconds(conn, value):
+    if not isinstance(value, str) or not _LOCAL_DATETIME_PATTERN.fullmatch(value):
+        raise ValueError("设备日程时间格式无效")
+    try:
+        local = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S")
+    except ValueError as error:
+        raise ValueError("设备日程时间无效") from error
+    common = getattr(conn, "common_config", {})
+    server = common.get("server", {}) if isinstance(common, dict) else {}
+    offset = server.get("timezone_offset", 8) if isinstance(server, dict) else 8
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < -12 or offset > 14:
+        raise ValueError("服务端时区偏移无效")
+    return int(local.replace(tzinfo=timezone(timedelta(hours=offset))).timestamp() * 1000)
+
+
+async def _register_shared_schedule_with_retry(conn, schedule):
+    last_error = None
+    for attempt in range(4):
+        try:
+            return await register_shared_schedule(schedule)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            last_error = error
+            if attempt < 3:
+                await asyncio.sleep(min(0.5 * (2 ** attempt), 2))
+    raise RuntimeError("共享日程注册重试失败") from last_error
+
+
+async def _sync_shared_schedule_action(conn, source_schedule_id, action, snoozed_until=None):
+    mac_address = getattr(conn, "device_id", None)
+    if not isinstance(mac_address, str) or not mac_address:
+        raise ValueError("设备MAC缺失")
+    payload = {
+        "source_mac_address": mac_address,
+        "source_schedule_id": str(source_schedule_id),
+        "action": action,
+        "snoozed_until": snoozed_until,
+    }
+    await action_shared_schedule_by_source(payload)
+
+
 async def _sync_preference_with_retry(conn, preference):
     mac_address = getattr(conn, "device_id", None)
     if not isinstance(mac_address, str) or not mac_address:
@@ -657,6 +702,44 @@ async def _sync_preference_with_retry(conn, preference):
             if attempt == 0:
                 await asyncio.sleep(0)
     raise RuntimeError("偏好同步重试失败") from last_error
+
+
+async def _claim_shared_schedule_delivery(
+    conn, *, source_schedule_id, kind, label, triggered_at, **extra
+):
+    mac_address = getattr(conn, "device_id", None)
+    if not isinstance(mac_address, str) or not mac_address:
+        raise ValueError("设备MAC缺失")
+    triggered_at_ms = _local_datetime_epoch_milliseconds(conn, triggered_at)
+    try:
+        payload = {
+                "source_mac_address": mac_address,
+                "source_schedule_id": str(source_schedule_id),
+                "kind": kind,
+                "triggered_at": triggered_at_ms,
+        }
+        if label is not None:
+            payload["label"] = label
+        payload.update(extra)
+        schedule = await trigger_shared_schedule_by_source(payload)
+        schedule_uuid = schedule.get("id") if isinstance(schedule, dict) else None
+        if not isinstance(schedule_uuid, str) or not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            schedule_uuid,
+        ):
+            raise ValueError("共享日程响应无效")
+        event_id = f"schedule-{schedule_uuid}-{triggered_at_ms}"
+        claim_token = uuid.uuid4().hex
+        if not await claim_proactive_event(event_id, mac_address, claim_token):
+            return False
+        return event_id, mac_address, claim_token
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        logger.bind(tag=TAG).error(
+            "共享日程同步或领取暂时失败，保留本机提醒: {}", type(error).__name__
+        )
+        return None
 
 
 async def _sync_followup_outcome_after_audit(
@@ -701,12 +784,72 @@ def handle_successful_device_tool_result(conn, actual_name, result):
         return
     if actual_name == "self.schedule.create":
         data = result.get("data")
-        if isinstance(data, dict) and isinstance(data.get("id"), int):
-            scheduled_at = data.get("scheduled_at") or data.get("trigger_at")
-            kind = data.get("kind")
-            if kind in ("alarm", "reminder") and isinstance(scheduled_at, str):
-                match = re.search(r"T(\d{2}:\d{2})", scheduled_at)
-                if match:
+        task = data.get("task") if isinstance(data, dict) else None
+        if (
+            isinstance(task, dict)
+            and isinstance(task.get("id"), int)
+            and not isinstance(task.get("id"), bool)
+            and task["id"] > 0
+        ):
+            scheduled_at = task.get("trigger_at")
+            kind = task.get("kind")
+            if kind in ("alarm", "reminder", "briefing") and isinstance(scheduled_at, str):
+                try:
+                    scheduled_at_ms = _local_datetime_epoch_milliseconds(conn, scheduled_at)
+                    recurrence = task.get("repeat")
+                    weekdays = task.get("weekdays", [])
+                    label = task.get("label")
+                    if recurrence not in ("once", "daily", "weekdays", "weekends", "weekly"):
+                        raise ValueError("设备日程重复规则无效")
+                    if not isinstance(weekdays, list) or any(
+                        not isinstance(day, int) or isinstance(day, bool) or day not in range(1, 8)
+                        for day in weekdays
+                    ) or len(weekdays) != len(set(weekdays)):
+                        raise ValueError("设备日程星期字段无效")
+                    if not isinstance(label, str) or not label.strip():
+                        raise ValueError("设备日程标题无效")
+                    sections = task.get("sections", "")
+                    if not isinstance(sections, str):
+                        raise ValueError("设备简报模块无效")
+                    section_list = sections.split(",") if sections else []
+                    if (
+                        len(section_list) != len(set(section_list))
+                        or any(section not in ("weather", "news") for section in section_list)
+                        or (kind == "briefing") != bool(section_list)
+                    ):
+                        raise ValueError("设备简报模块无效")
+                    location = task.get("location", "")
+                    if not isinstance(location, str) or len(location.strip()) > 40:
+                        raise ValueError("设备简报地点无效")
+                    if kind == "briefing" and "weather" in section_list and not location.strip():
+                        raise ValueError("设备天气简报缺少地点")
+                    _schedule_visible_background_task(
+                        conn,
+                        _register_shared_schedule_with_retry(
+                            conn,
+                            {
+                                "source_mac_address": conn.device_id,
+                                "source_schedule_id": str(task["id"]),
+                                "kind": kind,
+                                "label": label.strip(),
+                                "scheduled_at": scheduled_at_ms,
+                                "recurrence": recurrence,
+                                "weekdays": weekdays,
+                                "sections": section_list,
+                                "location": location.strip() or None,
+                            },
+                        ),
+                        "共享日程注册",
+                    )
+                except ValueError as error:
+                    logger.bind(tag=TAG).error(
+                        "设备日程成功结果无法同步: {}", str(error)
+                    )
+                    return
+                if kind in ("alarm", "reminder"):
+                    match = re.search(r"T(\d{2}:\d{2})", scheduled_at)
+                    if not match:
+                        return
                     from core.providers.tools.device_mcp.proactive_habits import (
                         schedule_habit_observation,
                     )
@@ -726,6 +869,33 @@ def handle_successful_device_tool_result(conn, actual_name, result):
                         # 避免与设备当前创建确认（含设备自带的重复建议）竞争 TTS。
                         allow_suggestion=False,
                     )
+        return
+    if actual_name in ("self.schedule.stop", "self.schedule.snooze"):
+        data = result.get("data")
+        if not isinstance(data, dict):
+            logger.bind(tag=TAG).error("设备日程动作成功但返回data无效")
+            return
+        source_id = data.get("stopped_id" if actual_name.endswith(".stop") else "source_id")
+        if not isinstance(source_id, int) or isinstance(source_id, bool) or source_id <= 0:
+            logger.bind(tag=TAG).error("设备日程动作来源ID无效")
+            return
+        action = "stop"
+        snoozed_until = None
+        if actual_name.endswith(".snooze"):
+            task = data.get("task")
+            trigger_at = task.get("trigger_at") if isinstance(task, dict) else None
+            try:
+                snoozed_until = _local_datetime_epoch_milliseconds(conn, trigger_at)
+            except ValueError as error:
+                logger.bind(tag=TAG).error("设备稍后提醒时间无效: {}", str(error))
+                return
+            action = "snooze"
+        _schedule_visible_background_task(
+            conn,
+            _sync_shared_schedule_action(conn, source_id, action, snoozed_until),
+            "共享日程动作同步",
+        )
+        return
     schedule_outcomes = {
         "self.schedule.complete_recent": ("delivered", "completed"),
         "self.schedule.follow_up": ("delivered", "acknowledged"),
@@ -760,6 +930,12 @@ def handle_successful_device_tool_result(conn, actual_name, result):
                 ),
                 "完成跟进结果同步",
             )
+            if actual_name == "self.schedule.complete_recent":
+                _schedule_visible_background_task(
+                    conn,
+                    _sync_shared_schedule_action(conn, result_source_id, "complete"),
+                    "共享日程完成同步",
+                )
 
 
 async def _handle_schedule_follow_up_notification(conn, params, notification_state=None):
@@ -1028,6 +1204,17 @@ async def _handle_schedule_triggered_notification(
         logger.bind(tag=TAG).warning("日程提醒通知未要求语音播报")
         return
 
+    shared_delivery = await _claim_shared_schedule_delivery(
+        conn,
+        source_schedule_id=schedule_id,
+        kind=schedule_kind,
+        label=normalized_label,
+        triggered_at=triggered_at,
+    )
+    if shared_delivery is False:
+        logger.bind(tag=TAG).info("当前终端未被共享日程路由选中")
+        return
+
     if schedule_kind == "alarm":
         text = f"闹铃时间到了：{normalized_label}"
         notification_name = "闹铃"
@@ -1044,7 +1231,7 @@ async def _handle_schedule_triggered_notification(
         text_transform = None
     if schedule_kind == "alarm":
         text_transform = None
-    completion = ProactiveDeliveryCompletion() if schedule_kind == "reminder" else None
+    completion = ProactiveDeliveryCompletion()
     abort_generation = (
         notification_state[1]
         if notification_state is not None
@@ -1076,7 +1263,25 @@ async def _handle_schedule_triggered_notification(
     except BaseException:
         if invitation_future is not None and not invitation_future.done():
             invitation_future.set_result(False)
+        if isinstance(shared_delivery, tuple):
+            await _mark_external_failed(*shared_delivery)
         raise
+    if isinstance(shared_delivery, tuple):
+        event_id, mac_address, claim_token = shared_delivery
+        if sentence_id is None:
+            await _mark_external_failed(event_id, mac_address, claim_token)
+            return
+        delivery_future = _new_delivery_future(conn)
+        _schedule_external_delivery(
+            conn, event_id, mac_address, claim_token, delivery_future
+        )
+        _resolve_delivery_lifecycle(
+            conn,
+            delivery_future,
+            _wait_for_proactive_delivery(
+                conn, completion, sentence_id, abort_generation
+            ),
+        )
     if schedule_kind == "reminder" and completion_invited:
         _resolve_delivery_lifecycle(
             conn,
@@ -1152,6 +1357,19 @@ async def _handle_assistant_triggered_notification(
         logger.bind(tag=TAG).warning("主动助理通知未要求语音播报")
         return
 
+    shared_delivery = await _claim_shared_schedule_delivery(
+        conn,
+        source_schedule_id=schedule_id,
+        kind="briefing",
+        label=None,
+        triggered_at=triggered_at,
+        sections=sections,
+        location=location,
+    )
+    if shared_delivery is False:
+        logger.bind(tag=TAG).info("当前终端未被共享简报路由选中")
+        return
+
     seen = getattr(conn, "_assistant_briefing_events", None)
     if seen is None:
         seen = set()
@@ -1206,7 +1424,25 @@ async def _handle_assistant_triggered_notification(
                 conn.sentence_id,
                 completion_event,
             )
+        if isinstance(shared_delivery, tuple):
+            await _mark_external_failed(*shared_delivery)
         raise
+    if isinstance(shared_delivery, tuple):
+        shared_event_id, mac_address, claim_token = shared_delivery
+        if proactive_sentence_id is None:
+            await _mark_external_failed(shared_event_id, mac_address, claim_token)
+        else:
+            delivery_future = _new_delivery_future(conn)
+            _schedule_external_delivery(
+                conn, shared_event_id, mac_address, claim_token, delivery_future
+            )
+            _resolve_delivery_lifecycle(
+                conn,
+                delivery_future,
+                _wait_for_proactive_delivery(
+                    conn, completion_event, proactive_sentence_id, abort_generation
+                ),
+            )
     if proactive_sentence_id is not None and isinstance(
         getattr(conn, "device_id", None), str
     ):
@@ -1263,6 +1499,7 @@ def _validated_external_event(event, event_id, mac_address, *, claimed_context=F
     if (event_type, topic) not in {
         ("weather_alert", "weather"), ("news_alert", "news"),
         ("mobile_alert", "system"),
+        ("reminder", "reminder"), ("reminder", "news"),
     }:
         raise ValueError("外界事件类型无效")
     priority = event.get("priority")
@@ -1353,6 +1590,31 @@ def _validated_external_event(event, event_id, mac_address, *, claimed_context=F
         "payload": payload,
         "requires_response": event.get("requires_response") is True,
     }
+
+
+async def _deliver_shared_briefing_event(conn, event, notification_state):
+    payload = event["payload"]
+    raw_sections = payload.get("action", "")
+    sections = raw_sections.split(",") if isinstance(raw_sections, str) else []
+    if (
+        not sections
+        or len(sections) > 2
+        or len(sections) != len(set(sections))
+        or any(section not in ("weather", "news") for section in sections)
+    ):
+        raise ValueError("共享简报模块无效")
+    location = payload.get("source", "")
+    if not isinstance(location, str) or len(location.strip()) > 40:
+        raise ValueError("共享简报地点无效")
+    location = location.strip()
+    if "weather" in sections and not location:
+        raise ValueError("共享天气简报缺少地点")
+    text = await build_daily_briefing(conn, sections, location, suggestion_topics=[])
+    completion = ProactiveDeliveryCompletion()
+    sentence_id = await _speak_proactive_notification(
+        conn, text, "每日简报", notification_state, completion_event=completion
+    )
+    return sentence_id, completion
 
 
 async def handle_mobile_external_context(conn, event_id, claim_token):
@@ -1486,10 +1748,14 @@ async def _handle_external_triggered_notification(
         )
         return
 
+    explicit_reminder = event["event_type"] == "reminder"
     critical_weather = (
         event["event_type"] == "weather_alert" and event["priority"] == "critical"
     )
-    if event["event_type"] == "mobile_alert":
+    if explicit_reminder:
+        cooldown = 0
+        opportunity_key = f"shared_schedule:{event_id}"
+    elif event["event_type"] == "mobile_alert":
         cooldown = 0
         opportunity_key = f"mobile_event:{event_id}"
     else:
@@ -1503,7 +1769,7 @@ async def _handle_external_triggered_notification(
         opportunity_key,
         cooldown_seconds=cooldown,
         policy_topic=event["topic"],
-        critical=critical_weather,
+        critical=critical_weather or explicit_reminder,
     )
     reservation = decision.reservation
     if reservation is None:
@@ -1553,6 +1819,7 @@ async def _handle_external_triggered_notification(
     payload = event["payload"]
     is_news = event["event_type"] == "news_alert"
     is_mobile = event["event_type"] == "mobile_alert"
+    shared_briefing = explicit_reminder and event["topic"] == "news"
     text = payload["summary"].strip() if is_mobile else payload["message"].strip()
     news_context = None
     if is_news:
@@ -1577,13 +1844,18 @@ async def _handle_external_triggered_notification(
         else getattr(conn, "abort_generation", 0)
     )
     try:
-        sentence_id = await _speak_proactive_notification(
-            conn,
-            text,
-            "重大新闻" if is_news else payload["title"].strip(),
-            notification_state,
-            completion_event=completion,
-        )
+        if shared_briefing:
+            sentence_id, completion = await _deliver_shared_briefing_event(
+                conn, event, notification_state
+            )
+        else:
+            sentence_id = await _speak_proactive_notification(
+                conn,
+                text,
+                "重大新闻" if is_news else payload["title"].strip(),
+                notification_state,
+                completion_event=completion,
+            )
     except BaseException:
         await _mark_external_failed(event_id, mac_address, claim_token)
         raise

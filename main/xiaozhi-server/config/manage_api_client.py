@@ -282,6 +282,33 @@ async def update_proactive_preference(mac_address: str, preference: Dict) -> Dic
     )
 
 
+async def register_shared_schedule(schedule: Dict) -> Dict:
+    """将设备已成功创建的日程登记为账号级权威日程。"""
+    return await _execute_proactive_request(
+        "POST", "/config/proactive/schedules", json=schedule, timeout=2.0
+    )
+
+
+async def trigger_shared_schedule_by_source(trigger: Dict) -> Dict:
+    """按设备稳定源ID触发共享日程；注册同步丢失时由服务端补建。"""
+    return await _execute_proactive_request(
+        "POST",
+        "/config/proactive/schedules/trigger-by-source",
+        json=trigger,
+        timeout=2.0,
+    )
+
+
+async def action_shared_schedule_by_source(action: Dict) -> Dict:
+    """按设备稳定源ID同步停止、稍后提醒或完成动作。"""
+    return await _execute_proactive_request(
+        "POST",
+        "/config/proactive/schedules/action-by-source",
+        json=action,
+        timeout=2.0,
+    )
+
+
 async def create_proactive_event(event: Dict) -> Dict:
     """幂等写入积极主动事件审计。"""
     return await _execute_proactive_request(

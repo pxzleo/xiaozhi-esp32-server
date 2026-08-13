@@ -134,6 +134,27 @@ class MobileProactiveServiceTest {
     }
 
     @Test
+    void briefingReminderWithNewsTopicDoesNotRequireNewsAlertFieldsOrFollowup() {
+        EventView briefing = new EventView("dev-mobile", instance.getMobileInstanceId(),
+                "schedule-1", Topic.NEWS, Priority.HIGH, "authoritative_schedule_triggered",
+                EventType.REMINDER, Map.of("title", "每日简报", "message", "每日简报",
+                        "action", "weather,news", "source", "广州"),
+                new Date(), Date.from(Instant.now().plusSeconds(300)), "dedupe", true,
+                DeliveryStatus.PENDING, Outcome.NONE, null);
+        when(proactive.monitorEvent(instance.getMobileInstanceId(), "schedule-1"))
+                .thenReturn(briefing);
+        when(proactive.claimEvent(any(), any())).thenReturn(true);
+        var request = new MobileProactiveDTOs.ClaimRequest();
+        request.version = 1; request.claimToken = "briefing-claim";
+
+        var response = service.claim(auth, "schedule-1", request);
+
+        assertEquals("每日简报", response.tts());
+        assertFalse(response.followup().enabled());
+        assertEquals(null, response.externalContext());
+    }
+
+    @Test
     void competingClaimReturnsConflict() {
         when(proactive.monitorEvent(instance.getMobileInstanceId(), "ext-1"))
                 .thenReturn(event(Topic.WEATHER, Map.of("title", "暴雨预警", "message", "请减少外出")));

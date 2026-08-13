@@ -494,8 +494,11 @@ class ProactiveServiceTest {
     }
 
     @Test
-    void mobileAlertRejectsMultipleCanonicalMobileTargets() {
+    void mobileAlertFansOutToAllRoutedCanonicalMobileTargets() {
         String sourceId = "mob_0123456789abcdef0123456789abcdef";
+        ProactiveDeliveryRoutingService routing = mock(ProactiveDeliveryRoutingService.class);
+        service = new ProactiveService(deviceDao, preferenceDao, eventDao, eventDedupeDao,
+                deliveryClaimDao, globalDao, habitDao, new ObjectMapper(), routing);
         DeviceEntity secondMobile = new DeviceEntity();
         secondMobile.setId("device-mobile-2");
         secondMobile.setMacAddress("mob_11111111111111111111111111111111");
@@ -504,6 +507,8 @@ class ProactiveServiceTest {
         device.setMacAddress("mob_22222222222222222222222222222222");
         when(deviceDao.selectMobileAlertTargetsForUpdate(7L, "agent-1", sourceId))
                 .thenReturn(List.of(device, secondMobile));
+        when(routing.resolveTargetDeviceIds(7L)).thenReturn(
+                List.of("device-1", "device-mobile-2"));
         when(eventDedupeDao.selectForUpdate(any(), eq("MOBILE_ALERT"), any()))
                 .thenReturn(new ProactiveEventDedupeEntity());
         when(eventDao.insertIfAbsent(any())).thenReturn(1);
@@ -526,9 +531,12 @@ class ProactiveServiceTest {
         });
         when(eventDedupeDao.markCreated(any(), any(), any(), any())).thenReturn(1);
 
-        assertThrows(RenException.class, () -> service.createMobileAlert(sourceId, 7L, "agent-1",
+        service.createMobileAlert(sourceId, 7L, "agent-1",
                 "evt-1", "sha256:" + "b".repeat(64), "提醒", "摘要", "app", "security",
-                Priority.HIGH, new Date(1_000), new Date(2_000)));
+                Priority.HIGH, new Date(1_000), new Date(2_000));
+        verify(eventDao).selectByDeviceAndEventIdForUpdate(eq("device-1"), any());
+        verify(eventDao).selectByDeviceAndEventIdForUpdate(eq("device-mobile-2"), any());
+        verify(routing).lockUser(7L);
     }
 
     @Test
@@ -889,7 +897,7 @@ class ProactiveServiceTest {
     }
 
     @Test
-    void sameOwnerOfficialWarningCopiesShareGroupAndOnlyOneCanClaim() {
+    void newSameOwnerOfficialWarningCopiesCanEachClaimIndependently() {
         DeviceEntity other = new DeviceEntity();
         other.setId("device-2");
         other.setMacAddress("AA:BB:CC:DD:EE:FF");
@@ -916,7 +924,6 @@ class ProactiveServiceTest {
         assertEquals(left.getDeliveryGroupKey(), right.getDeliveryGroupKey());
         assertEquals(0, left.getDeliveryGroupWindowHours());
 
-        AtomicReference<String> groupOwner = new AtomicReference<>();
         when(eventDao.claimPending(any(), any(), any())).thenAnswer(call -> {
             ProactiveEventEntity event = stored.get(call.getArgument(0) + ":" + call.getArgument(1));
             event.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
@@ -925,10 +932,8 @@ class ProactiveServiceTest {
         });
         when(eventDao.selectByDeviceAndEventId(any(), any())).thenAnswer(call ->
                 stored.get(call.getArgument(0) + ":" + call.getArgument(1)));
-        when(deliveryClaimDao.claim(eq(device.getUserId()), eq(left.getDeliveryGroupKey()),
-                any(), any(), any(), any(), anyInt())).thenAnswer(call ->
-                groupOwner.compareAndSet(null, call.getArgument(4)) ? 1 : 0);
-        when(eventDao.releaseClaim(any(), any(), any())).thenReturn(1);
+        assertEquals("MULTICAST", left.getDeliveryMode());
+        assertEquals("MULTICAST", right.getDeliveryMode());
 
         EventClaim firstClaim = new EventClaim();
         firstClaim.setMacAddress(device.getMacAddress());
@@ -937,9 +942,8 @@ class ProactiveServiceTest {
         secondClaim.setMacAddress(other.getMacAddress());
         secondClaim.setClaimToken("phone-token");
         assertTrue(service.claimEvent(first.getEventId(), firstClaim));
-        assertFalse(service.claimEvent(second.getEventId(), secondClaim));
-        verify(eventDao).releaseClaim(eq("device-2"), eq(second.getEventId()),
-                eq("phone-token"));
+        assertTrue(service.claimEvent(second.getEventId(), secondClaim));
+        verify(deliveryClaimDao, never()).claim(any(), any(), any(), any(), any(), any(), anyInt());
     }
 
     @Test
@@ -949,6 +953,28 @@ class ProactiveServiceTest {
 
         assertThrows(RenException.class,
                 () -> service.monitorEvent(device.getMacAddress(), "event-1"));
+    }
+
+    @Test
+    void sharedReminderAuthorityIsReadableForClaimAndClaimedContext() {
+        EventUpsert request = eventRequest();
+        request.setEventType(EventType.REMINDER);
+        request.setTopic(Topic.REMINDER);
+        ProactiveEventEntity reminder = eventEntity(request);
+        reminder.setDeliveryMode("MULTICAST");
+        reminder.setDeliveryStatus(DeliveryStatus.PENDING.name());
+        when(eventDao.selectMonitorEventByMacAndEventId(device.getMacAddress(), "event-1"))
+                .thenReturn(reminder);
+
+        assertEquals(EventType.REMINDER,
+                service.monitorEvent(device.getMacAddress(), "event-1").eventType());
+
+        reminder.setDeliveryStatus(DeliveryStatus.CLAIMED.name());
+        reminder.setClaimToken("claim-token");
+        when(eventDao.selectClaimedMonitorEvent(eq(device.getMacAddress()), eq("event-1"),
+                eq("claim-token"), any())).thenReturn(reminder);
+        assertEquals(EventType.REMINDER, service.claimedMonitorEvent(device.getMacAddress(),
+                "event-1", "claim-token").eventType());
     }
 
     @Test

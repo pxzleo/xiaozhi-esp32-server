@@ -339,7 +339,7 @@ public class ProactiveMonitorService {
     private boolean isVisible(ProactiveEventEntity event,
             Map<MonitorType, ProactiveMonitorEntity> monitors, PreferenceView preference, Date now) {
         EventType type = EventType.valueOf(event.getEventType());
-        if (type == EventType.MOBILE_ALERT) {
+        if (type == EventType.MOBILE_ALERT || type == EventType.REMINDER) {
             if (preference.mode() == Mode.TODAY_SILENT) return false;
             if (preference.mode() == Mode.CONSERVATIVE
                     && !Priority.CRITICAL.name().equals(event.getPriority())) return false;

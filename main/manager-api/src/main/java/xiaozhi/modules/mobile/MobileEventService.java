@@ -26,6 +26,7 @@ import xiaozhi.modules.mobile.MobileEventDTOs.EventStatus;
 import xiaozhi.modules.mobile.MobileEventDTOs.NotificationConfig;
 import xiaozhi.modules.mobile.MobileEventDTOs.LocationConfig;
 import xiaozhi.modules.mobile.MobileEventDTOs.StatusResponse;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingService;
 
 @Service
 public class MobileEventService {
@@ -45,14 +46,22 @@ public class MobileEventService {
     private static final Pattern PLACE_NAME = Pattern.compile("^[\\p{L}\\p{N} _-]{1,40}$");
     private final MobileInstanceDao instanceDao;
     private final MobileEventDao eventDao;
+    private final ProactiveDeliveryRoutingService routingService;
     private final ObjectMapper mapper = new ObjectMapper();
 
     public record MobileAuth(String instanceId, String installationId, int credentialVersion,
             int protocolVersion, String token) {}
 
-    public MobileEventService(MobileInstanceDao instanceDao, MobileEventDao eventDao) {
+    @org.springframework.beans.factory.annotation.Autowired
+    public MobileEventService(MobileInstanceDao instanceDao, MobileEventDao eventDao,
+            ProactiveDeliveryRoutingService routingService) {
         this.instanceDao = instanceDao;
         this.eventDao = eventDao;
+        this.routingService = routingService;
+    }
+
+    MobileEventService(MobileInstanceDao instanceDao, MobileEventDao eventDao) {
+        this(instanceDao, eventDao, null);
     }
 
     public ConfigResponse config(MobileAuth auth) {
@@ -101,6 +110,11 @@ public class MobileEventService {
                     }
                     result = new EventResult(event.eventId(), "deduped",
                             sameId == null ? "DUPLICATE_STATE_FLOW" : null);
+                }
+                if (routingService != null && "location.transition".equals(event.type())) {
+                    routingService.recordLocation(instance.getUserId(), instance.getCanonicalInstanceId(),
+                            event.entities().get("place_id"), event.entities().get("place_name"), event.state(),
+                            Date.from(event.occurredAt()));
                 }
             }
             insertAudit(instance.getMobileInstanceId(), result);

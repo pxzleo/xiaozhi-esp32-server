@@ -8,6 +8,7 @@ import org.springframework.transaction.annotation.Transactional;
 import xiaozhi.common.exception.RenException;
 import xiaozhi.modules.device.proactive.ProactiveEnums.Priority;
 import xiaozhi.modules.device.proactive.ProactiveService;
+import xiaozhi.modules.device.proactive.ProactiveDeliveryRoutingService;
 
 @Service
 public class MobileEventProcessingTransactionService {
@@ -17,14 +18,17 @@ public class MobileEventProcessingTransactionService {
     private final MobileInstanceDao instanceDao;
     private final ProactiveService proactiveService;
     private final MobileAlertDecisionPolicy decisionPolicy;
+    private final ProactiveDeliveryRoutingService routingService;
 
     public MobileEventProcessingTransactionService(MobileEventDao eventDao,
             MobileInstanceDao instanceDao, ProactiveService proactiveService,
-            MobileAlertDecisionPolicy decisionPolicy) {
+            MobileAlertDecisionPolicy decisionPolicy,
+            ProactiveDeliveryRoutingService routingService) {
         this.eventDao = eventDao;
         this.instanceDao = instanceDao;
         this.proactiveService = proactiveService;
         this.decisionPolicy = decisionPolicy;
+        this.routingService = routingService;
     }
 
     public MobileInstanceEntity instance(String instanceId) {
@@ -53,6 +57,10 @@ public class MobileEventProcessingTransactionService {
     @Transactional(rollbackFor = Exception.class)
     public ConversionResult convert(ConversionCommand command) {
         MobileEventEntity event = command.event();
+        MobileInstanceEntity unlockedInstance = instanceDao.selectCanonicalByInstance(
+                event.getMobileInstanceId());
+        if (unlockedInstance == null) return new ConversionResult(SUPERSEDED, null);
+        routingService.lockUser(unlockedInstance.getUserId());
         MobileEventEntity authoritative = eventDao.selectByEventIdForUpdate(
                 event.getMobileInstanceId(), event.getEventId());
         if (!sameRevision(authoritative, event, command.token())) {
