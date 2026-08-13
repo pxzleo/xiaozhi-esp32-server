@@ -376,6 +376,7 @@ test('builds strict mobile audit filters and rejects cross-device response rows'
     to: '',
   });
   assert.equal(query, 'mobile_instance_id=mob_0123456789abcdef0123456789abcdef&page=2&limit=20&type=notification.state_changed&processing_status=converted&delivery_status=delivered&from=2026-08-10T00%3A00%3A00Z');
+  assert.equal(buildMobileEventQuery({ page: 1, limit: 20 }), 'page=1&limit=20');
   assert.equal(mobileAuditBelongsToContext([], 'device-a', 'mob-a'), true);
   assert.equal(mobileAuditBelongsToContext([
     { device_id: 'device-a', mobile_instance_id: 'mob-a' },

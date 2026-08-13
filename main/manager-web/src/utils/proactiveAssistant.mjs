@@ -456,11 +456,10 @@ export function buildEventQuery(filters) {
 }
 
 export function buildMobileEventQuery(filters) {
-  const params = new URLSearchParams({
-    mobile_instance_id: filters.mobile_instance_id,
-    page: String(filters.page),
-    limit: String(filters.limit),
-  });
+  const params = new URLSearchParams();
+  if (filters.mobile_instance_id) params.set('mobile_instance_id', filters.mobile_instance_id);
+  params.set('page', String(filters.page));
+  params.set('limit', String(filters.limit));
   ['type', 'processing_status', 'delivery_status', 'from', 'to'].forEach(key => {
     if (filters[key]) params.set(key, filters[key]);
   });
